@@ -331,6 +331,7 @@ libs = ["libcublas.so.13", "libcublasLt.so.13"]
 cap = "120"
 url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-${engine.sha7}/${tarballName}"
 sha256 = "${sha(body(tarballName))}"
+glibc = "2.35"
 `;
   const downloads = "/r/local/downloads";
   const dir = `/r/local/engine-builds/${engine.sha7}-sm120`;
@@ -397,6 +398,14 @@ sha256 = "${sha(body(tarballName))}"
     expect(!r.ok && r.message).toContain("libcublas-archive.tar.xz holds no lib/libcublasLt.so.13");
     expect(await p.fs.exists(dir)).toBe(false);
     expect(await p.fs.exists(`${dir}.tmp-${process.pid}`)).toBe(false);
+  });
+  test("a machine below the prebuilt's glibc compiles, and says why, instead of installing a build its ldd -r would refuse", async () => {
+    const { p, uc } = await prebuiltSetup();
+    p.host.libc = "2.31";
+    expect((await uc.run({ gpu: 0 })).ok).toBe(true);
+    expect(p.shell.calls.some((c) => c[0] === "cmake")).toBe(true);
+    expect(p.shell.calls.some((c) => c[0] === "curl")).toBe(false);
+    expect(p.log.lines.some((l) => l.includes("glibc 2.31 on this machine"))).toBe(true);
   });
   test("--compile builds from source over a pinned prebuilt, and --portable (which makes one) always does", async () => {
     for (const options of [{ compile: true }, { portable: true }]) {

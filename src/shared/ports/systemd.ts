@@ -8,4 +8,8 @@ export interface Systemd {
   stop(unit: string): Promise<void>;
   isActive(unit: string): Promise<boolean>;
   mainPid(unit: string): Promise<number | null>;
+  /** whether this user's manager outlives their last session (logind's Linger); null when unreadable */
+  linger(): Promise<boolean | null>;
+  /** linger on for this user, false when refused (polkit's set-self-linger allows it by default) */
+  enableLinger(): Promise<boolean>;
 }

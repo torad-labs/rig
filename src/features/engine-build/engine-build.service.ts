@@ -19,6 +19,7 @@ import {
   engineTarballName,
   isBuilt,
   type Prebuilt,
+  prebuiltSkip,
 } from "../../shared/engine/engine.ts";
 import type { Layout } from "../../shared/layout.ts";
 import type {
@@ -104,8 +105,13 @@ export class BuildEngine {
     await this.deps.fs.mkdirp(this.layout.engineBuildsDir);
     await this.deps.fs.mkdirp(this.layout.logsDir);
 
-    // --portable produces the tarball a prebuilt is published from, so it always compiles
-    const prebuilt = options.compile || options.portable ? undefined : this.engine.prebuiltFor(cap);
+    // --portable produces the tarball a prebuilt is published from, so it always compiles; a
+    // machine below the published build's glibc compiles too (the build would fail its ldd -r)
+    const published =
+      options.compile || options.portable ? undefined : this.engine.prebuiltFor(cap);
+    const skip = published && prebuiltSkip(published, await this.deps.host.glibc());
+    if (skip) this.deps.log.info(`${skip}: compiling the engine here`);
+    const prebuilt = skip ? undefined : published;
     const marker = options.fromTarball
       ? await this.publisher.publishTarball(options.fromTarball, cap, dir)
       : prebuilt

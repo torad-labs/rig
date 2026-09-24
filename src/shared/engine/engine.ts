@@ -51,7 +51,18 @@ export const EngineSchema = v.strictObject({
     }),
   ),
   // A portable build of the pin for one card, published with the fork's release.
-  prebuilt: v.optional(v.array(v.strictObject({ cap, url: v.pipe(v.string(), v.url()), sha256 }))),
+  // glibc: the oldest C library it loads on, the one of the image it was built in (a machine below
+  // it compiles the engine instead of installing a build that would fail its ldd -r check)
+  prebuilt: v.optional(
+    v.array(
+      v.strictObject({
+        cap,
+        url: v.pipe(v.string(), v.url()),
+        sha256,
+        glibc: v.pipe(v.string(), v.regex(/^\d+\.\d+$/, "a glibc version like 2.35")),
+      }),
+    ),
+  ),
 });
 export type EngineConfig = v.InferOutput<typeof EngineSchema>;
 export type Prebuilt = NonNullable<EngineConfig["prebuilt"]>[number];
@@ -64,6 +75,17 @@ export interface Engine extends EngineConfig {
   binDir(cap: string): string;
   /** the pinned prebuilt build for this card, if one is published */
   prebuiltFor(cap: string): Prebuilt | undefined;
+}
+
+/** why the card's published build does not apply on this machine (a C library older than the
+ *  build's floor, or not glibc at all); undefined when it does */
+export function prebuiltSkip(entry: Prebuilt, glibc: string | null): string | undefined {
+  const floor = `the published sm_${entry.cap} build needs glibc ${entry.glibc} or newer`;
+  if (glibc === null) return `this machine's C library is not glibc (or unreadable); ${floor}`;
+  const [major = 0, minor = 0] = glibc.split(".").map(Number);
+  const [floorMajor = 0, floorMinor = 0] = entry.glibc.split(".").map(Number);
+  const below = major < floorMajor || (major === floorMajor && minor < floorMinor);
+  return below ? `glibc ${glibc} on this machine; ${floor}` : undefined;
 }
 
 /** the name a packed build of this commit for this card carries, cached or published */

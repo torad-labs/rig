@@ -37,12 +37,12 @@ goes through a port (`src/shared/ports/`); ports name capabilities, not tools.
 
 | command | feature | what it decides |
 |---|---|---|
-| `prepare` | machine-check | tools, card, driver — before any download; exit 1 / 3 / 4. A card with a published prebuilt needs only the driver, curl, tar and xz |
+| `prepare` | machine-check | tools, card, driver — before any download; exit 1 / 3 / 4. A card with a published prebuilt needs only the driver, curl, tar and xz, on a glibc at least the build's floor (`glibc` in `[[prebuilt]]`; below it the card compiles, and `noPrebuilt` says why) |
 | `build` | engine-build | the engine at its pin for this card → `local/engine-builds/<sha7>-sm<cap>/`, published in one rename with a marker written last: the pin's published build plus NVIDIA's CUDA runtime where `engine.toml` pins one for the card (`[[prebuilt]]`, `[cuda]`, each by sha256), else compiled; `--compile`; `--portable` tarball; `--from-tarball` |
 | `fetch` | pack-download | the source pack by sha256 (adopted by hard link, or aria2c/curl to a `.part` sibling) |
 | `derive` | pack-derivation | the served pack from the source pack — the head's `[derive]` step as data; published only at the pinned sha, a different edit is removed |
 | `verify` / `serve` | head-serving | complete build, pinned pack, assets present; `-np`/`-c` from the head's measured tiers, `--cache-ram` from RAM/4; the argv in one order (golden test = the live head's cmdline) |
-| `unit` | systemd-unit | the systemd user unit: `ExecStartPre=rig verify`, `ExecStart=<llama-server argv>`, the host's `--cache-ram` kept across re-renders, dated backup of a changed unit |
+| `unit` | systemd-unit | the systemd user unit: `ExecStartPre=rig verify`, `ExecStart=<llama-server argv>`, the host's `--cache-ram` kept across re-renders, dated backup of a changed unit; linger turned on for the user (`loginctl enable-linger`) so the head outlives logout, named with the command where refused |
 | `describe` | head-description | one JSON object for whatever sits in front of the head (a proxy's wizard) |
 | `up` | head-bringup | prepare → fetch → build → derive → unit → start; a serving head is left running unless `--restart`, and a restart is refused (exit 2) while a slot is processing |
 | `gate` | head-gating | the head's probes (`gates.toml`) on the gate card, one fresh server per leg; evidence under `local/gate-runs/<head>/<run>/`; `--live` adds the probes against the running head |

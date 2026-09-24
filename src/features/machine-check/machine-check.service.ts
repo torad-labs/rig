@@ -6,10 +6,11 @@
 // 7.2 GB fetch. On a root box with apt (a rented instance) the tools are installed first; on a
 // workstation they are only checked — a setup that apt-installs uninvited is the wrong kind of helpful.
 // A card engine.toml pins a prebuilt build for needs no compiler: only the driver and what fetches
-// and unpacks the build, and its driver is checked against the CUDA runtime the prebuilt carries.
+// and unpacks the build, and its driver is checked against the CUDA runtime the prebuilt carries;
+// on a machine whose glibc is older than the build's floor the card compiles, and says why.
 
-import type { Engine } from "../../shared/engine/engine.ts";
-import type { FileSystem, Gpu, GpuInfo, Log, Shell } from "../../shared/ports/index.ts";
+import { type Engine, prebuiltSkip } from "../../shared/engine/engine.ts";
+import type { FileSystem, Gpu, GpuInfo, Host, Log, Shell } from "../../shared/ports/index.ts";
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 
 export const REQUIRED_TOOLS = ["git", "cmake", "ninja", "nvidia-smi", "curl"] as const;
@@ -42,11 +43,14 @@ export interface CheckMachineReport {
   installed: boolean;
   /** build installs the published prebuilt for this card instead of compiling */
   prebuilt: boolean;
+  /** why the card's published prebuilt does not apply on this machine, when it has one */
+  noPrebuilt?: string;
 }
 export interface CheckMachineDeps {
   shell: Shell;
   gpu: Gpu;
   fs: FileSystem;
+  host: Host;
   log: Log;
 }
 
@@ -61,7 +65,9 @@ export class CheckMachine {
     const card = (await this.deps.shell.which("nvidia-smi"))
       ? await this.deps.gpu.query(options.gpu)
       : null;
-    const prebuilt = card !== null && this.engine.prebuiltFor(card.computeCap) !== undefined;
+    const published = card ? this.engine.prebuiltFor(card.computeCap) : undefined;
+    const noPrebuilt = published && prebuiltSkip(published, await this.deps.host.glibc());
+    const prebuilt = published !== undefined && noPrebuilt === undefined;
     const installed = await this.installIfRootBox(
       options.uid ?? process.getuid?.() ?? 1000,
       prebuilt ? PREBUILT_APT_PACKAGES : APT_PACKAGES,
@@ -72,8 +78,10 @@ export class CheckMachine {
     }
     const toolkitCuda = await this.deps.gpu.toolkitCuda();
     if (!prebuilt && toolkitCuda === null) missing.push("cuda toolkit (nvcc)");
-    if (missing.length)
-      return fail(ExitCode.Failure, `missing on this machine: ${missing.join(", ")}`);
+    if (missing.length) {
+      const why = noPrebuilt ? ` (${noPrebuilt}, so the engine compiles here)` : "";
+      return fail(ExitCode.Failure, `missing on this machine: ${missing.join(", ")}${why}`);
+    }
 
     if (!card) return fail(ExitCode.Failure, `no CUDA card at nvidia-smi index ${options.gpu}`);
     const supported = this.engine.supports(card.computeCap);
@@ -92,7 +100,8 @@ export class CheckMachine {
         : `the driver supports CUDA ${driverCuda} but the toolkit is ${runtimeCuda}: a build would load-fail on this driver; upgrade the driver or install a ${major(driverCuda)}.x toolkit`;
       return fail(ExitCode.Driver, message);
     }
-    return ok({ card, supported, toolkitCuda, driverCuda, installed, prebuilt });
+    const skipped = noPrebuilt ? { noPrebuilt } : {};
+    return ok({ card, supported, toolkitCuda, driverCuda, installed, prebuilt, ...skipped });
   }
 
   private async installIfRootBox(uid: number, packages: readonly string[]): Promise<boolean> {

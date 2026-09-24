@@ -33,9 +33,22 @@ jobs:
           test "$(stage/rig/dist/rig --version)" = "rig ${GITHUB_REF_NAME#v}"
           tar -C stage --owner=0 --group=0 --numeric-owner -czf rig-linux-x64.tar.gz rig
           sha256sum rig-linux-x64.tar.gz > rig-linux-x64.tar.gz.sha256
-      - name: publish
+      # A tag pushed again (a history rewrite moves its commit, never its tree) finds its release
+      # already published: the published assets must then be what this tag builds, byte for byte
+      # (the compiled binary is reproducible at the pinned bun), and nothing is replaced.
+      - name: publish, or check the release the tag already has
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "$GITHUB_REF_NAME" rig-linux-x64.tar.gz rig-linux-x64.tar.gz.sha256
-          install.sh --title "rig $GITHUB_REF_NAME" --generate-notes
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json tagName > /dev/null; then
+            mkdir published
+            gh release download "$GITHUB_REF_NAME" -D published -p 'rig-linux-x64.tar.gz*' -p install.sh
+            (cd published && sha256sum -c rig-linux-x64.tar.gz.sha256)
+            cmp install.sh published/install.sh
+            tar -C published -xzf published/rig-linux-x64.tar.gz
+            diff -r stage/rig published/rig
+            echo "$GITHUB_REF_NAME is already published with this tag's content"
+          else
+            gh release create "$GITHUB_REF_NAME" rig-linux-x64.tar.gz rig-linux-x64.tar.gz.sha256 \
+              install.sh --title "rig $GITHUB_REF_NAME" --generate-notes
+          fi
