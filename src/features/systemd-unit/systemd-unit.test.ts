@@ -68,6 +68,8 @@ describe("unit", () => {
     expect(p.fs.text("/home/u/.config/systemd/user/rig-bonsai-2-27b.service")).toContain(
       "--cache-ram 8192",
     );
+    // replaced by a rename: a reload another process triggers never reads half a unit
+    expect(p.fs.replaced).toEqual(["/home/u/.config/systemd/user/rig-bonsai-2-27b.service"]);
     r = await uc.install(head, { gpu: 0, cacheRam: 8192 });
     expect(r.ok && r.value.state).toBe("current");
     expect(p.systemd.ops.length).toBe(2);

@@ -105,7 +105,7 @@ export class ManageUnit {
       backup = `${path}.${compactStamp(this.deps.clock.now())}.bak`;
       await this.deps.fs.copy(path, backup);
     }
-    await this.deps.fs.writeText(path, rendered.value.text);
+    await this.deps.fs.replaceText(path, rendered.value.text);
     await this.deps.systemd.daemonReload();
     await this.deps.systemd.enable(unit);
     this.deps.log.info(

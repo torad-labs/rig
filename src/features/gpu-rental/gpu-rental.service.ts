@@ -107,6 +107,8 @@ export interface StatusReport {
   cost?: number;
   tunnelActive: boolean;
   healthy: boolean;
+  /** whether the cost control runs; a listed box found without it has it re-armed by status */
+  idleTimer: "active" | "inactive" | "re-armed" | "none";
 }
 
 export interface IdleReport {
@@ -192,7 +194,7 @@ export class RentGpu {
       return fail(ExitCode.Failure, message);
     }
     await this.deps.fs.remove(this.state.idleFile);
-    await this.deps.systemd.restart(IDLE_TIMER);
+    await this.armIdleTimer();
 
     const serving = await endpoint.serving();
     // the answer must be the pinned pack this local head resolves to, the way head-bringup
@@ -207,7 +209,7 @@ export class RentGpu {
     const offer = pick.value.offer;
     const undrived = head.undrived ? ` UNDRIVED: ${head.undrived}` : "";
     this.deps.log.info(
-      `READY: ${pick.value.label} box ${box.value.instanceId} at $${offer.dph.toFixed(3)}/h — ${serving.model}, ${serving.slots} slots, via ${endpoint.url}; idle timer armed (${idleBudget(config.value, box.value)} min)${undrived}`,
+      `READY: ${pick.value.label} box ${box.value.instanceId} at $${offer.dph.toFixed(3)}/h — ${serving.model}, ${serving.slots} slots, via ${endpoint.url}; idle timer armed (${idleExposure(idleBudget(config.value, box.value), offer.dph)})${undrived}`,
     );
     return ok({
       kind: "up",
@@ -255,10 +257,22 @@ export class RentGpu {
     const box = await this.state.box();
     const tunnelActive = await this.deps.systemd.isActive(TUNNEL_UNIT);
     const healthy = await this.endpoint(config.value).healthy();
-    if (!box) return ok({ box: null, listed: false, tunnelActive, healthy });
+    if (!box) return ok({ box: null, listed: false, tunnelActive, healthy, idleTimer: "none" });
 
     const listing = await this.deps.rental.show(box.instanceId);
     const hours = billedHours(box, this.deps.clock.now());
+    // A box billing with its cost control dead is the one state status must not only report:
+    // 2026-09-24 the timer went inactive at 09:08 with no stop in the journal, and box 52390478
+    // billed idle until a person noticed (8.3 h, ~$11.63).
+    const timerActive = await this.deps.systemd.isActive(IDLE_TIMER);
+    let idleTimer: StatusReport["idleTimer"] = timerActive ? "active" : "inactive";
+    if (listing && !timerActive) {
+      await this.armIdleTimer();
+      this.deps.log.warn(
+        `box ${box.instanceId} is billing and ${IDLE_TIMER} was not running: re-armed it (idle budget ${idleBudget(config.value, box)} min)`,
+      );
+      idleTimer = "re-armed";
+    }
     return ok({
       box,
       listed: listing !== null,
@@ -267,6 +281,7 @@ export class RentGpu {
       cost: billedCost(hours, box.dph),
       tunnelActive,
       healthy,
+      idleTimer,
     });
   }
 
@@ -603,7 +618,7 @@ export class RentGpu {
       const path = join(dir, name);
       const current = (await this.deps.fs.exists(path)) ? await this.deps.fs.readText(path) : null;
       if (current === text) continue;
-      await this.deps.fs.writeText(path, text);
+      await this.deps.fs.replaceText(path, text);
       changed = true;
     }
     if (changed) await this.deps.systemd.daemonReload();
@@ -612,6 +627,11 @@ export class RentGpu {
   // --- down ---
 
   private async stopLocalUnits(): Promise<void> {
+    try {
+      await this.deps.systemd.disable(IDLE_TIMER);
+    } catch {
+      /* not installed yet */
+    }
     for (const unit of [IDLE_TIMER, TUNNEL_UNIT]) {
       try {
         await this.deps.systemd.stop(unit);
@@ -619,6 +639,13 @@ export class RentGpu {
         /* not installed yet */
       }
     }
+  }
+
+  /** the idle timer enabled as well as started, so a restart of the user manager or of this
+   *  machine arms it again while the box bills; `down` disables it */
+  private async armIdleTimer(): Promise<void> {
+    await this.deps.systemd.enable(IDLE_TIMER);
+    await this.deps.systemd.restart(IDLE_TIMER);
   }
 
   /** destroyed and confirmed gone from the listing: a box still listed is still billing */
@@ -694,6 +721,12 @@ export class RentGpu {
 /** the idle minutes that destroy this box: its own budget from `up`, else vast.toml's */
 function idleBudget(config: VastConfig, box: BoxState): number {
   return box.idleMinutes ?? config.rental.idle_minutes;
+}
+
+/** the budget and what it lets a box nobody uses cost before it goes (box 52390478 was rented with
+ *  2,880 minutes for a training run and billed idle for hours after its session ended, 2026-09-24) */
+function idleExposure(minutes: number, dph: number): string {
+  return `${minutes} min: up to ~$${billedCost(minutes / 60, dph).toFixed(2)} idle before it is destroyed`;
 }
 
 /** one market row as the log shows it */
