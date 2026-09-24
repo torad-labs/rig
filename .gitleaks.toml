@@ -1,0 +1,38 @@
+# Repo-local gitleaks config, auto-loaded from the scan root.
+#
+# Written 2026-09-19 from the full-history scan of torad-labs/bonsai-head (renamed rig
+# 2026-09-20) at its first PR (5 findings on gitleaks 8.30.1, 3 on the v8.21.2 the org
+# workflow pins; every one of them opened and read, none live). Paths updated 2026-09-20
+# when the head's files moved under heads/<head>/ (rig); the old paths stay because a
+# history scan still sees them. It NARROWS false-positive classes
+# only — it never disables a rule and never turns off the default ruleset.
+#
+# `regexTarget = "match"` with FULL identifiers, never suffixes and never "line":
+# the line form suppresses the whole line a finding sits on, which would hide a real
+# credential sharing it, and the suffix form was measured on v8.21.2 to silence the
+# real secret too (measured 2026-08-02 on another repo's config, corrected there).
+#
+# PROVEN, not assumed (secret-response skill §5), against v8.21.2 on this tree, re-run
+# 2026-09-20 on the rig branch (history through the heads/ move):
+#   control, no config, canary planted on the SAME LINE as a gates.toml marker  6 findings
+#   red,     same canary, this config                    1 — the CANARY STILL FIRES
+#   green,   no canary, this config                                            0
+# A canary on its own line would trip either way; the point is the one beside an
+# allowlisted value. Re-run it after any edit to this file.
+#
+# Enforced by the `torad-standards` org ruleset via
+# torad-labs/.github .github/workflows/org-secret-scan.yml.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "needle-test fixture markers. This repo is the operating layer of a local llama.cpp head: it holds no credentials at all (the server binds loopback and the vast box is reached over ssh), so every hit here is a fixture or captured text."
+regexTarget = "match"
+regexes = [
+  # The needle probe plants markers in a ~120K-token haystack and asks the head to
+  # retrieve them; `secret` is the fixture's field name (`secret:` in needle-test.ts,
+  # `secret = ` in heads/<head>/gates.toml) and the value is the marker the assertion
+  # greps for. Pinned to the marker SHAPE (WORD-4 digits-WORD), so it cannot cover a
+  # key that happens to sit behind the same field name.
+  '''secret(: | = )"[A-Z]{3,10}-[0-9]{4}-[A-Z]{3,10}"''',
+]
