@@ -2,13 +2,23 @@ import type { Process, RunOptions, RunResult, Shell, SpawnOptions } from "../por
 
 export class BunShell implements Shell {
   async run(cmd: readonly string[], opts: RunOptions = {}): Promise<RunResult> {
-    const child = Bun.spawn([...cmd], {
-      ...(opts.cwd ? { cwd: opts.cwd } : {}),
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
-      stdin: opts.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    let child: ReturnType<typeof Bun.spawn<"ignore" | Uint8Array, "pipe", "pipe">>;
+    try {
+      child = Bun.spawn([...cmd], {
+        ...(opts.cwd ? { cwd: opts.cwd } : {}),
+        env: opts.env ? { ...process.env, ...opts.env } : process.env,
+        stdin: opts.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    } catch (e) {
+      // a machine without the tool (no systemctl in a container, no loginctl): the shell's 127, which
+      // every caller already handles as a failed run, not an exception out of the command
+      if ((e as { code?: string }).code === "ENOENT") {
+        return { code: 127, stdout: "", stderr: `${cmd[0]}: command not found` };
+      }
+      throw e;
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     if (opts.timeoutMs) timer = setTimeout(() => child.kill("SIGKILL"), opts.timeoutMs);
     const [stdout, stderr, code] = await Promise.all([

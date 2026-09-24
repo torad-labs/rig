@@ -17,11 +17,23 @@ rev = "efffdea64c1f9e93cc7fa6bb24f72ae9d66ecf51"
 file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf"
 sha256 = "3cb3f0056d2e34ee44245a64396004a21f8492573d6ce1266ec4b7222c131dd4"
 
-[served]                       # the pack the server loads: the source with the refusal ablation baked in (blocks 15-63; the head in blk.64 is untouched)
-file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf"
-sha256 = "53ab9023c54ce950191ccbb6f3a946d912179419b018f2f9b7e4ffe0c014a297"
+[served]                       # the pack the server loads: the source with our retrained MTP head (blk.64) and the refusal ablation baked in (blocks 15-63)
+file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf"
+sha256 = "389b6d3caefc1fa15eb94d82008562919142ec10051fc0109b464104ee52cae2"
 
-[[derive]]                     # how served is produced from source, byte-for-byte reproducibly (steps, in order)
+[public]                       # what a machine without the private adapter serves: the source with our retrained MTP head (the first step alone)
+file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf"
+sha256 = "0e5524befc7cf0c446a2d003bc5c71c39bd4816fdbb49dc38c248eab0e08d4d1"
+
+# How served is produced from source, byte-for-byte reproducibly (steps, in order). The two steps
+# write disjoint tensors (blk.64; the residual writers of blocks 15-63), so the order moves no byte.
+[[derive]]                     # our MTP head, retrained on the served pack's own continuations (evidence.md, "Draft head retrained"): blk.64's 15 tensors, same types and shapes; public, `rig fetch` gets it
+kind = "draft-head-splice"
+head = "bonsai-2-27b-mtp-r2.gguf"
+head_sha256 = "7fe0f04c61be6403934da9f4cd52282a20b3d815e6c123232f2f90b06c21bd7a"
+url = "https://github.com/torad-labs/rig/releases/download/bonsai-2-27b-mtp-r2/bonsai-2-27b-mtp-r2.gguf"
+
+[[derive]]
 kind = "pq2-lattice-ablation"
 lora = "assets/lora/bonsai-abliterate-lora.gguf"
 lora_sha256 = "f1669534803d340a496015f5c45125f3437b4d13ec764f40e34488ce83967f42"
@@ -31,9 +43,9 @@ lambda = 1.0
 row_cap = 0.10
 
 # The draft the served pack verifies, so every token is the pack's own (a draft is only ever
-# proposed, never trusted): the MTP head inside the pack, trained by ProCreations on the ORIGINAL
-# pack and drafting for the ablated one unchanged. 1.23x aggregate decode on a 5070 Ti at
-# acceptance 0.51-0.87 (evidence.md), for a tenth of the DFlash2 sidecar's memory, so every tier
+# proposed, never trusted): the MTP head inside the pack, ProCreations' architecture and export,
+# retrained by us (the first [[derive]] step). ProCreations' own head: 1.23x aggregate decode on a
+# 5070 Ti at acceptance 0.51-0.87 (evidence.md), for a tenth of the DFlash2 sidecar's memory, so every tier
 # loads it — the 5080 included. The engine rolls the recurrent state back n_max tokens on a
 # rejected draft, which costs n_max more state copies per slot (charged by the tier check).
 [speculative]
@@ -44,7 +56,7 @@ n_max = 2                      # each level is one more q8_0 state copy per slot
                                # M4 no cutoff 33.8 ms, 2.72 tokens, 80.5; M8 p_min 0.3 48.3 ms, 2.8 tokens, 59; M8 chain_p_min 0.3 38.0 ms, 2.82 tokens,
                                # 75.8. A position costs ~5.7 ms all in (1.5–1.8 ms of draft, the rest verify rows) against ~12 ms per generated
                                # token, so it pays only where the chain lands above ~0.45, and position 3 lands 0.24 here; ~5 ms per round also
-                               # scales with n_max itself (the rollback snapshots), open in the fork. p_min and chain_p_min (engine 51059c8,
+                               # scales with n_max itself (the rollback snapshots), open in the fork. p_min and chain_p_min (engine e785bcc,
                                # --spec-draft-p-min / --spec-draft-chain-p-min) stay available to a head that wants them (2026-09-21)
 weights_mib = 430              # the head's share of the model buffer: 6,970.08 - 6,539.67 MiB
 overhead_mib = 100             # the fixed part of the MTP draft context's compute buffer beyond its per-token growth (196 MiB at 131,072, 388 at 327,680)
@@ -100,7 +112,7 @@ ctx = 294912
 args = [
   "--cache-type-k", "q4_0", "--kv-mean-center", "assets/kv-mean-center-PQ2_0.gguf",
   "--cache-type-v", "q4_0",
-  "-cts", "q8_0",              # the Gated DeltaNet state cache stored in q8_0 (engine f5d4f29): 1,795.5 → 526.5 MiB at 4 slots; the update math stays f32 in the kernel
+  "-cts", "q8_0",              # the Gated DeltaNet state cache stored in q8_0 (engine e3a9015): 1,795.5 → 526.5 MiB at 4 slots; the update math stays f32 in the kernel
   "--attn-mask-bits",          # the attention mask as one bit per KV cell instead of f16 (engine PR #6): the same tokens and logprobs, 16x less mask in the compute
                                # buffers and per decode step across PCIe; 288 → 18 MiB in the target graph and 64 → 4 in the draft graph at this geometry
   "--chat-template-file", "assets/chat-template.jinja",

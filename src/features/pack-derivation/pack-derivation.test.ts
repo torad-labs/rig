@@ -72,6 +72,8 @@ function headToml(o: {
   loraSha: string;
   derive: boolean;
   splice?: string;
+  /** a public draft-head-splice step (a url) ahead of the ablation, and [public] pinning its output */
+  publicSplice?: { headSha: string; publicSha: string };
 }) {
   return `
 name = "tiny"
@@ -85,6 +87,18 @@ sha256 = "${o.sourceSha}"
 [served]
 file = "${o.derive ? "tiny-ablated.gguf" : "tiny.gguf"}"
 sha256 = "${o.servedSha}"
+${
+  o.publicSplice
+    ? `[public]
+file = "tiny-public.gguf"
+sha256 = "${o.publicSplice.publicSha}"
+[[derive]]
+kind = "draft-head-splice"
+head = "draft-head.gguf"
+head_sha256 = "${o.publicSplice.headSha}"
+url = "https://example.com/draft-head.gguf"`
+    : ""
+}
 ${
   o.derive
     ? `[[derive]]
@@ -134,6 +148,9 @@ async function setup(
     lora?: boolean;
     /** a draft-head-splice step after the ablation, its asset on disk unless false */
     splice?: boolean;
+    /** the public splice ahead of the ablation, its asset in local/packs unless draftHead is false */
+    publicSplice?: boolean;
+    publicSha?: string;
     draftHead?: Uint8Array | false;
     ports?: ReturnType<typeof fakePorts>;
   } = {},
@@ -150,21 +167,33 @@ async function setup(
       loraSha: sha(lora),
       derive: o.derive ?? true,
       ...(o.splice ? { splice: sha(draftHeadBytes()) } : {}),
+      ...(o.publicSplice
+        ? {
+            publicSplice: {
+              headSha: sha(draftHeadBytes()),
+              publicSha: o.publicSha ?? "1".repeat(64),
+            },
+          }
+        : {}),
     }),
   );
   if (o.source ?? true) await p.fs.writeBytes("/r/local/packs/tiny/tiny.gguf", source);
   if (o.lora ?? true) await p.fs.writeBytes("/r/heads/tiny/assets/lora.gguf", lora);
   if (o.splice && o.draftHead !== false)
     await p.fs.writeBytes("/r/heads/tiny/assets/draft-head.gguf", o.draftHead ?? draftHeadBytes());
+  if (o.publicSplice && o.draftHead !== false)
+    await p.fs.writeBytes("/r/local/packs/tiny/draft-head.gguf", o.draftHead ?? draftHeadBytes());
   const head = await loadHead(p.fs, layout, "tiny");
   if (!head.ok) throw new Error(head.message);
   return { p, head: head.value, uc: new DerivePack(p) };
 }
 
 /** what the bake must produce for this fixture: row 0 of every target flipped +1 -> 0, the rest untouched */
-async function expectedOutput(o: { splice?: boolean } = {}) {
+async function expectedOutput(
+  o: { splice?: boolean; publicSplice?: boolean; lora?: boolean } = {},
+) {
   const { p, head, uc } = await setup(o);
-  p.hasher.pinned.set(`${head.servedPath}.deriving`, "0".repeat(64)); // let publish accept whatever came out
+  p.hasher.pinned.set(`${head.servedPath}.deriving`, head.served.sha256); // let publish accept whatever came out
   const r = await uc.run(head);
   if (!r.ok) throw new Error(r.message);
   return p.fs.files.get(head.servedPath)!;
@@ -355,5 +384,50 @@ describe("derive: draft-head splice", () => {
     expect(head.servedPath).toBe(head.sourcePath);
     const both = await setup({ splice: true });
     expect(both.head.undrived).toBeUndefined();
+  });
+});
+
+describe("derive: a public draft head", () => {
+  const tensorBytesOf = (file: Uint8Array, name: string, length: number) => {
+    const t = parseGgufHeader("f", file).tensors.find((x) => x.name === name)!;
+    return Array.from(file.subarray(t.offset, t.offset + length));
+  };
+  test("without the adapter, the public pack is derived: the source with the public head, the ablation's tensors untouched, the reason carried", async () => {
+    const out = await expectedOutput({ publicSplice: true, lora: false });
+    const source = packBytes();
+    expect(tensorBytesOf(out, "blk.3.nextn.eh_proj.weight", 68)).toEqual(Array(68).fill(0x22));
+    for (const other of ["blk.0.ffn_down.weight", "blk.1.ffn_down.weight", "blk.0.attn_q.weight"])
+      expect(tensorBytesOf(out, other, N * 34)).toEqual(tensorBytesOf(source, other, N * 34));
+    const { head, uc } = await setup({ publicSplice: true, lora: false, publicSha: sha(out) });
+    const reason = head.undrived;
+    if (!reason) throw new Error("fixture: head is not undrived");
+    expect(reason).toContain("assets/lora.gguf");
+    expect(reason).toContain("serving the public pack tiny-public.gguf");
+    expect(head.servedPath).toBe("/r/local/packs/tiny/tiny-public.gguf");
+    expect(head.derive?.map((step) => step.kind)).toEqual(["draft-head-splice"]);
+    const r = await uc.run(head);
+    expect(r.ok && r.value).toEqual({
+      path: "/r/local/packs/tiny/tiny-public.gguf",
+      state: "derived",
+      spliced: 2,
+      reason,
+    });
+  });
+  test("with the adapter, the public splice then the ablation are the bytes of the ablation then a private splice: the steps write disjoint tensors", async () => {
+    const privateOrder = await expectedOutput({ splice: true });
+    const publicFirst = await expectedOutput({ publicSplice: true });
+    expect(Array.from(publicFirst)).toEqual(Array.from(privateOrder));
+    const { head, uc } = await setup({ publicSplice: true, servedSha: sha(publicFirst) });
+    expect(head.undrived).toBeUndefined();
+    const r = await uc.run(head);
+    expect(r.ok && r.value).toMatchObject({ state: "derived", flipped: 2 * K, spliced: 2 });
+  });
+  test("a public asset not fetched yet is no reason to go undrived; derive then names it", async () => {
+    const { head, uc } = await setup({ publicSplice: true, draftHead: false });
+    expect(head.undrived).toBeUndefined(); // `rig fetch` gets it; only a private asset decides
+    const r = await uc.run(head);
+    expect(!r.ok && r.message).toContain(
+      "the draft head is missing: /r/local/packs/tiny/draft-head.gguf",
+    );
   });
 });

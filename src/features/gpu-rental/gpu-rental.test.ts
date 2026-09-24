@@ -258,23 +258,29 @@ describe("vast up", () => {
     expect(p.rental.instances.size).toBe(1); // left running, not destroyed
   });
   test("the box's own derive going undrived (its own missing adapter, not ours) is warned here, not swallowed like every other step's stdout", async () => {
-    const { p, head, uc } = await setup();
-    p.ssh.on(/rig derive/, {
-      code: 0,
-      stdout: JSON.stringify({
-        path: "/workspace/rig/local/packs/bonsai-2-27b/source.gguf",
-        state: "undrived",
-        reason: "the [derive] adapter assets/lora/bonsai-abliterate-lora.gguf is not on the box",
-      }),
-      stderr: "",
-    });
-    const r = await uc.up(head, { gpu: "H100_SXM" });
-    expect(r.ok).toBe(true);
-    expect(
-      p.log.lines.some(
-        (l) => l.startsWith("warn") && l.includes("box 1000") && l.includes("is not on the box"),
-      ),
-    ).toBe(true);
+    // the source pack ("undrived") or the [public] pack, derived there ("derived"): a lesser pack either way
+    for (const [state, file] of [
+      ["undrived", "source.gguf"],
+      ["derived", "public.gguf"],
+    ]) {
+      const { p, head, uc } = await setup();
+      p.ssh.on(/rig derive/, {
+        code: 0,
+        stdout: JSON.stringify({
+          path: `/workspace/rig/local/packs/bonsai-2-27b/${file}`,
+          state,
+          reason: "the [derive] adapter assets/lora/bonsai-abliterate-lora.gguf is not on the box",
+        }),
+        stderr: "",
+      });
+      const r = await uc.up(head, { gpu: "H100_SXM" });
+      expect(r.ok).toBe(true);
+      expect(
+        p.log.lines.some(
+          (l) => l.startsWith("warn") && l.includes("box 1000") && l.includes("is not on the box"),
+        ),
+      ).toBe(true);
+    }
   });
 });
 

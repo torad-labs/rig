@@ -69,7 +69,7 @@ export interface BuildEngineDeps {
 
 /** what a portable build carries from the compiler that built it: ggml's CPU backend links the
  *  OpenMP runtime, and a machine with only the driver has libstdc++ and libgcc_s but no libgomp
- *  (ubuntu:24.04: the first prebuilt of 1399830 refused to publish there, 2026-09-24, on
+ *  (ubuntu:24.04: the first prebuilt of c008fe8 refused to publish there, 2026-09-24, on
  *  GOMP_loop_nonmonotonic_dynamic_start). GCC's runtime library exception allows shipping it. */
 export const PORTABLE_RUNTIME = ["libgomp.so.1"] as const;
 

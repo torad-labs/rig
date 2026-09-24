@@ -17,6 +17,11 @@ const hfRepo = v.pipe(
   v.string(),
   v.regex(/^[\w.-]+\/[\w.-]+$/, "a Hugging Face repo id owner/name"),
 );
+const httpsUrl = v.pipe(v.string(), v.regex(/^https:\/\/\S+$/, "an https:// URL"));
+// A derive step's asset with a url is public: `rig fetch` fetches it, by sha256, into the head's
+// packs directory (local/, which an upgrade never touches), and the path is relative to that
+// directory. Without one it is private: fetched out of band into the head's own directory.
+const assetUrl = { url: v.optional(httpsUrl) };
 
 // A draft head the served pack verifies (speculative decoding): exact output, more accepted tokens
 // per weight read. Its footprint is charged to every tier that loads it — weights, a fixed overhead
@@ -38,7 +43,7 @@ const speculativeFootprint = {
       v.check((p) => p < 1, "p_min must be below 1"),
     ),
   ),
-  // --spec-draft-chain-p-min (engine 51059c8): a round stops drafting once the product of the chain's top-1
+  // --spec-draft-chain-p-min (engine e785bcc): a round stops drafting once the product of the chain's top-1
   // probabilities is under this, a position's expected yield; absent, only p_min gates. The engine applies it
   // to draft-simple, draft-eagle3 and draft-mtp and ignores it elsewhere, so the schema refuses it for the
   // other types (the check on SpeculativeSchema below). Below 1 for the same reason as p_min: a product of
@@ -104,6 +109,7 @@ export const DeriveSchema = v.variant("kind", [
     rows: posInt,
     lambda: v.pipe(v.number(), v.minValue(0), v.maxValue(1)),
     row_cap: v.pipe(v.number(), v.minValue(0), v.maxValue(1)),
+    ...assetUrl,
   }),
   // Write a draft head over the pack's own (a retrained MTP block): every tensor in the asset
   // replaces the pack's tensor of the same name, type and shape, byte for byte, and nothing else
@@ -112,6 +118,7 @@ export const DeriveSchema = v.variant("kind", [
     kind: v.literal("draft-head-splice"),
     head: relPath,
     head_sha256: hex(64),
+    ...assetUrl,
   }),
 ]);
 
@@ -134,6 +141,9 @@ export const HeadSchema = v.strictObject({
     sha256: hex(64),
   }),
   served: v.strictObject({ file: relPath, sha256: hex(64) }),
+  // the pack the public steps alone produce (the leading [[derive]] steps with a url): what a
+  // machine without the private assets serves, instead of the source pack
+  public: v.optional(v.strictObject({ file: relPath, sha256: hex(64) })),
   derive: v.optional(v.pipe(v.array(DeriveSchema), v.minLength(1))), // [[derive]] steps, applied in order
   speculative: v.optional(SpeculativeSchema),
   context: v.strictObject({ model: posInt, advertise: posInt }),
@@ -170,14 +180,22 @@ export const HeadSchema = v.strictObject({
 export type HeadConfig = v.InferOutput<typeof HeadSchema>;
 export type Derive = v.InferOutput<typeof DeriveSchema>;
 
-/** the private file a derive step reads, pinned by its sha256 (fetched out of band, never in git) */
-export function deriveAsset(step: Derive): { path: string; sha256: string } {
+/** the file a derive step reads, pinned by its sha256: public (fetched from url into the packs
+ *  directory) or private (fetched out of band into the head's directory, never in git) */
+export function deriveAsset(step: Derive): { path: string; sha256: string; url?: string } {
+  const url = step.url ? { url: step.url } : {};
   switch (step.kind) {
     case "pq2-lattice-ablation":
-      return { path: step.lora, sha256: step.lora_sha256 };
+      return { path: step.lora, sha256: step.lora_sha256, ...url };
     case "draft-head-splice":
-      return { path: step.head, sha256: step.head_sha256 };
+      return { path: step.head, sha256: step.head_sha256, ...url };
   }
+}
+
+/** the leading [[derive]] steps whose assets are public: the steps `[public]` pins the output of */
+export function publicSteps(derive: readonly Derive[]): Derive[] {
+  const end = derive.findIndex((step) => !step.url);
+  return derive.slice(0, end === -1 ? derive.length : end);
 }
 export type Tier = v.InferOutput<typeof TierSchema>;
 export type Speculative = v.InferOutput<typeof SpeculativeSchema>;
@@ -257,6 +275,32 @@ export function headInvariants(head: HeadConfig): string[] {
   }
   if (head.derive && served.sha256 === source.sha256) {
     violations.push("a [derive] step must produce a different file than source");
+  }
+  const derive = head.derive ?? [];
+  const leading = publicSteps(derive).length;
+  if (derive.slice(leading).some((step) => step.url)) {
+    violations.push(
+      "a [derive] step with a url follows a private one: the public steps come first, so [public] is the prefix every machine can derive",
+    );
+  }
+  const mixed = leading > 0 && leading < derive.length;
+  if (mixed && !head.public) {
+    violations.push(
+      "[derive] mixes public and private steps but declares no [public]: a machine without the private assets would serve the source pack",
+    );
+  }
+  if (head.public && !mixed) {
+    violations.push(
+      "[public] needs public [derive] steps (a url) followed by private ones: otherwise the served pack is the public one",
+    );
+  }
+  if (
+    head.public &&
+    [source, served].some((p) => p.file === head.public?.file || p.sha256 === head.public?.sha256)
+  ) {
+    violations.push(
+      "[public] must be its own file and bytes, neither the source nor the served pack",
+    );
   }
   if (context.advertise > context.model) {
     violations.push(

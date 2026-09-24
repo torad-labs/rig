@@ -575,7 +575,7 @@ export class RentGpu {
       return false;
     }
     const report = parseJson<{ state?: string; reason?: string }>(result.stdout);
-    if (report?.state === "undrived" && report.reason) {
+    if (report?.reason) {
       this.deps.log.warn(`box ${box.instanceId}: ${report.reason}`);
     }
     return true;

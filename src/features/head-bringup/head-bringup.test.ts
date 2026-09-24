@@ -51,7 +51,8 @@ describe("up", () => {
       return { status: polls < 5 ? 503 : 200, text: "" };
     });
     p.http.json(/\/props$/, {
-      model_path: "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      model_path:
+        "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
       total_slots: 4,
     });
     p.systemd.pids.set("rig-bonsai-2-27b.service", 4243);
@@ -65,7 +66,7 @@ describe("up", () => {
         steps: { fetch: "present", build: "present", derive: "present", unit: "current" },
         linger: true,
         start: "started",
-        serving: { model: "Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf", slots: 4 },
+        serving: { model: "Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf", slots: 4 },
       },
     });
     expect(p.log.lines.at(-1)).toContain("pid 4243");
@@ -131,7 +132,7 @@ describe("up", () => {
     expect(p.systemd.ops).toEqual([]);
     p.http.on(/\/metrics$/, () => ({ status: 200, text: metrics(0) }));
     p.http.json(/\/props$/, {
-      model_path: "a/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      model_path: "a/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
       total_slots: 1,
     });
     p.systemd.pids.set("rig-bonsai-2-27b.service", 7);
@@ -166,7 +167,7 @@ describe("up", () => {
       return { status: 200, text: "" };
     });
     p.http.json(/\/props$/, {
-      model_path: "/elsewhere/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      model_path: "/elsewhere/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
       total_slots: 4,
     });
     let r = await uc.run(head, { gpu: 0 }); // no main pid: something else holds the port
@@ -177,7 +178,7 @@ describe("up", () => {
     polls = 0; // the port is free again, the unit starts, a foreign pack answers
     r = await uc.run(head, { gpu: 0 });
     expect(!r.ok && r.message).toContain(
-      "serves other.gguf, not the pinned Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      "serves other.gguf, not the pinned Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
     );
   });
   test("the port's owner must be the unit's main process: a leftover server answering 200 is named, not reported as the head", async () => {
@@ -188,7 +189,8 @@ describe("up", () => {
       return { status: 200, text: "" };
     });
     p.http.json(/\/props$/, {
-      model_path: "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      model_path:
+        "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
       total_slots: 4,
     });
     p.systemd.pids.set("rig-bonsai-2-27b.service", 4243);
