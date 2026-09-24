@@ -1,0 +1,4 @@
+[test]
+# rig's own tests only: local/ holds the engine checkout, whose thousands of upstream tests are not ours
+root = "src"
+coverageSkipTestFiles = true

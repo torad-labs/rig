@@ -1,0 +1,44 @@
+# Renting a card for a head on vast.ai: what `rig vast up` asks the market for (`--gpus N` for a
+# multi-card box; the count is never written here, so a query cannot carry two). One box at a
+# time; its state lives in local/rented-box/. The image is stock CUDA devel on Ubuntu 24.04 (the box
+# builds the engine for its card unless local/rented-box/cached-builds has a cached tarball for that sm). The
+# server on the box binds loopback and is reached only through an ssh tunnel to local_port —
+# no credentials leave this machine and no vast port is mapped.
+[rental]
+image = "nvidia/cuda:13.0.3-devel-ubuntu24.04"
+disk_gb = 40
+label = "rig"
+local_port = 8100
+idle_minutes = 45              # a box nobody talks to is destroyed, not left billing overnight
+remote_dir = "/workspace/rig"
+query = "verified=true rentable=true reliability>0.98 cuda_max_good>=13.0 cpu_ram>=48 inet_down>=200 direct_port_count>=2"
+
+# per card class: the memory bandwidth floor (decode at 1.72 bpw is bandwidth-bound) and the
+# price ceiling; a class not listed gets [cards.default]
+[cards.default]
+min_bandwidth = 0
+max_dph = 3.00
+[cards.RTX_5090]
+min_bandwidth = 1300
+max_dph = 0.70
+# vast names the Blackwell 96 GiB card by its three variants, never bare "RTX_PRO_6000" — that
+# key matched no offer. All three measure ~1,400 GB/s: Max-Q cuts power and clocks, not the
+# memory subsystem, so it decodes like the others for less (prefill is where it gives ground).
+[cards.RTX_PRO_6000_WS]
+min_bandwidth = 1300
+max_dph = 1.50
+[cards."RTX_PRO_6000_Max-Q"]
+min_bandwidth = 1300
+max_dph = 1.50
+[cards.RTX_PRO_6000_S]
+min_bandwidth = 1300
+max_dph = 1.60
+[cards.H100_SXM]
+min_bandwidth = 2700
+max_dph = 2.90
+[cards.H100_NVL]
+min_bandwidth = 3100
+max_dph = 3.00
+[cards.H200]
+min_bandwidth = 3800
+max_dph = 3.60

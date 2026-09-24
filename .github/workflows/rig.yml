@@ -1,0 +1,31 @@
+# rig's own checks: the unit suite over in-memory ports (no GPU, no model), the type check, the
+# layer lint (a slice never imports a sibling), and a compile of the binary the rented boxes
+# run. The submodule is not fetched: the engine test reads the committed gitlink and compares
+# it to engine.toml, which is the pin the two must agree on. Nothing here talks to a card —
+# the gates that do run through `rig gate` on a machine with one.
+name: rig
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun test
+      - run: bun run build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rig-linux-x64
+          path: dist/rig
+          retention-days: 7
