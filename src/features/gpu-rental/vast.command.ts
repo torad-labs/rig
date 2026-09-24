@@ -81,7 +81,8 @@ function describeStatus(status: StatusReport): string {
   if (!status.box) return `no box; ${tunnel}`;
   const listed = status.listed ? status.status : "NOT LISTED";
   const server = `server ${status.healthy ? "healthy" : "unreachable"}`;
-  return `box ${status.box.instanceId} ${status.box.gpu} $${status.box.dph}/h: ${listed}, ${status.hours} h (~$${status.cost}); ${tunnel}, ${server}`;
+  const timer = `idle timer ${status.idleTimer === "re-armed" ? "WAS NOT RUNNING, re-armed" : status.idleTimer}`;
+  return `box ${status.box.instanceId} ${status.box.gpu} $${status.box.dph}/h: ${listed}, ${status.hours} h (~$${status.cost}); ${tunnel}, ${server}, ${timer}`;
 }
 
 function describeBench(bench: BenchReport): string {

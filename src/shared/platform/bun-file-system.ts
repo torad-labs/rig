@@ -20,6 +20,12 @@ export class BunFileSystem implements FileSystem {
     await fsp.mkdir(dirname(path), { recursive: true });
     await Bun.write(path, text);
   }
+  async replaceText(path: string, text: string) {
+    await fsp.mkdir(dirname(path), { recursive: true });
+    const staged = `${path}.tmp-${process.pid}`;
+    await Bun.write(staged, text);
+    await fsp.rename(staged, path);
+  }
   async writeBytes(path: string, bytes: Uint8Array) {
     await fsp.mkdir(dirname(path), { recursive: true });
     await Bun.write(path, bytes);

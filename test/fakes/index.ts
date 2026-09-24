@@ -66,6 +66,12 @@ export class InMemoryFileSystem implements FileSystem {
   async writeText(path: string, text: string) {
     this.put(path, text);
   }
+  /** every replaced path, in order: the renames a partial-file reader can never see into */
+  replaced: string[] = [];
+  async replaceText(path: string, text: string) {
+    this.replaced.push(path);
+    this.put(path, text);
+  }
   async writeBytes(path: string, bytes: Uint8Array) {
     this.files.set(path, bytes);
     this.dirs.add(dirOf(path));
