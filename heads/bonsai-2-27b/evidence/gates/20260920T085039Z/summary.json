@@ -1,0 +1,21 @@
+{
+  "head": "bonsai-2-27b",
+  "engine": "da69dc5",
+  "served": "e7b996703d8a1a7cbc59a92494b5a02537b76ca4c53f2f7932aa6041e6f62f7b",
+  "run": "20260920T085039Z",
+  "dir": "<rig>/var/gates/bonsai-2-27b/20260920T085039Z",
+  "gpu": null,
+  "probes": [
+    {
+      "name": "sessions",
+      "pass": true,
+      "summary": "4/4 sessions retrieved their own marker and no other"
+    },
+    {
+      "name": "concurrency",
+      "pass": true,
+      "summary": "aggregate M=1 32 → M=4 60 tok/s (1.88x)"
+    }
+  ],
+  "pass": true
+}
