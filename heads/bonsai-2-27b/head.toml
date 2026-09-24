@@ -1,0 +1,133 @@
+# Ternary Bonsai 2 27B — the head splice's `bonsai` provider row points at. Everything rig knows
+# about this model is here, as data: what to fetch, what to serve and how it is derived, the
+# windows, the geometry constants the -np/-c tiers are checked against, and the arguments the
+# server is loaded with. The WHY behind each number is in evidence.md beside this file.
+name = "bonsai-2-27b"
+title = "Ternary Bonsai 2 27B (PQ2_0, 1.72 bpw)"
+port = 8099
+gpu = 0
+
+# The published pack (prism-ml/Ternary-Bonsai-2-27B-gguf @ 6ed5e12, PQ2_0, sha256 3907dc16…) with
+# ProCreations' Bonsai-trained MTP head appended: its 851 tensors are byte-identical to Prism's
+# (the head's TRAINING.md verifies every payload after export), blk.64 is the 424.7M-parameter
+# next-token head at Q8_0, and qwen35.nextn_predict_layers = 1 is what --spec-type draft-mtp reads.
+[source]                       # the published pack, pinned to a revision and its bytes
+repo = "ProCreations/Ternary-Bonsai-2-27B-MTP"
+rev = "efffdea64c1f9e93cc7fa6bb24f72ae9d66ecf51"
+file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf"
+sha256 = "3cb3f0056d2e34ee44245a64396004a21f8492573d6ce1266ec4b7222c131dd4"
+
+[served]                       # the pack the server loads: the source with the refusal ablation baked in (blocks 15-63; the head in blk.64 is untouched)
+file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf"
+sha256 = "53ab9023c54ce950191ccbb6f3a946d912179419b018f2f9b7e4ffe0c014a297"
+
+[[derive]]                     # how served is produced from source, byte-for-byte reproducibly (steps, in order)
+kind = "pq2-lattice-ablation"
+lora = "assets/lora/bonsai-abliterate-lora.gguf"
+lora_sha256 = "f1669534803d340a496015f5c45125f3437b4d13ec764f40e34488ce83967f42"
+blocks = "15-63"
+rows = 512
+lambda = 1.0
+row_cap = 0.10
+
+# The draft the served pack verifies, so every token is the pack's own (a draft is only ever
+# proposed, never trusted): the MTP head inside the pack, trained by ProCreations on the ORIGINAL
+# pack and drafting for the ablated one unchanged. 1.23x aggregate decode on a 5070 Ti at
+# acceptance 0.51-0.87 (evidence.md), for a tenth of the DFlash2 sidecar's memory, so every tier
+# loads it — the 5080 included. The engine rolls the recurrent state back n_max tokens on a
+# rejected draft, which costs n_max more state copies per slot (charged by the tier check).
+[speculative]
+type = "draft-mtp"
+n_max = 2                      # each level is one more q8_0 state copy per slot (4 × 44 MiB on the 5080); ProCreations' sweep: n2 174.6 > n3 172.7
+                               # > n1 153.6 tok/s. Measured here on the 173–187K conversation,
+                               # per round: M2 27.0 ms = 3.5 draft + 23.5 verify, 2.2–2.4 tokens, 78–102 tok/s at acc rate/pos (0.75–0.78, 0.55–0.62);
+                               # M4 no cutoff 33.8 ms, 2.72 tokens, 80.5; M8 p_min 0.3 48.3 ms, 2.8 tokens, 59; M8 chain_p_min 0.3 38.0 ms, 2.82 tokens,
+                               # 75.8. A position costs ~5.7 ms all in (1.5–1.8 ms of draft, the rest verify rows) against ~12 ms per generated
+                               # token, so it pays only where the chain lands above ~0.45, and position 3 lands 0.24 here; ~5 ms per round also
+                               # scales with n_max itself (the rollback snapshots), open in the fork. p_min and chain_p_min (engine 51059c8,
+                               # --spec-draft-p-min / --spec-draft-chain-p-min) stay available to a head that wants them (2026-09-21)
+weights_mib = 430              # the head's share of the model buffer: 6,970.08 - 6,539.67 MiB
+overhead_mib = 100             # the fixed part of the MTP draft context's compute buffer beyond its per-token growth (196 MiB at 131,072, 388 at 327,680)
+bytes_per_token = 1216         # per pooled token: the head's one full-attention layer's q4_0 K + V (1,152: 144 MiB at 131,072, 360 at 327,680) + its compute buffer (64, the
+                               # bit-packed mask under --attn-mask-bits below; 1,024 as f16: 64.00 → 4.00 MB in the draft graph at 65,536 cells × 512, CPU, 2026-09-21).
+# Prompt and generated rows both enter the MTP cache. Its allocation follows the target's shared
+# pool: 294,912 cells across four slots on the 5080, not per slot. Q4_0 K/V is unchanged; the
+# draft's KV plus per-token compute is charged above for the entire pool (342 MiB on the 5080).
+args = ["-ctkd", "q4_0", "-ctvd", "q4_0"]
+
+[context]
+model = 262144                 # the trained window: n_ctx_slot on every card
+advertise = 245760             # what one conversation is told it may use (15/16 of the window)
+
+[geometry]                     # constants every tier is checked against (see evidence.md)
+kv_bytes_per_token = 18432     # q4_0 K + V over the 16 attention layers: 7,488 MiB measured at 425,984
+compute_bytes_per_token = 64   # the compute buffer grows 64 B per pooled token: the attention mask at n_ubatch 512, one bit per cell under --attn-mask-bits
+                               # (engine PR #6; 1 KiB as f16: 198 / 262 / 390 MiB at 64K / 128K / 256K). Measured 288.00 → 18.00 MB at 294,912 cells (CPU, 2026-09-21).
+weights_mib = 6900
+state_per_slot_mib = 44        # one Gated DeltaNet recurrent state in q8_0 (-cts, below): RS buffer 526.5 MiB at 4 slots × (1 + n_max 2) copies and 1,579.5 at
+                               # 4 × (1 + n_max 8) on the 5080, 2026-09-21 — 43.875 per copy, linear in n_max as tierNeedMiB charges it; 150 in f32 (1,795.5 MiB)
+compute_mib = 114              # the compute buffer's fixed part at no output rows, lens off, bit-packed mask: 167.22 MiB measured at 294,912 on the 5080 at 12 rows
+                               # (2026-09-21) less 18 per-token and 12 × 3 rows; 330 was the same buffer with the lens graph and the f16 mask (618.28 less 288)
+compute_per_output_row_mib = 3 # the compute buffer grows 3.0 MiB per output row: n_outputs_max = slots × (1 + n_max), 167.22 MiB at 12 rows and 239.22 at 36
+                               # on the 5080 (2026-09-21); charged slots × (1 + n_max) on a drafting tier, slots on one that does not
+
+# -np / -c by the card's VRAM, largest first; the first tier whose min_vram_mib fits is used.
+# The window one conversation may use is context.model on every card: a bigger card buys slots
+# sharing one --kv-unified pool, never a longer window. Every tier carries the MTP head: its
+# weights_mib, overhead_mib and bytes_per_token above, plus state_per_slot_mib × n_max of
+# rollback snapshots per slot (the numbers live in those fields, not here).
+[[geometry.tiers]]
+min_vram_mib = 90000           # RTX PRO 6000 (96 GiB): 13.5 windows + the draft head
+slots = 16
+ctx = 3538944
+[[geometry.tiers]]
+min_vram_mib = 76000           # H100 / H200 (80 GiB): 11 windows + the draft head
+slots = 16
+ctx = 2883584
+[[geometry.tiers]]
+min_vram_mib = 30000           # 5090 (32 GiB): 3 windows + the draft head
+slots = 8
+ctx = 786432
+[[geometry.tiers]]
+min_vram_mib = 16000           # 5080 (16 GiB): 1.125 windows + the MTP head (1.625 windows undrafted: at 425,984 the head's charge is what no longer fits; 327,680 OOMed on the
+                               # head's 388 MiB compute buffer under the f16 mask, 2026-09-20)
+slots = 4
+ctx = 294912
+
+[runtime]
+# how the pack is loaded, wherever it is loaded (the gates use the same list); "assets/…" paths
+# resolve against this head's directory
+args = [
+  "--cache-type-k", "q4_0", "--kv-mean-center", "assets/kv-mean-center-PQ2_0.gguf",
+  "--cache-type-v", "q4_0",
+  "-cts", "q8_0",              # the Gated DeltaNet state cache stored in q8_0 (engine f5d4f29): 1,795.5 → 526.5 MiB at 4 slots; the update math stays f32 in the kernel
+  "--attn-mask-bits",          # the attention mask as one bit per KV cell instead of f16 (engine PR #6): the same tokens and logprobs, 16x less mask in the compute
+                               # buffers and per decode step across PCIe; 288 → 18 MiB in the target graph and 64 → 4 in the draft graph at this geometry
+  "--chat-template-file", "assets/chat-template.jinja",
+  "--reasoning-format", "deepseek",
+  "--checkpoint-every", "16384",
+]
+sampling = ["--temp", "1.0", "--top-p", "0.95", "--top-k", "20"]   # the model's own recommended values; llama-server does not read them from the GGUF
+extra = ["-lv", "4"]
+
+[runtime.lens]
+# Live-only (never a gate leg): preserve the complete diagnostics bundle behind this switch.
+# Set enabled = true and reinstall/restart the serving unit to collect lens/channel/pull output.
+enabled = false
+# --lens-channels reads each lens layer's block input, attention and FFN parts; --pull-layers runs the
+# training-pull detector on them before the sampler and writes "pull" into each token's line
+# (operator: "finish the job", 2026-09-21). Four rows per lens layer per token cross to the host with
+# channels on; the decode cost is measured against the 45–52 tok/s this head ran at 107k–135k context.
+args = [
+  "--lens-layers", "48,52,56,60,62,63",
+  "--lens-out", "local/lens/bonsai-2-27b",
+  "--lens-top", "12",
+  "--lens-channels",
+  "--pull-layers", "48,52,56,60,62,63",
+  "--pull-action", "log",
+]
+
+[client]                       # facts whatever sits in front of this head must know
+rejects_reasoning_effort = true   # the chat template raises on any reasoning_effort it does not know
+slot_pinning = true               # pin each conversation to a slot (id_slot); the server picks by similarity otherwise
+any_model_id = true               # llama-server serves the loaded model for any model id

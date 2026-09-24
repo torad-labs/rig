@@ -1,0 +1,23 @@
+{
+  "engine": "13998300f70388c1fbc865b411a975a8c1f84cfe",
+  "aliases": {
+    "-m": ["--model", "-m"],
+    "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],
+    "--jinja": ["--jinja", "--no-jinja"],
+    "-fa": ["--flash-attn", "-fa"],
+    "-c": ["--ctx-size", "-c"],
+    "-np": ["--parallel", "-np"],
+    "--kv-unified": ["--kv-unified", "--no-kv-unified", "-kvu", "-no-kvu"],
+    "--cache-ram": ["--cache-ram", "-cram"],
+    "--no-cache-idle-slots": ["--cache-idle-slots", "--no-cache-idle-slots"],
+    "--metrics": ["--metrics"],
+    "--host": ["--host"],
+    "--port": ["--port"],
+    "--spec-type": ["--spec-type"],
+    "--spec-draft-n-max": ["--spec-draft-n-max"],
+    "--spec-draft-p-min": ["--draft-p-min", "--spec-draft-p-min"],
+    "--spec-draft-chain-p-min": ["--spec-draft-chain-p-min"],
+    "-md": ["--model-draft", "--spec-draft-model", "-md"],
+    "-ngld": ["--gpu-layers-draft", "--n-gpu-layers-draft", "--spec-draft-ngl", "-ngld"]
+  }
+}

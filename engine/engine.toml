@@ -1,0 +1,119 @@
+# The engine pin: which commit of torad-labs/llama.cpp every build is made from, and which cards
+# those kernels are trusted on. engine/llama.cpp is the same commit as a submodule (the source a
+# developer edits); a test holds the two equal. Move the pin when a commit past it changes what a
+# head SERVES: 5a7c6a9 (DFlash2 draft heads for --spec-type draft-dflash) is what moved it past da69dc5;
+# f0d83e0 (the fused rank-1 LoRA) rides along unused — the ablation is baked, no --lora is passed;
+# f400b3b (the logit lens inside the served graph, --lens-layers/--lens-out, reviewed) is what moved it past e7c67e0;
+# a0af7ec (the MTP head reads the pack's Hadamard-latent embeddings in the primal basis; the lens
+# holds every row of a verify batch) is what moved it past f400b3b: it is what --spec-type draft-mtp serves;
+# a0bacec (the lens ranks its rows on a worker thread and reads the output weight once) is what
+# moved it past a0af7ec: the lens had halved the head's decode.
+# b6f4667 (the lens entry for the model's last layer is the served logits themselves) is what moved
+# it past a0bacec: the stacked matmul had drifted the final lens layer from the served row at near-ties.
+# 36e02e4 (the lens channels: each lens layer's block input, attention and FFN contributions through
+# the same head, --lens-channels, off by default) is what moved it past b6f4667: with the flag off the
+# served graph and the JSONL are unchanged; the switch is one arg in a head's [runtime] extra.
+# 0b24932 (the training-pull detector on the channels: --pull-layers reads the served argmax's write
+# profile before the sampler and fires on a committed content token the prompt never states; log or
+# surgery, off by default) is what moved it past 36e02e4: no graph change, nothing served differs
+# until a head sets --pull-layers.
+# f5d4f29 (fork PR #5: the recurrent-state cache in a narrower type, -cts q8_0; decode-only MTP
+# drafting, --spec-draft-mtp-decode-only --spec-draft-mtp-window; the sampler saved only when a
+# partial acceptance can restore it) is what moved it past 0b24932: the 5080 head decoded the same
+# 153k–163k-token conversation at 42.0 / 42.2 / 44.8 tok/s on 0b24932 and 58.5 / 57.8 / 59.8 on
+# this engine, one stream, lens on; the RS buffer 1,795.5 → 526.5 MiB at 4 slots (2026-09-21).
+# 2a92241 (fork PR #6: the attention mask as one bit per KV cell, --attn-mask-bits, opt-in; the lens rows taken at
+# the layer so the block tensors are freed) is what moved it past f5d4f29: with the flag in [runtime] the target
+# graph's mask is 18 MiB instead of 288 and the draft's 4 instead of 64, the same tokens and bit-identical top-5
+# logprobs on the served geometry, every FLASH_ATTN_EXT backend-ops case green on sm_120 (2026-09-21).
+# 2ba9821 (fork PR #7: a quantized recurrent-state cache takes the gathered GDN path; CPU/Metal rows mode asserted an f32
+# state, CUDA never selects it) is what moved it past 2a92241: nothing served on a CUDA card differs; the pin follows fork main.
+# 51059c8 (fork main after PR #8: --spec-draft-chain-p-min, a round stops drafting once the product of the chain's top-1
+# probabilities is under P; bounded to [0, 1] at the parser, warned where a draft type ignores it, echoed by every drafting
+# impl's init trace) is what moved it past 2ba9821: a draft lands only if every draft before it lands, so the product is a
+# position's expected yield, and per-token p_min cannot say that. At depth 8 with p_min 0.3 the 5080 head still emitted 6–7
+# drafts per round, acc rate/pos (0.68, 0.44, 0.32, 0.24, 0.18, 0.13, 0.10, 0.07), 63–79 tok/s at 168K, no better than depth 2;
+# each position costs ~5.7 ms all in against ~12 ms per generated token, so it pays only while the product stays above ~0.45,
+# which is the value a head would pass. With the chain cutoff at 0.3 depth 8 measured 75.8 tok/s against depth 2's 82–88, so no
+# head passes either cutoff today and nothing served differs from 2ba9821; the fields stay for a head that wants them (2026-09-21).
+# bc57e7e (fork main after PR #9: a small float matrix mmf cannot tile takes the vector kernel instead of cuBLAS while rows x
+# cols <= 512, off switch GGML_CUDA_MMVF_UNTILED_LEGACY=1) is what moved it past 51059c8: every MTP verify ran the 96 48-row bf16
+# ssm_alpha/ssm_beta matmuls as an f32->bf16 copy plus a ~26 us 4-block cuBLAS GEMM. 5070 Ti, served pack, head args: the
+# verify-sized step 20.77 -> 18.04 ms GPU time, the served head with MTP 83.3 -> 90.1 / 90.8 tok/s (A-B-A, rig bench-head.ts);
+# evidence in Bonsai-demo runs/2026-09-22/mm-bf16-small-rows (2026-09-22).
+# 3520147 (fork main after PR #10: chunked tensor-core Gated DeltaNet prefill, a port of ggml-org#26001 reading qwen35's
+# q/k/v views and raw gates in place, the last K-1 tokens of a ubatch left on the recurrent kernel so the MTP rollback
+# snapshots are unchanged; off switch GGML_CUDA_GDN_CHUNKED=0) is what moved it past bc57e7e: 5070 Ti, the GDN of one
+# 512-token ubatch 53.3 -> 15.6 ms, pp512 at 32,768 1,330 -> 1,446 tok/s, the served head's prefill 1,375 -> 1,588 tok/s;
+# ubatches under 128 tokens (decode, MTP verify) take the recurrent kernel as before. Lossy: KL against the recurrent
+# kernel 0.001481 +/- 0.000039, same top p 98.41 % (the int8 Q.K bar 0.00150 / 98.3 %, local/kl/REFERENCE.md); evidence
+# in Bonsai-demo runs/2026-09-22/gdn-chunked-prefill (2026-09-22).
+# d43bd7e (fork main after PRs #11-#13) is what moved it past 3520147, two lossless changes to the MTP verify step:
+# #13 (8f64f8346, off switch GGML_CUDA_GDN_Q8_CACHE_LEGACY=1): under -cts q8_0 the Gated DeltaNet kernel quantizes each
+# rollback snapshot as it writes it, instead of an f32 snapshot plus a cpy_f32_q8_0 launch per layer per snapshot (the
+# served verify writes K = 3); the cache holds the same bytes, and the 5070 Ti served head with MTP decoded 104.8 / 118.1 /
+# 110.1 / 120.2 tok/s A-B-A-B with identical greedy text and draft acceptance. #11 (b4c2d66, off switches
+# GGML_CUDA_CONCAT_TRANSPOSE_SM120_LEGACY=1 / GGML_CUDA_SCALE_VEC4_SM120_LEGACY=1): GeForce Blackwell takes the transposed
+# conv-state concat and the float4 scale that were gated to GB10, a verify step 20.0 -> 19.4 ms GPU time, logits
+# identical. #12 is the public Bonsai page (docs/torad/bonsai-27b). Evidence in local/research/gdn-q8-cache-fusion-2026-09-22
+# and verify-small-ops-sm120-2026-09-22 (2026-09-23).
+# 1399830 (fork main after PRs #14-#24) is what moved it past d43bd7e: correctness fixes the served head can reach and two
+# lossless decode changes. #20: the vectorized kernels check operand ADDRESSES, not only strides (a view offset by an odd
+# element count faulted with a misaligned address in mmvf/mmf, and mmq's src1 quantizer quantized the wrong values, silently,
+# at a row stride not a multiple of 4 floats). #24: a captured CUDA graph records each src's type, buffer, view and op (a src
+# retyped f16 -> bf16 in place replayed the f16 kernel on the bf16 bytes: nmse 5.84 against the CPU on the 5070 Ti,
+# test-cuda-graph-src-type, red at the test commit and green after). #15/#16: six latent review findings and the src1 stride
+# checks mmvf/mmf assert; #21: a lazy grammar's literal triggers are searched where the last piece can complete them. #19: the
+# fused gate/up + GLU on mul_mat_vec_q covers 64 of 64 FFN layers at decode, not 40; #22: a CUDA graph per graph shape, so the
+# MTP draft context's catch-up batch and draft step stop sharing one (89 -> 0 uncaptured launches per round). #17/#18 are CPU
+# backend fixes, #14 docs. #23 (backend sampling for tool requests) serves nothing until a head passes -bs, and -bs measured
+# +0.1 % here at one slot, so no head does. 5070 Ti, the served pack and the live head's argv at -c 65536 -np 1, A-B-A-B:
+# 655.9 / 681.1 / 687.5 / 694.7 tok/s summed over the six bench prompts (A2 -> B2 +1.0 %; the card warmed through A1), greedy
+# text byte-identical on every leg, draft acceptance identical (315/392 ... 313/394); rig gate: refusal 6/6 -> 0/6, capability
+# 4/5 identical (1 near-tie), fluency 2 -> 2, humaneval base 111/164 served 115/164 (d43bd7e's scores). Evidence in
+# local/research/engine-pin-2026-09-24 and cuda-graph-src-type-2026-09-24 (2026-09-24).
+# ORDER: publish the build (rig build) BEFORE merging a pin move. The unit's ExecStartPre verify refuses
+# to start a head whose pin has no complete build, so a restart in the gap is an outage: 2026-09-21
+# 00:38, four refused starts, 90 s down, while 0b24932-sm120 was still compiling.
+[fork]
+repo = "https://github.com/torad-labs/llama.cpp.git"
+sha = "13998300f70388c1fbc865b411a975a8c1f84cfe"
+base = "prism-b10685-7dffb15"   # PrismML's llama.cpp (ggml-org b10685 + the ternary kernels) this branch sits on
+
+# Compute capabilities with a measured run behind them — anything else is refused by prepare and
+# build, and joins this list only with its numbers (BONSAI_ARCH_ALLOW's successor: `--allow-arch`).
+[[archs]]
+cap = "120"
+cards = "GB20x: RTX 5080, 5070 Ti, 5090, RTX PRO 6000"
+evidence = "Bonsai-demo runs/2026-09-19/decode-profile-5070ti and runs/2026-09-20/vendorized-da69dc5-sm120; the local 5080 head"
+[[archs]]
+cap = "90"
+cards = "H100 SXM / NVL, H200"
+evidence = "Bonsai-demo runs/2026-09-19/vast-h100-sxm: M=1/2/4 aggregate 50/83/131 tok/s, needle OK"
+
+# The CUDA runtime every build links (libcudart, libcublas, libcublasLt), as NVIDIA redistributes it: a
+# prebuilt engine installs these beside its binaries, so a machine needs only a driver that runs CUDA
+# 13.3. The archives are NVIDIA's own (redistrib_13.3.0.json: cuda_cudart 13.3.29, libcublas 13.5.1.27),
+# fetched from NVIDIA and held to these sha256s. Keep this section and [[prebuilt]] LAST: the build
+# tests strip from here to the end of the file to model a pin with no prebuilt.
+[cuda]
+version = "13.3"
+[[cuda.runtime]]
+url = "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-13.3.29-archive.tar.xz"
+sha256 = "1e59c4888267d27ba1a9bd0f3669a6439db1334a96e754cd9013c7c73e18dc9d"
+libs = ["libcudart.so.13"]
+[[cuda.runtime]]
+url = "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/linux-x86_64/libcublas-linux-x86_64-13.5.1.27-archive.tar.xz"
+sha256 = "35a898360520d6101ffcaf36c0d04496b54d4fc2afb82f7fce44218c54513808"
+libs = ["libcublas.so.13", "libcublasLt.so.13"]
+
+# The pin's own build for a card, published with the fork's release engine-<sha7>; `rig build`
+# installs it instead of compiling. A pin move republishes it or drops it: loadEngine refuses an
+# entry named for another commit. Publishing: `rig build --portable` (no build path, host or user
+# recorded; libgomp bundled; no OpenSSL), then `scripts/e2e-driver-only.sh <pack> --prebuilt
+# <tarball>` must pass (Ubuntu 24.04, driver only: install, ldd -r, decode), then `gh release
+# create engine-<sha7>` on the fork with the tarball, and its sha256 here.
+[[prebuilt]]
+cap = "120"
+url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-1399830/engine-sm120-1399830.tar.gz"
+sha256 = "fdaaa51bc4769d20b418c148e8c55f349e70bffcfb884b7e9f32f66cb92741f1"
