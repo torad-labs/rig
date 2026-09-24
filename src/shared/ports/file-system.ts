@@ -11,6 +11,9 @@ export interface FileSystem {
   /** `length` bytes from `offset`, without reading the rest of a multi-GB file */
   readRange(path: string, offset: number, length: number): Promise<Uint8Array>;
   writeText(path: string, text: string): Promise<void>;
+  /** the file replaced by one rename from a sibling: a reader that may look at any moment (systemd
+   *  on a daemon-reload another process triggers) sees the old text or the new, never a partial one */
+  replaceText(path: string, text: string): Promise<void>;
   writeBytes(path: string, bytes: Uint8Array): Promise<void>;
   /** write `bytes` at `offset` inside an existing file, leaving the rest untouched */
   writeAt(path: string, offset: number, bytes: Uint8Array): Promise<void>;

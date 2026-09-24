@@ -42,7 +42,8 @@ ExecStart=${[...o.self, "vast", "idle-check"].join(" ")}
 
 export function renderIdleTimer(): string {
   return `# The cost control: a box that nobody is talking to is destroyed, not left billing overnight.
-# Started by \`rig vast up\`, stopped by \`rig vast down\`.
+# Enabled and started by \`rig vast up\` (so a user-manager restart or a reboot arms it again while
+# the box bills), re-armed by \`rig vast status\` if found dead, disabled and stopped by \`rig vast down\`.
 [Unit]
 Description=Idle check for the rented box, every 10 minutes
 

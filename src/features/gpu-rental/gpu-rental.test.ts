@@ -166,8 +166,15 @@ describe("vast up", () => {
     expect(p.systemd.ops).toEqual([
       "daemon-reload",
       "restart rig-vast-tunnel.service",
+      "enable rig-vast-idle.timer",
       "restart rig-vast-idle.timer",
     ]);
+    // each unit replaced by a rename: a reload another process triggers never reads half a file
+    expect(p.fs.replaced).toEqual(
+      ["rig-vast-tunnel.service", "rig-vast-idle.service", "rig-vast-idle.timer"].map(
+        (unit) => `/home/u/.config/systemd/user/${unit}`,
+      ),
+    );
     expect(p.fs.text("/home/u/.config/systemd/user/rig-vast-tunnel.service")).toContain(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: systemd expands ${PORT} from the EnvironmentFile
       "-L 127.0.0.1:8100:127.0.0.1:8099 -p ${PORT} root@${HOST}",
@@ -281,7 +288,8 @@ describe("vast down / status / idle", () => {
     const r = await uc.down({ all: true });
     expect(r).toEqual({ ok: true, value: { destroyed: [1000, 55], hours: 2, cost: 3.95 } });
     expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(false);
-    expect(p.systemd.ops.slice(-2)).toEqual([
+    expect(p.systemd.ops.slice(-3)).toEqual([
+      "disable rig-vast-idle.timer",
       "stop rig-vast-idle.timer",
       "stop rig-vast-tunnel.service",
     ]);
@@ -331,6 +339,8 @@ describe("vast down / status / idle", () => {
     expect(p.fs.text("/home/u/.config/systemd/user/rig-vast-idle.service")).toContain(
       "after 720 idle minutes",
     );
+    // the READY line prices the budget: what the box can bill idle before it is destroyed
+    expect(p.log.lines.join("\n")).toContain("720 min: up to ~$23.70 idle before it is destroyed");
     p.http.on(/8100\/metrics$/, () => ({
       status: 200,
       text: "llamacpp:prompt_tokens_total 1\nllamacpp:tokens_predicted_total 1\nllamacpp:requests_processing 0\n",
@@ -376,6 +386,28 @@ describe("vast down / status / idle", () => {
       ok: true,
       value: { listed: true, hours: 1, cost: 1.98 },
     });
+  });
+  test("status re-arms the idle timer of a box that bills without it, and says so; a box gone from the listing is left alone", async () => {
+    const { p, head, uc } = await setup();
+    await uc.up(head, { gpu: "H100_SXM" });
+    expect(await uc.status()).toMatchObject({ ok: true, value: { idleTimer: "active" } });
+    p.systemd.active.delete("rig-vast-idle.timer"); // 2026-09-24: dead at 09:08, no stop logged
+    const before = p.systemd.ops.length;
+    expect(await uc.status()).toMatchObject({ ok: true, value: { idleTimer: "re-armed" } });
+    expect(p.systemd.ops.slice(before)).toEqual([
+      "enable rig-vast-idle.timer",
+      "restart rig-vast-idle.timer",
+    ]);
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    expect(p.log.lines.join("\n")).toContain("rig-vast-idle.timer was not running: re-armed");
+    // destroyed elsewhere: nothing bills, so nothing is armed
+    p.systemd.active.delete("rig-vast-idle.timer");
+    p.rental.instances.delete(1000);
+    expect(await uc.status()).toMatchObject({
+      ok: true,
+      value: { listed: false, idleTimer: "inactive" },
+    });
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(false);
   });
   test("a dry run prices the next box while one is still up", async () => {
     const { p, uc, head } = await setup();
