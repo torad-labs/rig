@@ -169,9 +169,9 @@ describe("gate", () => {
     ]);
     expect(legs).toEqual([
       ["Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf", "1", "8098"],
-      ["Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf", "1", "8098"],
+      ["Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf", "1", "8098"],
       ["Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf", "1", "8098"],
-      ["Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf", "1", "8098"],
+      ["Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf", "1", "8098"],
       ["Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf", "1", "8098"],
     ]);
     expect(p.shell.spawned[0]!.cmd).toContain("--kv-mean-center"); // the head's runtime args, assets resolved
@@ -312,8 +312,8 @@ describe("gate", () => {
     expect(
       p.shell.spawned.map((s) => [s.cmd[2]!.split("/").at(-1), s.cmd.includes("--spec-type")]),
     ).toEqual([
-      ["Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf", false],
-      ["Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf", true],
+      ["Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf", false],
+      ["Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf", true],
     ]);
     // shown able to fail: drafted answers the pack did not choose
     const bad = await setup();

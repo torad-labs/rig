@@ -37,7 +37,7 @@ describe("argv", () => {
     const mapped = r.value.argv.map((a) =>
       a
         .replace(`${root}/local/packs/bonsai-2-27b/`, `${root}/`)
-        .replace(`${root}/local/engine-builds/${engine.sha7}-sm120/`, `${root}/bin/da69dc5-sm120/`)
+        .replace(`${root}/local/engine-builds/${engine.sha7}-sm120/`, `${root}/bin/60feea0-sm120/`)
         .replace(`${root}/heads/bonsai-2-27b/assets/`, `${root}/`),
     );
     expect(mapped).toEqual(golden as string[]);
@@ -282,17 +282,17 @@ describe("verify", () => {
     expect(r.ok).toBe(false);
     expect(p.log.lines).toContain(`warn ${undrived.value.undrived}`);
   });
-  test("a --pack naming neither pinned pack is refused by name", async () => {
+  test("a --pack naming none of the pinned packs is refused by name", async () => {
     const { p, head, engine, uc } = await setup("/v");
     const bin = `/v/engine-builds/${engine.sha7}-sm120`;
     p.fs.put(`${bin}/llama-server`, "x");
     p.fs.put(`${bin}/BUILD`, "fork=… cap=sm_120");
     const r = await uc.verify(head, 0, "/v/local/packs/bonsai-2-27b/some-other.gguf");
-    expect(!r.ok && r.message).toContain("is neither the pinned source pack");
+    expect(!r.ok && r.message).toContain("is none of the pinned packs");
     expect(!r.ok && r.message).toContain(head.sourcePath);
     expect(!r.ok && r.message).toContain(head.declaredServed.path);
   });
-  test("failing state (a): a unit rendered on the derived pack, then the adapter and the derived pack both disappear — verify without --pack passes on the source pack (the ExecStart bug); --pack the unit's own -m path catches the now-missing file", async () => {
+  test("failing state (a): a unit rendered on the derived pack, then the adapter and the derived pack both disappear — verify without --pack passes on the public pack (the ExecStart bug); --pack the unit's own -m path catches the now-missing file", async () => {
     const { p, head, engine, uc } = await setup("/v");
     const bin = `/v/engine-builds/${engine.sha7}-sm120`;
     p.fs.put(`${bin}/llama-server`, "x");
@@ -304,6 +304,9 @@ describe("verify", () => {
     p.hasher.pinned.set(head.sourcePath, head.source.sha256);
     p.fs.put(head.servedPath, "pack");
     p.hasher.pinned.set(head.servedPath, head.served.sha256);
+    const pub = head.declaredPublic!;
+    p.fs.put(pub.path, "public");
+    p.hasher.pinned.set(pub.path, pub.sha256);
     // the adapter and the derived pack both go missing: this machine goes undrived
     await p.fs.remove(`${root}/heads/bonsai-2-27b/assets/lora/bonsai-abliterate-lora.gguf`);
     await p.fs.remove(head.servedPath);
@@ -311,14 +314,14 @@ describe("verify", () => {
     const undrived = await loadHead(p.fs, layout, "bonsai-2-27b");
     if (!undrived.ok) throw new Error(undrived.message);
     expect(undrived.value.undrived).toBeDefined();
-    expect(undrived.value.servedPath).toBe(head.sourcePath);
+    expect(undrived.value.servedPath).toBe(pub.path);
     const noPack = await uc.verify(undrived.value, 0);
     expect(noPack.ok).toBe(true); // the bug: passes, though ExecStart's own -m no longer exists
     const withPack = await uc.verify(undrived.value, 0, packAtInstall);
     expect(!withPack.ok && withPack.message).toContain("missing");
     expect(!withPack.ok && withPack.message).toContain(packAtInstall);
   });
-  test("failing state (b): a unit rendered on the source pack (undrived at install), then the adapter is pulled — verify without --pack refuses on the never-produced derived pack (the outage bug); --pack the unit's own -m path passes on the intact source pack, with a WARNING naming the drift and the remedy", async () => {
+  test("failing state (b): a unit rendered on the public pack (undrived at install), then the adapter is pulled — verify without --pack refuses on the never-produced derived pack (the outage bug); --pack the unit's own -m path passes on the intact public pack, with a WARNING naming the drift and the remedy", async () => {
     const { p, engine, uc } = await setup("/v");
     const bin = `/v/engine-builds/${engine.sha7}-sm120`;
     p.fs.put(`${bin}/llama-server`, "x");
@@ -328,7 +331,10 @@ describe("verify", () => {
     const atInstall = await loadHead(p.fs, layout, "bonsai-2-27b");
     if (!atInstall.ok) throw new Error(atInstall.message);
     expect(atInstall.value.undrived).toBeDefined();
-    const packAtInstall = atInstall.value.servedPath; // the source path, at install
+    const packAtInstall = atInstall.value.servedPath; // the public pack's path, at install
+    expect(packAtInstall).toBe(atInstall.value.declaredPublic!.path);
+    p.fs.put(packAtInstall, "public");
+    p.hasher.pinned.set(packAtInstall, atInstall.value.declaredPublic!.sha256);
     p.fs.put(atInstall.value.sourcePath, "source");
     p.hasher.pinned.set(atInstall.value.sourcePath, atInstall.value.source.sha256);
     p.fs.put(atInstall.value.path("assets/kv-mean-center-PQ2_0.gguf"), "b");
@@ -350,5 +356,8 @@ describe("verify", () => {
       ),
     ).toBe(true);
     expect(p.log.lines.some((l) => l.includes("rig derive"))).toBe(true);
+    // a unit rendered on the source pack (a head without [public], before it had one) passes too
+    const withSource = await uc.verify(now.value, 0, atInstall.value.sourcePath);
+    expect(withSource.ok).toBe(true);
   });
 });

@@ -39,8 +39,8 @@ goes through a port (`src/shared/ports/`); ports name capabilities, not tools.
 |---|---|---|
 | `prepare` | machine-check | tools, card, driver — before any download; exit 1 / 3 / 4. A card with a published prebuilt needs only the driver, curl, tar and xz, on a glibc at least the build's floor (`glibc` in `[[prebuilt]]`; below it the card compiles, and `noPrebuilt` says why) |
 | `build` | engine-build | the engine at its pin for this card → `local/engine-builds/<sha7>-sm<cap>/`, published in one rename with a marker written last: the pin's published build plus NVIDIA's CUDA runtime where `engine.toml` pins one for the card (`[[prebuilt]]`, `[cuda]`, each by sha256), else compiled; `--compile`; `--portable` tarball; `--from-tarball` |
-| `fetch` | pack-download | the source pack by sha256 (adopted by hard link, or aria2c/curl to a `.part` sibling) |
-| `derive` | pack-derivation | the served pack from the source pack — the head's `[derive]` step as data; published only at the pinned sha, a different edit is removed |
+| `fetch` | pack-download | the source pack by sha256 (adopted by hard link, or aria2c/curl to a `.part` sibling), and every public `[[derive]]` asset (a step with a `url`) into `local/packs/<head>/` the same way |
+| `derive` | pack-derivation | the served pack from the source pack — the head's `[[derive]]` steps as data; a machine without a private asset derives the `[public]` pack (the public steps alone) instead, or serves the source pack when there is none; published only at the pinned sha, a different edit is removed |
 | `verify` / `serve` | head-serving | complete build, pinned pack, assets present; `-np`/`-c` from the head's measured tiers, `--cache-ram` from RAM/4; the argv in one order (golden test = the live head's cmdline) |
 | `unit` | systemd-unit | the systemd user unit: `ExecStartPre=rig verify`, `ExecStart=<llama-server argv>`, the host's `--cache-ram` kept across re-renders, dated backup of a changed unit; linger turned on for the user (`loginctl enable-linger`) so the head outlives logout, named with the command where refused |
 | `describe` | head-description | one JSON object for whatever sits in front of the head (a proxy's wizard) |
@@ -77,8 +77,9 @@ goes through a port (`src/shared/ports/`); ports name capabilities, not tools.
 
 ## Adding a head
 
-1. `heads/<name>/head.toml`: source (HF repo, rev, file, sha256), served (file, sha256), an
-   optional `[derive]`, context, geometry (constants + measured tiers), runtime args, client facts.
+1. `heads/<name>/head.toml`: source (HF repo, rev, file, sha256), served (file, sha256), optional
+   `[[derive]]` steps (public ones, with a `url`, first; `[public]` pins what they produce alone),
+   context, geometry (constants + measured tiers), runtime args, client facts.
    `loadHead` checks the invariants (tiers fit their VRAM by the constants, advertise ≤ model…).
 2. `heads/<name>/assets/`: whatever the runtime args reference (`assets/…` resolves to the head).
 3. `heads/<name>/gates.toml`: the probes and their criteria.

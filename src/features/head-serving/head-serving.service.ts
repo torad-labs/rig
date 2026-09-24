@@ -84,18 +84,21 @@ export class ServeHead {
     } else {
       const pinned = [
         { path: head.sourcePath, sha256: head.source.sha256, label: "source", remedy: "rig fetch" },
+        ...(head.declaredPublic
+          ? [{ ...head.declaredPublic, label: "public", remedy: "rig fetch && rig derive" }]
+          : []),
         {
           path: head.declaredServed.path,
           sha256: head.declaredServed.sha256,
           label: "served",
           remedy: "rig derive",
         },
-      ] as const;
+      ];
       const match = pinned.find((p) => p.path === pack);
       if (!match)
         return fail(
           ExitCode.Failure,
-          `REFUSING to start: --pack ${pack} is neither the pinned source pack (${head.sourcePath}) nor the pinned served pack (${head.declaredServed.path})`,
+          `REFUSING to start: --pack ${pack} is none of the pinned packs (${pinned.map((p) => `${p.label} ${p.path}`).join(", ")})`,
         );
       const state = await checkArtifact(this.deps.fs, this.deps.hasher, match);
       if (state !== "ok")

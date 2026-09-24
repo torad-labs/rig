@@ -18,7 +18,7 @@ async function setup(toml = headToml) {
     server: new GateServer(
       p,
       head.value,
-      "/r/local/engine-builds/da69dc5-sm120",
+      "/r/local/engine-builds/60feea0-sm120",
       1,
       8098,
       "/r/local/gate-runs/run",
@@ -31,7 +31,7 @@ describe("gate server", () => {
     const { head, server } = await setup();
     const argv = server.argv({ label: "x", pack: "/packs/served.gguf", ctx: 8192, slots: 1 });
     expect(argv.slice(0, 10)).toEqual([
-      "/r/local/engine-builds/da69dc5-sm120/llama-server",
+      "/r/local/engine-builds/60feea0-sm120/llama-server",
       "-m",
       "/packs/served.gguf",
       "-ngl",
@@ -161,7 +161,7 @@ describe("gate server", () => {
       env: {
         CUDA_DEVICE_ORDER: "PCI_BUS_ID",
         CUDA_VISIBLE_DEVICES: "1",
-        LD_LIBRARY_PATH: "/r/local/engine-builds/da69dc5-sm120",
+        LD_LIBRARY_PATH: "/r/local/engine-builds/60feea0-sm120",
       },
       stdoutPath: "/r/local/gate-runs/run/server-one.log",
     });

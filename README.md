@@ -16,7 +16,10 @@ rig up bonsai-2-27b
 The installer puts the release in `~/.local/share/rig` and links `~/.local/bin/rig`. On a card
 `engine/engine.toml` publishes a build for (sm_120: RTX 5080, 5070 Ti, 5090, RTX PRO 6000), `rig
 build` installs that build and NVIDIA's CUDA runtime, each checked by sha256, so no toolkit or
-compiler is needed; any other measured card compiles the engine (git, cmake, ninja, nvcc).
+compiler is needed; any other measured card compiles the engine (git, cmake, ninja, nvcc). `rig
+up bonsai-2-27b` then serves ProCreations' published pack with our retrained MTP draft head spliced
+in (`heads/bonsai-2-27b/evidence.md`, "Draft head retrained"), fetched from this repo's releases
+and checked by sha256 like everything else.
 
 From a checkout:
 

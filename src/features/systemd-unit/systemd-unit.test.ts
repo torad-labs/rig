@@ -21,7 +21,7 @@ async function setup() {
       const cacheRam = o.cacheRam ?? 15704;
       return ok({
         argv: [
-          "/r/local/engine-builds/da69dc5-sm120/llama-server",
+          "/r/local/engine-builds/60feea0-sm120/llama-server",
           "-m",
           "/r/local/packs/x.gguf",
           "--cache-ram",
@@ -31,7 +31,7 @@ async function setup() {
         ],
         env: {
           CUDA_VISIBLE_DEVICES: String(o.gpu),
-          LD_LIBRARY_PATH: "/r/local/engine-builds/da69dc5-sm120",
+          LD_LIBRARY_PATH: "/r/local/engine-builds/60feea0-sm120",
         },
         cacheRam,
       });
@@ -51,10 +51,10 @@ describe("unit", () => {
       "ExecStartPre=/r/dist/rig verify bonsai-2-27b --gpu 1 --pack /r/local/packs/x.gguf\n",
     );
     expect(r.value.text).toContain(
-      'ExecStart=/r/local/engine-builds/da69dc5-sm120/llama-server -m /r/local/packs/x.gguf --cache-ram 8192 --chat-template-file "/r/a b.jinja"\n',
+      'ExecStart=/r/local/engine-builds/60feea0-sm120/llama-server -m /r/local/packs/x.gguf --cache-ram 8192 --chat-template-file "/r/a b.jinja"\n',
     );
     expect(r.value.text).toContain(
-      "Environment=CUDA_VISIBLE_DEVICES=1\nEnvironment=LD_LIBRARY_PATH=/r/local/engine-builds/da69dc5-sm120\n",
+      "Environment=CUDA_VISIBLE_DEVICES=1\nEnvironment=LD_LIBRARY_PATH=/r/local/engine-builds/60feea0-sm120\n",
     );
     expect(r.value.text).toContain("StandardOutput=append:/r/local/logs/bonsai-2-27b.log\n");
     expect(r.value.text).toContain("WantedBy=default.target");

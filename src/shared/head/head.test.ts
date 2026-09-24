@@ -90,7 +90,7 @@ describe("head.toml", () => {
     if (!r.ok) expect(r.message).toContain("no --lens-layers");
   });
   test("a missing sha is rejected by name", () => {
-    const r = parseHeadToml(real.replace(/^sha256 = "53ab.*$/m, ""));
+    const r = parseHeadToml(real.replace(/^sha256 = "389b.*$/m, ""));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toContain("served.sha256");
   });
@@ -131,6 +131,32 @@ describe("head.toml", () => {
     const r = parseHeadToml(real.replace("[context]", "[context]\ncontext_window = 1"));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toContain("context_window");
+  });
+  test("[public] pins the public steps' output: they come first, and it exists exactly when private steps follow them", () => {
+    const refused = (toml: string, message: string) => {
+      const r = parseHeadToml(toml);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toContain(message);
+    };
+    const url = /^url = .*\n/m;
+    const urlLine = real.match(url)?.[0] ?? "";
+    // the public step moved after the private one
+    refused(
+      real.replace(url, "").replace("row_cap = 0.10\n", `row_cap = 0.10\n${urlLine}`),
+      "follows a private one",
+    );
+    // mixed steps without [public]: a stranger would get the source pack
+    refused(real.replace(/\[public\][^\n]*\n[^\n]*\n[^\n]*\n/, ""), "declares no [public]");
+    // [public] with no private step after the public ones (every step public, or none)
+    refused(real.replace(url, ""), "[public] needs public [derive] steps");
+    // [public] that is the source's own bytes
+    refused(
+      real.replace(
+        /sha256 = "0e5524be[0-9a-f]+"/,
+        'sha256 = "3cb3f0056d2e34ee44245a64396004a21f8492573d6ce1266ec4b7222c131dd4"',
+      ),
+      "must be its own file and bytes",
+    );
   });
   test("served must equal source without a derive step", () => {
     const noDerive = real.replace(/\[\[derive\]\][\s\S]*?\n\n/g, "\n");
@@ -275,7 +301,7 @@ describe("loadHead", () => {
       "/r/heads/bonsai-2-27b/assets/chat-template.jinja",
     );
     expect(r.value.servedPath).toBe(
-      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
     );
     expect(r.value.draftPath).toBeUndefined(); // the head is in the pack
     p.fs.put("/r/heads/bonsai-2-27b/head.toml", withSidecarDraft(real));
@@ -284,34 +310,60 @@ describe("loadHead", () => {
       "/r/local/packs/bonsai-2-27b/Bonsai-2-27B-DFlash2-Q8_0.gguf",
     );
   });
-  test("a clone without the private adapter serves the source pack; the derived pack keeps the step", async () => {
+  test("a clone without the private adapter serves the public pack, the source with our draft head; the derived pack keeps the steps", async () => {
     const p = fakePorts();
     const layout = layoutAt("/r");
-    p.fs.put("/r/heads/bonsai-2-27b/head.toml", real);
+    p.fs.put("/r/heads/bonsai-2-27b/head.toml", real); // not even the public head yet: `rig fetch` gets it
     const clone = await loadHead(p.fs, layout, "bonsai-2-27b");
     if (!clone.ok) throw new Error(clone.message);
     expect(clone.value.undrived).toContain("assets/lora/bonsai-abliterate-lora.gguf");
-    expect(clone.value.derive).toBeUndefined();
-    expect(clone.value.served).toEqual(clone.value.source);
+    expect(clone.value.undrived).toContain("serving the public pack");
+    expect(clone.value.derive?.map((step) => step.kind)).toEqual(["draft-head-splice"]);
+    expect(clone.value.served).toEqual({
+      file: "Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf",
+      sha256: "0e5524befc7cf0c446a2d003bc5c71c39bd4816fdbb49dc38c248eab0e08d4d1",
+    });
     expect(clone.value.servedPath).toBe(
-      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf",
+      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf",
     );
+    expect(clone.value.declaredPublic).toEqual({
+      path: "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf",
+      sha256: "0e5524befc7cf0c446a2d003bc5c71c39bd4816fdbb49dc38c248eab0e08d4d1",
+    });
+    // the public head is fetched into local/ (an upgrade replaces heads/ wholesale), the adapter
+    // stays where `torad model pull` puts it
+    const [splice] = clone.value.derive ?? [];
+    expect(splice && clone.value.assetPath(splice)).toBe(
+      "/r/local/packs/bonsai-2-27b/bonsai-2-27b-mtp-r2.gguf",
+    );
+    putHead(p.fs, "/r", real);
+    const full = await loadHead(p.fs, layout, "bonsai-2-27b");
+    if (!full.ok) throw new Error(full.message);
+    expect(full.value.undrived).toBeUndefined();
+    expect(full.value.derive?.map((step) => full.value.assetPath(step))).toEqual([
+      "/r/local/packs/bonsai-2-27b/bonsai-2-27b-mtp-r2.gguf",
+      "/r/heads/bonsai-2-27b/assets/lora/bonsai-abliterate-lora.gguf",
+    ]);
+    await p.fs.remove("/r/heads/bonsai-2-27b/assets/lora/bonsai-abliterate-lora.gguf");
     // the declared served pin survives going undrived: a verify asked to check the derived
     // path by name still has the pin it was published against, even though `served` itself
-    // now mirrors `source`
+    // is now the public pack
     expect(clone.value.declaredServed).toEqual({
-      path: "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
-      sha256: "53ab9023c54ce950191ccbb6f3a946d912179419b018f2f9b7e4ffe0c014a297",
+      path: "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
+      sha256: "389b6d3caefc1fa15eb94d82008562919142ec10051fc0109b464104ee52cae2",
     });
-    p.fs.put("/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf", "");
+    p.fs.put(
+      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
+      "",
+    );
     const derived = await loadHead(p.fs, layout, "bonsai-2-27b");
     expect(derived.ok && derived.value.undrived).toBeUndefined();
     expect(derived.ok && derived.value.servedPath).toBe(
-      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
     );
     expect(derived.ok && derived.value.declaredServed).toEqual({
-      path: "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
-      sha256: "53ab9023c54ce950191ccbb6f3a946d912179419b018f2f9b7e4ffe0c014a297",
+      path: "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
+      sha256: "389b6d3caefc1fa15eb94d82008562919142ec10051fc0109b464104ee52cae2",
     });
   });
   test("a directory name that does not match the head's name is refused", async () => {
@@ -335,7 +387,7 @@ describe("loadHead", () => {
     // the same for the derived pack itself, once the adapter question is answerable
     p.fs.denied.clear();
     p.fs.deny(
-      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
       "EIO",
     );
     const deniedServed = await loadHead(p.fs, layout, "bonsai-2-27b");
@@ -346,7 +398,7 @@ describe("loadHead", () => {
     // instead, so the path cannot exist either way): still "absent", not a refusal
     p.fs.denied.clear();
     p.fs.deny(
-      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf",
+      "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf",
       "ENOTDIR",
     );
     const notdir = await loadHead(p.fs, layout, "bonsai-2-27b");

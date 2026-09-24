@@ -12,7 +12,7 @@ import {
   stagingPath,
 } from "../../shared/artifact.ts";
 import type { Head } from "../../shared/head/head.ts";
-import { type Derive, deriveAsset } from "../../shared/head/head-config.ts";
+import type { Derive } from "../../shared/head/head-config.ts";
 import type { FileSystem, Hasher, Log } from "../../shared/ports/index.ts";
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 import {
@@ -28,8 +28,9 @@ import { ablateTensor, directionFromLoraB } from "./lattice-ablation.ts";
 export interface DerivePackReport {
   path: string;
   state: "none" | "undrived" | "present" | "derived";
-  /** why, when undrived: a caller with only this report (a rented box's --json, past the console
-   *  this machine's own log went to) still gets the reason, not just the bare state */
+  /** why this machine serves less than the declared served pack (the public pack, "present" or
+   *  "derived", or the source, "undrived"): a caller with only this report (a rented box's --json,
+   *  past the console this machine's own log went to) still gets the reason, not just the state */
   reason?: string;
   flipped?: number;
   digits?: number;
@@ -59,14 +60,14 @@ export class DerivePack {
   constructor(private readonly deps: DerivePackDeps) {}
 
   async run(head: Head): Promise<Result<DerivePackReport>> {
-    if (head.undrived) {
-      this.deps.log.info(head.undrived);
-      return ok({ path: head.servedPath, state: "undrived", reason: head.undrived });
+    const reason = head.undrived ? { reason: head.undrived } : {};
+    if (head.undrived) this.deps.log.info(head.undrived);
+    if (!head.derive) {
+      return ok({ path: head.servedPath, state: head.undrived ? "undrived" : "none", ...reason });
     }
-    if (!head.derive) return ok({ path: head.servedPath, state: "none" });
     const served = { path: head.servedPath, sha256: head.served.sha256 };
     const current = await checkArtifact(this.deps.fs, this.deps.hasher, served);
-    if (current === "ok") return ok({ path: served.path, state: "present" });
+    if (current === "ok") return ok({ path: served.path, state: "present", ...reason });
     if (typeof current === "object") {
       const message = `${served.path} is ${artifactProblem(current)} — refusing to derive over it`;
       return fail(ExitCode.Failure, message);
@@ -112,7 +113,7 @@ export class DerivePack {
       const message = `the derive step produced a DIFFERENT edit than the pinned one (sha256 ${produced}, pinned ${served.sha256}) — removed, refusing to serve it`;
       return fail(ExitCode.Failure, message);
     }
-    return ok({ path: served.path, state: "derived", ...stats });
+    return ok({ path: served.path, state: "derived", ...stats, ...reason });
   }
 
   private apply(head: Head, derive: Derive, staged: string): Promise<Result<EditStats>> {
@@ -132,7 +133,7 @@ export class DerivePack {
     step: DraftHeadSplice,
     staged: string,
   ): Promise<Result<EditStats>> {
-    const asset = { path: head.path(step.head), sha256: step.head_sha256 };
+    const asset = { path: head.assetPath(step), sha256: step.head_sha256 };
     const state = await checkArtifact(this.deps.fs, this.deps.hasher, asset);
     if (state !== "ok") {
       return fail(ExitCode.Failure, `the draft head is ${artifactProblem(state)}: ${asset.path}`);
@@ -207,11 +208,10 @@ export class DerivePack {
     head: Head,
     derive: LatticeAblation,
   ): Promise<Result<Float32Array>> {
-    const pinned = deriveAsset(derive);
-    const loraPath = head.path(pinned.path);
+    const loraPath = head.assetPath(derive);
     const lora = await checkArtifact(this.deps.fs, this.deps.hasher, {
       path: loraPath,
-      sha256: pinned.sha256,
+      sha256: derive.lora_sha256,
     });
     if (lora !== "ok") {
       return fail(ExitCode.Failure, `the adapter is ${artifactProblem(lora)}: ${loraPath}`);

@@ -8,20 +8,27 @@ import { DownloadPack } from "./pack-download.service.ts";
 const headToml = await Bun.file(`${import.meta.dir}/../../../heads/bonsai-2-27b/head.toml`).text();
 const BYTES = "the pinned pack bytes";
 const DRAFT = "the pinned draft head bytes";
-/** the head with a sidecar draft (the in-pack head has nothing of its own to fetch) */
-async function setup(draftPresent = true, toml = withSidecarDraft(headToml)) {
+const ASSET = "the pinned public [derive] asset bytes";
+/** the head with a sidecar draft (the in-pack head has nothing of its own to fetch), on a machine
+ *  without the private adapter: it derives the [public] pack, whose draft-head asset `fetch` gets */
+async function setup(draftPresent = true, toml = withSidecarDraft(headToml), assetPresent = true) {
   const p = fakePorts();
   const layout = layoutAt("/r");
   p.fs.put(
     "/r/heads/bonsai-2-27b/head.toml",
     toml
       .replace(/^sha256 = "3cb3.*$/m, `sha256 = "${sha256Of(BYTES)}"`)
-      .replace(/^sha256 = "9dd1.*$/m, `sha256 = "${sha256Of(DRAFT)}"`),
+      .replace(/^sha256 = "9dd1.*$/m, `sha256 = "${sha256Of(DRAFT)}"`)
+      .replace(/^head_sha256 = ".*$/m, `head_sha256 = "${sha256Of(ASSET)}"`),
   );
   const head = await loadHead(p.fs, layout, "bonsai-2-27b");
   if (!head.ok) throw new Error(head.message);
   if (draftPresent && head.value.draftPath) p.fs.put(head.value.draftPath, DRAFT);
-  return { p, head: head.value, uc: new DownloadPack(p) };
+  const [splice] = head.value.derive ?? [];
+  if (!splice?.url) throw new Error("fixture: the head's first [derive] step is not public");
+  const assetPath = head.value.assetPath(splice);
+  if (assetPresent) p.fs.put(assetPath, ASSET);
+  return { p, head: head.value, uc: new DownloadPack(p), assetPath, assetUrl: splice.url };
 }
 
 describe("fetch", () => {
@@ -33,15 +40,46 @@ describe("fetch", () => {
     expect(r.ok && r.value.draft?.state).toBe("present");
     expect(p.shell.calls).toEqual([]);
   });
-  test("the in-pack head has no draft of its own to fetch: the pack is the whole download", async () => {
-    const { p, head, uc } = await setup(false, headToml);
+  test("the in-pack head has no draft of its own to fetch: the pack and the public asset are the whole download", async () => {
+    const { p, head, uc, assetPath } = await setup(false, headToml);
     p.fs.put(head.sourcePath, BYTES);
     const r = await uc.run(head);
-    expect(r.ok && r.value).toEqual({ path: head.sourcePath, state: "present" });
+    expect(r.ok && r.value).toEqual({
+      path: head.sourcePath,
+      state: "present",
+      assets: [{ path: assetPath, state: "present" }],
+    });
     expect(p.shell.calls).toEqual([]);
   });
+  test("a public [derive] asset is fetched from its url into local/packs, by its pin, after the pack", async () => {
+    const { p, head, uc, assetPath, assetUrl } = await setup(false, headToml, false);
+    expect(assetPath).toBe("/r/local/packs/bonsai-2-27b/bonsai-2-27b-mtp-r2.gguf");
+    p.fs.put(head.sourcePath, BYTES);
+    p.shell.on(/^curl/, (cmd) => {
+      p.fs.put(cmd[cmd.indexOf("-o") + 1]!, ASSET);
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const r = await uc.run(head);
+    expect(r.ok && r.value.assets).toEqual([{ path: assetPath, state: "fetched" }]);
+    expect(p.shell.calls.map((c) => c.at(-1))).toEqual([assetUrl]);
+    expect(assetUrl).toStartWith("https://github.com/torad-labs/rig/releases/download/");
+    expect(p.fs.renames).toEqual([[`${assetPath}.part`, assetPath]]);
+    expect(p.fs.text(assetPath)).toBe(ASSET);
+  });
+  test("a public asset with the wrong bytes is removed and named, never renamed into place", async () => {
+    const { p, head, uc, assetPath } = await setup(false, headToml, false);
+    p.fs.put(head.sourcePath, BYTES);
+    p.shell.on(/^curl/, (cmd) => {
+      p.fs.put(cmd[cmd.indexOf("-o") + 1]!, "something else");
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const r = await uc.run(head);
+    expect(!r.ok && r.message).toContain("draft-head-splice asset");
+    expect(await p.fs.exists(assetPath)).toBe(false);
+    expect(await p.fs.exists(`${assetPath}.part`)).toBe(false);
+  });
   test("the draft head is fetched after the pack, by its own pin, and reported beside it", async () => {
-    const { p, head, uc } = await setup(false);
+    const { p, head, uc, assetPath } = await setup(false);
     p.fs.put(head.sourcePath, BYTES);
     p.shell.on(/^curl/, (cmd) => {
       p.fs.put(cmd[cmd.indexOf("-o") + 1]!, cmd.at(-1)!.includes("DFlash2") ? DRAFT : BYTES);
@@ -52,6 +90,7 @@ describe("fetch", () => {
       path: head.sourcePath,
       state: "present",
       draft: { path: head.draftPath!, state: "fetched" },
+      assets: [{ path: assetPath, state: "present" }],
     });
     expect(p.shell.calls.map((c) => c.at(-1))).toEqual([
       "https://huggingface.co/ProCreations/Ternary-Bonsai-2-27B-DFlash2/resolve/4cfb6ad03268fed0f60ca96c1a659c0b1c77e50b/Bonsai-2-27B-DFlash2-Q8_0.gguf",

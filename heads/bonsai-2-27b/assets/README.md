@@ -11,7 +11,10 @@ head's directory, and `rig verify` refuses to start a server while any of them i
 - `lora/bonsai-abliterate-lora.gguf` — the rank-1 refusal adapter the `[derive]` step bakes
   into the served pack; pinned by `lora_sha256`. A private asset, not in git: `torad model pull
   bonsai-2-27b-derive` fetches it on Torad's machines. A machine with neither it nor the derived
-  pack serves the source pack (`rig describe` names why, in `undrived`).
+  pack serves the `[public]` pack (`rig describe` names why, in `undrived`).
+
+The retrained MTP head the first `[[derive]]` step splices in is not here: it is public, and `rig
+fetch` puts it in `local/packs/bonsai-2-27b/` from its `url`, pinned by `head_sha256`.
 
 **Belongs here:** a small, load-bearing file the server or the derive step reads, pinned by
 its sha256 in `head.toml` where the loader checks one, and explained in `evidence.md`.
