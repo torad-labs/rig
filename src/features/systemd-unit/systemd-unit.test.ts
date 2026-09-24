@@ -109,11 +109,40 @@ describe("unit", () => {
     p.systemd.active.add("rig-bonsai-2-27b.service");
     let r = await uc.uninstall(head);
     expect(!r.ok && r.code).toBe(2);
+    // the remedy it names is one that exists: `up` has no --stop
+    expect(!r.ok && r.message).toContain("systemctl --user stop rig-bonsai-2-27b.service");
+    expect(!r.ok && r.message).not.toContain("--stop,");
     p.systemd.active.clear();
     r = await uc.uninstall(head);
     expect(r.ok && r.value.removed).toBe(true);
     expect(await p.fs.exists("/home/u/.config/systemd/user/rig-bonsai-2-27b.service")).toBe(false);
     expect(p.systemd.ops.slice(-2)).toEqual(["disable rig-bonsai-2-27b.service", "daemon-reload"]);
+  });
+  test("install keeps the head past logout: linger on is left alone, off is turned on, refused or unreadable is named with the command", async () => {
+    const { p, head, uc } = await setup();
+    let r = await uc.install(head, { gpu: 0 });
+    expect(r.ok && r.value.linger).toBe(true);
+    expect(p.systemd.ops).not.toContain("enable-linger");
+    // off: turned on, and a re-run with the unit current still checks (a unit installed before this)
+    p.systemd.lingering = false;
+    r = await uc.install(head, { gpu: 0 });
+    expect(r.ok && r.value).toMatchObject({ state: "current", linger: true });
+    expect(p.systemd.ops.filter((op) => op === "enable-linger")).toHaveLength(1);
+    expect(p.log.lines.some((l) => l.includes("turned linger on"))).toBe(true);
+    // refused: false, and the warning names the admin's command
+    p.systemd.lingering = false;
+    p.systemd.lingerAllowed = false;
+    r = await uc.install(head, { gpu: 1 });
+    expect(r.ok && r.value).toMatchObject({ state: "updated", linger: false });
+    expect(p.log.lines.find((l) => l.startsWith("warn") && l.includes("linger"))).toContain(
+      "sudo loginctl enable-linger",
+    );
+    // unreadable (no logind): null, never a claim either way, and no attempt
+    p.systemd.lingering = null;
+    const before = p.systemd.ops.length;
+    r = await uc.install(head, { gpu: 1 });
+    expect(r.ok && r.value.linger).toBeNull();
+    expect(p.systemd.ops.slice(before)).not.toContain("enable-linger");
   });
   test("the unit shields the server from the memory killer on the running pid, and does not block the start when the grant is absent", async () => {
     const { head, uc } = await setup();

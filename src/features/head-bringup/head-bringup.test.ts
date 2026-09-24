@@ -34,7 +34,7 @@ async function setup(over: (calls: string[]) => Partial<BringUpSteps> = () => ({
     },
     installUnit: async () => {
       calls.push("unit");
-      return ok({ unit: "rig-bonsai-2-27b.service", state: "current" });
+      return ok({ unit: "rig-bonsai-2-27b.service", state: "current", linger: true });
     },
     ...over(calls),
   };
@@ -63,6 +63,7 @@ describe("up", () => {
       ok: true,
       value: {
         steps: { fetch: "present", build: "present", derive: "present", unit: "current" },
+        linger: true,
         start: "started",
         serving: { model: "Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010.gguf", slots: 4 },
       },

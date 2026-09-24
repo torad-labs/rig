@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # The gate a prebuilt engine passes before it is published: a machine with only the NVIDIA driver.
-# A fresh ubuntu:24.04 container (the oldest base a prebuilt supports: glibc 2.38, libstdc++ 14,
-# OpenSSL 3.0) gets one card through CDI (the driver's libcuda and nvidia-smi, nothing else from
+# A fresh ubuntu:22.04 container (the oldest base a prebuilt supports: glibc 2.35, libstdc++ 12;
+# --base another image) gets one card through CDI (the driver's libcuda and nvidia-smi, nothing else from
 # NVIDIA) and only curl. This checkout is packed as release.yml packs it, installed by install.sh,
 # and then `rig prepare` must report a prebuilt with no toolkit, `rig build` must install the
 # prebuilt and NVIDIA's pinned runtime and pass its ldd -r check, and the installed llama-bench
 # must decode <pack.gguf> on the card.
 #
-#   scripts/e2e-driver-only.sh <pack.gguf> [--prebuilt engine-sm<cap>-<sha7>.tar.gz] [--gpu N]
+#   scripts/e2e-driver-only.sh <pack.gguf> [--prebuilt engine-sm<cap>-<sha7>.tar.gz] [--gpu N] [--base IMAGE]
 #
 # --prebuilt installs a local tarball instead of the one engine.toml pins (the staged engine.toml
 # points its [[prebuilt]] entry at the file, with the file's sha256): the check a build passes
@@ -15,15 +15,16 @@
 # RIG_GATE_LOCK=<file> holds that flock around the decode leg only (a shared gate card).
 set -euo pipefail
 
-usage() { echo "usage: scripts/e2e-driver-only.sh <pack.gguf> [--prebuilt <tarball>] [--gpu N]" >&2; exit 64; }
+usage() { echo "usage: scripts/e2e-driver-only.sh <pack.gguf> [--prebuilt <tarball>] [--gpu N] [--base IMAGE]" >&2; exit 64; }
 [ $# -ge 1 ] || usage
 pack=$(realpath "$1")
 shift
-prebuilt="" gpu=0
+prebuilt="" gpu=0 base=ubuntu:22.04
 while [ $# -gt 0 ]; do
   case $1 in
     --prebuilt) prebuilt=$(realpath "${2:?}"); shift 2 ;;
     --gpu) gpu=${2:?}; shift 2 ;;
+    --base) base=${2:?}; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -57,11 +58,12 @@ cp "$root/install.sh" "$stage/release/"
 lock=/dev/null
 if [ -n "${RIG_GATE_LOCK:-}" ]; then lock=$RIG_GATE_LOCK; fi
 docker run --rm --device "nvidia.com/gpu=$gpu" -v "$lock:/gate.lock" \
-  -v "$stage/release:/rel:ro" -v "$pack:/pack.gguf:ro" "${mounts[@]}" ubuntu:24.04 bash -c '
+  -v "$stage/release:/rel:ro" -v "$pack:/pack.gguf:ro" "${mounts[@]}" "$base" bash -c '
 set -euo pipefail
 apt-get update -qq > /dev/null
 apt-get install -y -qq curl ca-certificates > /dev/null   # what install.sh needs; rig adds the rest
 echo "== the machine: no toolkit, no compiler"
+grep PRETTY_NAME /etc/os-release; ldd --version | head -1
 for tool in nvcc cmake ninja git gcc; do
   if command -v $tool > /dev/null; then echo "UNEXPECTED: $tool is here"; exit 1; fi
 done

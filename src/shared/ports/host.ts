@@ -6,4 +6,6 @@ export interface Host {
   ramMiB(): Promise<number>;
   /** the pid holding the TCP listener on port; null when none is found or it cannot be read */
   listeningPid(port: number): Promise<number | null>;
+  /** the GNU C library version this machine runs ("2.35"); null when it is not glibc or unreadable */
+  glibc(): Promise<string | null>;
 }

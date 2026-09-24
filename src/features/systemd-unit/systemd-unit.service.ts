@@ -37,6 +37,8 @@ export interface InstallReport {
   state: "current" | "installed" | "updated";
   backup?: string;
   cacheRam: number;
+  /** whether the unit outlives its user's last session (logind's Linger): null when unreadable */
+  linger: boolean | null;
 }
 export interface UnitStatus {
   unit: string;
@@ -98,8 +100,10 @@ export class ManageUnit {
     await this.deps.fs.mkdirp(this.deps.systemd.unitDir());
     await this.deps.fs.mkdirp(this.layout.logsDir);
     const existed = await this.deps.fs.exists(path);
-    if (existed && (await this.deps.fs.readText(path)) === rendered.value.text)
-      return ok({ unit, path, state: "current", cacheRam: rendered.value.cacheRam });
+    if (existed && (await this.deps.fs.readText(path)) === rendered.value.text) {
+      const linger = await this.ensureLinger();
+      return ok({ unit, path, state: "current", cacheRam: rendered.value.cacheRam, linger });
+    }
     let backup: string | undefined;
     if (existed) {
       backup = `${path}.${compactStamp(this.deps.clock.now())}.bak`;
@@ -117,7 +121,30 @@ export class ManageUnit {
       state: existed ? "updated" : "installed",
       ...(backup ? { backup } : {}),
       cacheRam: rendered.value.cacheRam,
+      linger: await this.ensureLinger(),
     });
+  }
+
+  /** a user unit stops with its user's last session unless logind keeps the manager (linger): a
+   *  head brought up over ssh or by a setup wizard would die at logout. Turned on where it is off
+   *  (a user may set their own); named, with the command, where that is refused or unreadable. */
+  private async ensureLinger(): Promise<boolean | null> {
+    const linger = await this.deps.systemd.linger();
+    if (linger === true) return true;
+    if (linger === false && (await this.deps.systemd.enableLinger())) {
+      if ((await this.deps.systemd.linger()) === true) {
+        this.deps.log.info(
+          "turned linger on for this user (loginctl enable-linger): the head outlives logout",
+        );
+        return true;
+      }
+    }
+    this.deps.log.warn(
+      linger === null
+        ? "cannot read whether this user lingers (loginctl show-user): the head stops at logout unless it does — loginctl enable-linger"
+        : "linger is off and loginctl enable-linger was refused: the head stops at logout — sudo loginctl enable-linger $USER",
+    );
+    return linger === null ? null : false;
   }
 
   async status(head: Head): Promise<UnitStatus> {
@@ -149,7 +176,7 @@ export class ManageUnit {
     if (await this.deps.systemd.isActive(unit))
       return fail(
         ExitCode.Busy,
-        `${unit} is active — stop it first (rig up --stop, or systemctl --user stop ${unit})`,
+        `${unit} is active — stop it first: systemctl --user stop ${unit}`,
       );
     await this.deps.systemd.disable(unit);
     await this.deps.fs.remove(path);

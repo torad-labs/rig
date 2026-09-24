@@ -5,7 +5,8 @@ heads up, gated and measured — the local runtime behind an OpenAI-compatible p
 Bun program, one binary; the model is data under `heads/<name>/`, the engine is a pinned commit
 under `engine/`, everything generated lives under `local/`.
 
-On a Linux machine with an NVIDIA card and its driver:
+On a Linux machine (glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36 and later) with an
+NVIDIA card and its driver:
 
 ```
 curl -fsSL https://github.com/torad-labs/rig/releases/latest/download/install.sh | sh

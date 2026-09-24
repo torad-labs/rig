@@ -107,13 +107,16 @@ url = "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/linux
 sha256 = "35a898360520d6101ffcaf36c0d04496b54d4fc2afb82f7fce44218c54513808"
 libs = ["libcublas.so.13", "libcublasLt.so.13"]
 
-# The pin's own build for a card, published with the fork's release engine-<sha7>; `rig build`
+# The pin's own build for a card, published with a fork release engine-<sha7>[-<n>]; `rig build`
 # installs it instead of compiling. A pin move republishes it or drops it: loadEngine refuses an
-# entry named for another commit. Publishing: `rig build --portable` (no build path, host or user
-# recorded; libgomp bundled; no OpenSSL), then `scripts/e2e-driver-only.sh <pack> --prebuilt
-# <tarball>` must pass (Ubuntu 24.04, driver only: install, ldd -r, decode), then `gh release
-# create engine-<sha7>` on the fork with the tarball, and its sha256 here.
+# entry named for another commit. Publishing: `scripts/build-prebuilt.sh` (`rig build --portable`
+# inside Ubuntu 22.04, so glibc 2.35 is the floor; no build path, host or user recorded; libgomp
+# bundled; no OpenSSL), then `scripts/e2e-driver-only.sh <pack> --prebuilt <tarball>` must pass
+# (Ubuntu 22.04, driver only: install, ldd -r, decode), then `gh release create` on the fork with
+# the tarball, and its sha256 here. A published asset is never replaced: a released rig pins its
+# sha, so a rebuild of the same commit is a new release, engine-<sha7>-<n>.
 [[prebuilt]]
 cap = "120"
-url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-1399830/engine-sm120-1399830.tar.gz"
-sha256 = "fdaaa51bc4769d20b418c148e8c55f349e70bffcfb884b7e9f32f66cb92741f1"
+url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-1399830-2/engine-sm120-1399830.tar.gz"
+sha256 = "4a6d6ed6838b8e8a054bf56ac7a00ce74d9c999efd0e4550ad38f7ab99eb676e"
+glibc = "2.35"                 # scripts/prebuilt/Dockerfile's Ubuntu 22.04; its ELF files need GLIBC_2.34 at most

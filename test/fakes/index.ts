@@ -260,6 +260,17 @@ export class FakeSystemd implements Systemd {
   async mainPid(u: string) {
     return this.pids.get(u) ?? null;
   }
+  /** logind's Linger for this user (null: unreadable), and whether enable-linger is allowed */
+  lingering: boolean | null = true;
+  lingerAllowed = true;
+  async linger() {
+    return this.lingering;
+  }
+  async enableLinger() {
+    this.ops.push("enable-linger");
+    if (this.lingerAllowed) this.lingering = true;
+    return this.lingerAllowed;
+  }
 }
 
 export class FakeGit implements Git {
@@ -305,6 +316,10 @@ export class FakeHost implements Host {
   ram = 62818;
   /** port → pid of the process listening on it */
   listeners = new Map<number, number>();
+  libc: string | null = "2.39";
+  async glibc() {
+    return this.libc;
+  }
   async listeningPid(port: number) {
     return this.listeners.get(port) ?? null;
   }

@@ -17,7 +17,8 @@ const engine = {
 const withPrebuilt = {
   ...engine,
   cuda: { version: "13.3", runtime: [] },
-  prebuiltFor: (c: string) => (c === "120" ? { cap: "120", url: "u", sha256: "s" } : undefined),
+  prebuiltFor: (c: string) =>
+    c === "120" ? { cap: "120", url: "u", sha256: "s", glibc: "2.35" } : undefined,
 } as unknown as Engine;
 
 /** a driver-only machine: nvidia-smi, curl, tar, xz; no git, cmake, ninja or toolkit */
@@ -125,6 +126,29 @@ describe("prepare, a card with a published prebuilt", () => {
     const install = p.shell.calls.find((c) => c[1] === "install")!;
     expect(install).toContain("xz-utils");
     expect(install).not.toContain("cmake");
+  });
+  test("below the prebuilt's glibc the card compiles: the toolchain is required and the reason named, in the report or the exit-1 message", async () => {
+    const p = driverOnly();
+    p.host.libc = "2.31";
+    const r = await new CheckMachine(p, withPrebuilt).run({ gpu: 0, uid: 1000 });
+    expect(!r.ok && r.code).toBe(ExitCode.Failure);
+    expect(!r.ok && r.message).toContain("git, cmake, ninja");
+    expect(!r.ok && r.message).toContain(
+      "glibc 2.31 on this machine; the published sm_120 build needs glibc 2.35 or newer",
+    );
+    const full = ready();
+    full.host.libc = "2.31";
+    const compiles = await new CheckMachine(full, withPrebuilt).run({ gpu: 0, uid: 1000 });
+    expect(compiles.ok && compiles.value).toMatchObject({
+      prebuilt: false,
+      noPrebuilt:
+        "glibc 2.31 on this machine; the published sm_120 build needs glibc 2.35 or newer",
+    });
+    const at = driverOnly();
+    at.host.libc = "2.35"; // the floor itself is enough
+    const atFloor = await new CheckMachine(at, withPrebuilt).run({ gpu: 0, uid: 1000 });
+    expect(atFloor.ok && atFloor.value.prebuilt).toBe(true);
+    expect(atFloor.ok && "noPrebuilt" in atFloor.value).toBe(false);
   });
   test("a card with no prebuilt still needs the whole toolchain", async () => {
     const p = driverOnly();

@@ -9,6 +9,10 @@ export class BunHost implements Host {
     const pid = /pid=(\d+)/.exec(result.stdout)?.[1];
     return result.code === 0 && pid ? Number(pid) : null;
   }
+  async glibc() {
+    const result = await this.shell.run(["getconf", "GNU_LIBC_VERSION"]);
+    return result.code === 0 ? (/^glibc (\d+\.\d+)/.exec(result.stdout.trim())?.[1] ?? null) : null;
+  }
   hostname() {
     return os.hostname();
   }

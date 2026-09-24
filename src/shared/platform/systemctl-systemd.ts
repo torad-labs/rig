@@ -1,3 +1,4 @@
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import type { Shell, Systemd } from "../ports/index.ts";
 
@@ -6,6 +7,7 @@ export class SystemctlSystemd implements Systemd {
   constructor(
     private readonly shell: Shell,
     private readonly home = process.env.HOME ?? "",
+    private readonly user = userInfo().username,
   ) {}
   unitDir() {
     return join(this.home, ".config", "systemd", "user");
@@ -45,5 +47,19 @@ export class SystemctlSystemd implements Systemd {
       ).stdout.trim(),
     );
     return pid > 0 ? pid : null;
+  }
+  async linger() {
+    const shown = await this.shell.run([
+      "loginctl",
+      "show-user",
+      this.user,
+      "--property=Linger",
+      "--value",
+    ]);
+    const value = shown.stdout.trim();
+    return shown.code === 0 && (value === "yes" || value === "no") ? value === "yes" : null;
+  }
+  async enableLinger() {
+    return (await this.shell.run(["loginctl", "enable-linger", this.user])).code === 0;
   }
 }

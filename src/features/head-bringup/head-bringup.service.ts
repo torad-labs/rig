@@ -24,7 +24,7 @@ export interface BringUpSteps {
   installUnit(
     head: Head,
     options: { gpu: number; cacheRam?: number | undefined },
-  ): Promise<Result<{ unit: string; state: string }>>;
+  ): Promise<Result<{ unit: string; state: string; linger: boolean | null }>>;
 }
 
 export interface BringUpHeadDeps {
@@ -54,6 +54,8 @@ export interface StepStates {
 
 export interface BringUpReport {
   steps: StepStates;
+  /** whether the head outlives its user's logout (logind's Linger): null when unreadable */
+  linger: boolean | null;
   start: "started" | "restarted" | "left-running";
   serving?: Serving;
 }
@@ -66,7 +68,7 @@ export class BringUpHead {
   async run(head: Head, options: BringUpOptions): Promise<Result<BringUpReport>> {
     const prepared = await this.prepared(head, options);
     if (!prepared.ok) return prepared;
-    const { steps, unit } = prepared.value;
+    const { steps, unit, linger } = prepared.value;
 
     this.announce("start");
     const endpoint = new HeadEndpoint(
@@ -79,7 +81,7 @@ export class BringUpHead {
       this.deps.log.info(
         `a head is already serving on :${head.port} — left running; the unit now carries the new build and pack. Switch when it is quiet: rig up ${head.name} --restart (refuses while a request is processing or queued)`,
       );
-      return ok({ steps, start: "left-running" });
+      return ok({ steps, linger, start: "left-running" });
     }
     if (presence === "unknown") {
       return fail(
@@ -143,14 +145,14 @@ export class BringUpHead {
     this.deps.log.info(
       `serving ${serving.model} with ${serving.slots} slots on 127.0.0.1:${head.port} (${unit}, pid ${pid})${undrived}`,
     );
-    return ok({ steps, start: presence === "server" ? "restarted" : "started", serving });
+    return ok({ steps, linger, start: presence === "server" ? "restarted" : "started", serving });
   }
 
   /** everything before the start: the machine, the pack, the build, the derivation, the unit */
   private async prepared(
     head: Head,
     options: BringUpOptions,
-  ): Promise<Result<{ steps: StepStates; unit: string }>> {
+  ): Promise<Result<{ steps: StepStates; unit: string; linger: boolean | null }>> {
     const machine = { gpu: options.gpu, allowArch: options.allowArch };
 
     this.announce("prepare");
@@ -182,7 +184,7 @@ export class BringUpHead {
       derive: derived.value.state,
       unit: unit.value.state,
     };
-    return ok({ steps, unit: unit.value.unit });
+    return ok({ steps, unit: unit.value.unit, linger: unit.value.linger });
   }
 
   private announce(step: string): void {

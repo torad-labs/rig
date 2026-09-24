@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { fakePorts } from "../../../test/fakes/index.ts";
 import { layoutAt } from "../layout.ts";
-import { engineSource, loadEngine } from "./engine.ts";
+import { engineSource, loadEngine, type Prebuilt, prebuiltSkip } from "./engine.ts";
 
 const root = `${import.meta.dir}/../../..`;
 const engineToml = await Bun.file(`${root}/engine/engine.toml`).text();
@@ -70,6 +70,7 @@ libs = ["libcudart.so.13"]
 cap = "${cap}"
 url = "https://github.com/torad-labs/llama.cpp/releases/download/x/engine-sm${cap}-${sha7}.tar.gz"
 sha256 = "${"b".repeat(64)}"
+glibc = "2.35"
 `;
   async function load(toml: string) {
     const p = fakePorts();
@@ -98,5 +99,19 @@ sha256 = "${"b".repeat(64)}"
       const e = await load(toml);
       expect(!e.ok && e.message).toContain(message);
     }
+  });
+  test("a prebuilt names its glibc floor, and a machine below it (by number: 2.4 is below 2.35) or without glibc skips it", async () => {
+    const sha7 = (await engine()).sha7;
+    const noFloor = await load(
+      `${base}\n${cuda}${prebuilt("120", sha7).replace(/^glibc = .*\n/m, "")}`,
+    );
+    expect(!noFloor.ok && noFloor.message).toContain("glibc");
+    const entry = { cap: "120", url: "u", sha256: "s", glibc: "2.35" } as Prebuilt;
+    expect(prebuiltSkip(entry, "2.35")).toBeUndefined();
+    expect(prebuiltSkip(entry, "2.39")).toBeUndefined();
+    expect(prebuiltSkip(entry, "3.0")).toBeUndefined();
+    expect(prebuiltSkip(entry, "2.34")).toContain("glibc 2.34 on this machine");
+    expect(prebuiltSkip(entry, "2.4")).toContain("needs glibc 2.35 or newer");
+    expect(prebuiltSkip(entry, null)).toContain("not glibc");
   });
 });
