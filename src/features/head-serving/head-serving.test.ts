@@ -4,9 +4,10 @@ import { fakePorts } from "../../../test/fakes/index.ts";
 import { loadEngine } from "../../shared/engine/engine.ts";
 import { loadHead } from "../../shared/head/head.ts";
 import { draftSidecar } from "../../shared/head/head-config.ts";
+import { pickTier } from "../../shared/head/tier.ts";
 import { layoutAt } from "../../shared/layout.ts";
 import { ExitCode } from "../../shared/result.ts";
-import { defaultCacheRam, pickTier } from "./geometry.ts";
+import { defaultCacheRam } from "./geometry.ts";
 import golden from "./golden-argv.json";
 import { ServeHead, type ServePlan, serveLogLine } from "./head-serving.service.ts";
 

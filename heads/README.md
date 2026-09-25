@@ -4,8 +4,8 @@ One directory per head. Everything rig knows about a model is data here; nothing
 model-specific, and a head that needs a code path is a bug in rig.
 
 ```
-<name>/head.toml     the identity: source pack (repo, rev, file, sha256), served pack (file,
-                     sha256), the optional [derive] step, [speculative] draft head, context,
+<name>/head.toml     the identity: source pack (repo, rev, file, sha256, bytes), served pack
+                     (file, sha256, bytes), the optional [derive] step, [speculative] draft head, context,
                      geometry constants and the measured tiers, runtime args, client facts
 <name>/gates.toml    the probes that gate this head and what counts, run by `rig gate <name>`
 <name>/evidence.md   where every number in the two toml files came from, citing runs

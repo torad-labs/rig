@@ -20,6 +20,10 @@ async function setup(over: (calls: string[]) => Partial<BringUpSteps> = () => ({
       calls.push("prepare");
       return ok({});
     },
+    room: async () => {
+      calls.push("room");
+      return ok({});
+    },
     fetch: async () => {
       calls.push("fetch");
       return ok({ state: "present" });
@@ -58,7 +62,7 @@ describe("up", () => {
     p.systemd.pids.set("rig-bonsai-2-27b.service", 4243);
     p.host.listeners.set(8099, 4243);
     const r = await uc.run(head, { gpu: 0 });
-    expect(calls).toEqual(["prepare", "fetch", "build", "derive", "unit"]);
+    expect(calls).toEqual(["prepare", "room", "fetch", "build", "derive", "unit"]);
     expect(p.systemd.ops).toEqual(["restart rig-bonsai-2-27b.service"]);
     expect(r).toEqual({
       ok: true,
@@ -101,7 +105,18 @@ describe("up", () => {
     }));
     const r = await uc.run(head, { gpu: 0 });
     expect(!r.ok && r.code).toBe(3);
-    expect(calls).toEqual(["prepare", "fetch", "build"]);
+    expect(calls).toEqual(["prepare", "room", "fetch", "build"]);
+  });
+  test("a card too small for the head or a disk too full for it stops before the fetch", async () => {
+    const { uc, head, calls } = await setup((calls) => ({
+      room: async () => {
+        calls.push("room");
+        return fail(ExitCode.Unsupported, "12227 MiB of VRAM is below the smallest tier");
+      },
+    }));
+    const r = await uc.run(head, { gpu: 0 });
+    expect(!r.ok && r.code).toBe(3);
+    expect(calls).toEqual(["prepare", "room"]);
   });
   test("a serving head is left running unless --restart", async () => {
     const { p, head, uc } = await setup();

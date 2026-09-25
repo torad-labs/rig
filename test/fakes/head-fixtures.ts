@@ -9,6 +9,7 @@ repo = "ProCreations/Ternary-Bonsai-2-27B-DFlash2"
 rev = "4cfb6ad03268fed0f60ca96c1a659c0b1c77e50b"
 file = "Bonsai-2-27B-DFlash2-Q8_0.gguf"
 sha256 = "9dd11c8adb910058faf9fb77b10d90c1c048a4f3c2887a890f592cbd882deb9a"
+bytes = 1
 type = "draft-dflash"
 n_max = 3
 weights_mib = 100

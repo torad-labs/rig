@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { fakePorts } from "../../../test/fakes/index.ts";
+import { putHead } from "../../../test/fakes/head-fixtures.ts";
+import { type FakePorts, fakePorts } from "../../../test/fakes/index.ts";
 import type { Engine } from "../../shared/engine/engine.ts";
+import { loadHead } from "../../shared/head/head.ts";
+import { layoutAt } from "../../shared/layout.ts";
 import { ExitCode } from "../../shared/result.ts";
-import { CheckMachine, PREBUILT_TOOLS, REQUIRED_TOOLS } from "./machine-check.service.ts";
+import {
+  CheckMachine,
+  ENGINE_PEAK_BYTES,
+  PREBUILT_TOOLS,
+  REQUIRED_TOOLS,
+} from "./machine-check.service.ts";
 
 const engine = {
   archs: [
@@ -156,5 +164,82 @@ describe("prepare, a card with a published prebuilt", () => {
     const r = await new CheckMachine(p, withPrebuilt).run({ gpu: 0, uid: 1000 });
     expect(!r.ok && r.message).toContain("git, cmake, ninja");
     expect(!r.ok && r.message).toContain("cuda toolkit (nvcc)");
+  });
+});
+
+const headToml = await Bun.file(`${import.meta.dir}/../../../heads/bonsai-2-27b/head.toml`).text();
+const PACK = 7_657_489_728;
+const DRAFT_HEAD = 451_320_896;
+
+/** the engine above, publishing its builds under local/engine-builds */
+const building = {
+  ...engine,
+  binDir: (cap: string) => `/r/local/engine-builds/c008fe8-sm${cap}`,
+} as unknown as Engine;
+
+/** the real head as a stranger's clone sees it (no private adapter, nothing fetched), or as a
+ *  Torad machine does, every [derive] asset in place */
+async function bonsai(p: FakePorts, assets = false) {
+  if (assets) putHead(p.fs, "/r", headToml);
+  else p.fs.put("/r/heads/bonsai-2-27b/head.toml", headToml);
+  const head = await loadHead(p.fs, layoutAt("/r"), "bonsai-2-27b");
+  if (!head.ok) throw new Error(head.message);
+  return head.value;
+}
+
+describe("room, before the first byte is fetched", () => {
+  test("a card below the head's smallest tier is refused with exit 3, naming the card and the tier", async () => {
+    const p = ready();
+    p.gpu.card(0, { name: "NVIDIA GeForce RTX 5070", memoryMiB: 12227 });
+    const r = await new CheckMachine(p, building).room(await bonsai(p), { gpu: 0 });
+    expect(!r.ok && r.code).toBe(ExitCode.Unsupported);
+    expect(!r.ok && r.message).toBe(
+      "NVIDIA GeForce RTX 5070 at index 0 cannot serve bonsai-2-27b: 12227 MiB of VRAM is below the smallest tier this head declares (16000 MiB)",
+    );
+  });
+  test("a fresh clone needs the source pack, our draft head, the public pack it derives and the engine: one byte short is refused", async () => {
+    const p = ready();
+    const head = await bonsai(p);
+    const total = PACK + DRAFT_HEAD + PACK + ENGINE_PEAK_BYTES;
+    p.fs.free = total;
+    const r = await new CheckMachine(p, building).room(head, { gpu: 0 });
+    expect(r.ok && r.value.tier.min_vram_mib).toBe(16000);
+    expect(r.ok && r.value.needs).toEqual([
+      { what: "Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf", bytes: PACK },
+      { what: "bonsai-2-27b-mtp-r2.gguf", bytes: DRAFT_HEAD },
+      { what: "Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf", bytes: PACK },
+      { what: "the engine", bytes: ENGINE_PEAK_BYTES },
+    ]);
+    p.fs.free = total - 1;
+    const short = await new CheckMachine(p, building).room(head, { gpu: 0 });
+    expect(!short.ok && short.code).toBe(ExitCode.Failure);
+    p.fs.free = 5e9;
+    const full = await new CheckMachine(p, building).room(head, { gpu: 0 });
+    expect(!full.ok && full.message).toBe(
+      "not enough disk under /r/local/packs/bonsai-2-27b: bonsai-2-27b still needs 17.4 GB (Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf 7.7 GB, bonsai-2-27b-mtp-r2.gguf 0.5 GB, Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf 7.7 GB, the engine 1.6 GB) and 5.0 GB is free",
+    );
+  });
+  test("what is there is not counted, and a resumed download or a restarted bake counts only what it still lacks", async () => {
+    const p = ready();
+    const head = await bonsai(p, true);
+    p.fs.put(`${head.sourcePath}.part`, "partial");
+    p.fs.put(`${head.servedPath}.deriving`, "a stale bake");
+    p.fs.put("/r/local/engine-builds/c008fe8-sm120/BUILD", "c008fe8");
+    p.fs.put("/r/local/engine-builds/c008fe8-sm120/llama-server", "elf");
+    p.fs.free = 0;
+    const r = await new CheckMachine(p, building).room(head, { gpu: 0 });
+    expect(!r.ok && r.message).toContain(
+      "still needs 15.3 GB (Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf 7.7 GB, Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf 7.7 GB)",
+    );
+    p.fs.free = PACK - "partial".length + PACK - "a stale bake".length;
+    const r2 = await new CheckMachine(p, building).room(head, { gpu: 0 });
+    expect(r2.ok && r2.value.needs.map((need) => need.bytes)).toEqual([
+      PACK - "partial".length,
+      PACK - "a stale bake".length,
+    ]);
+    p.fs.put(head.sourcePath, "the pack");
+    p.fs.put(head.servedPath, "the served pack");
+    const present = await new CheckMachine(p, building).room(head, { gpu: 0 });
+    expect(present.ok && present.value.needs).toEqual([]);
   });
 });

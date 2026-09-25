@@ -84,18 +84,22 @@ repo = "x/y"
 rev = "${"a".repeat(40)}"
 file = "tiny.gguf"
 sha256 = "${o.sourceSha}"
+bytes = 1
 [served]
 file = "${o.derive ? "tiny-ablated.gguf" : "tiny.gguf"}"
 sha256 = "${o.servedSha}"
+bytes = 1
 ${
   o.publicSplice
     ? `[public]
 file = "tiny-public.gguf"
 sha256 = "${o.publicSplice.publicSha}"
+bytes = 1
 [[derive]]
 kind = "draft-head-splice"
 head = "draft-head.gguf"
 head_sha256 = "${o.publicSplice.headSha}"
+head_bytes = 1
 url = "https://example.com/draft-head.gguf"`
     : ""
 }
