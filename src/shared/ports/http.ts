@@ -5,8 +5,8 @@ export interface HttpResponse {
 }
 /** A request whose connection closed before any response rejects with an Error named
  *  "ConnectionClosed": the server may still be up (a keep-alive socket reset under load), so a
- *  caller whose request is safe to repeat may repeat it. A server that is not listening is not
- *  this error. */
+ *  caller whose request is safe to repeat may repeat it. A request to a port nothing listens on
+ *  rejects with an Error named "ConnectionRefused": the one answer that proves no server is there. */
 export interface Http {
   request(
     method: "GET" | "POST",

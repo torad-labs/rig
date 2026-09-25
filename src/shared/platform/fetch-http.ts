@@ -18,15 +18,25 @@ export class FetchHttp implements Http {
     try {
       response = await fetch(url, init);
     } catch (error) {
-      // Bun names a connection closed or reset before the response ECONNRESET; a refused one is
-      // ConnectionRefused, and stays what it is
-      if ((error as { code?: unknown }).code !== "ECONNRESET") throw error;
-      const closed = new Error(`${method} ${url}: the connection closed before a response`, {
-        cause: error,
-      });
-      closed.name = "ConnectionClosed";
-      throw closed;
+      // Bun 1.4 codes a refused connection ConnectionRefused (Node's is ECONNREFUSED) and one
+      // closed or reset before the response ECONNRESET; the port names both, anything else
+      // (a timeout, a DNS failure) stays what it is
+      const code = (error as { code?: unknown }).code;
+      if (code === "ConnectionRefused" || code === "ECONNREFUSED")
+        throw named("ConnectionRefused", `${method} ${url}: nothing is listening`, error);
+      if (code !== "ECONNRESET") throw error;
+      throw named(
+        "ConnectionClosed",
+        `${method} ${url}: the connection closed before a response`,
+        error,
+      );
     }
     return { status: response.status, text: await response.text() };
   }
+}
+
+function named(name: string, message: string, cause: unknown): Error {
+  const error = new Error(message, { cause });
+  error.name = name;
+  return error;
 }

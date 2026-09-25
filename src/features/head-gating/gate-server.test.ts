@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { withSidecarDraft } from "../../../test/fakes/head-fixtures.ts";
-import { fakePorts } from "../../../test/fakes/index.ts";
+import { connectionRefused, fakePorts } from "../../../test/fakes/index.ts";
 import { loadHead } from "../../shared/head/head.ts";
 import { layoutAt } from "../../shared/layout.ts";
 import { GateServer } from "./gate-server.ts";
@@ -146,7 +146,7 @@ describe("gate server", () => {
     const { p, server } = await setup();
     let polls = 0;
     p.http.on(/\/health$/, () => {
-      if (polls++ < 3) throw new Error("ECONNREFUSED");
+      if (polls++ < 3) throw connectionRefused();
       return { status: 200, text: "" };
     });
     const value = await server.leg(
@@ -185,7 +185,7 @@ describe("gate server", () => {
   test("a server that never answers is given up on after 300 s, with the log named", async () => {
     const { p, server } = await setup();
     p.http.on(/\/health$/, () => {
-      throw new Error("ECONNREFUSED");
+      throw connectionRefused();
     });
     await expect(
       server.start({ label: "dead", pack: "/p.gguf", ctx: 8192, slots: 1 }),

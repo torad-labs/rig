@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { putHead } from "../../../test/fakes/head-fixtures.ts";
-import { type FakePorts, fakePorts } from "../../../test/fakes/index.ts";
+import { connectionRefused, type FakePorts, fakePorts } from "../../../test/fakes/index.ts";
 import { loadEngine } from "../../shared/engine/engine.ts";
 import { loadHead } from "../../shared/head/head.ts";
 import { layoutAt } from "../../shared/layout.ts";
@@ -232,7 +232,7 @@ describe("gate", () => {
     let r = await uc.run(head, { only: ["refusal"], gpu: 0 });
     expect(!r.ok && r.code).toBe(2);
     p.http.on(/8099\/health$/, () => {
-      throw new Error("ECONNREFUSED");
+      throw connectionRefused();
     });
     await p.fs.remove(`${engine.binDir("120")}/BUILD`);
     r = await uc.run(head, { only: ["refusal"] });
@@ -252,7 +252,7 @@ describe("gate", () => {
       stderr: "",
     });
     p.http.on(/8099\/health$/, () => {
-      throw new Error("ECONNREFUSED");
+      throw connectionRefused();
     });
     const r = await uc.run(head, { only: ["depth"], gpu: 0 }); // GPU 0 is fine while nothing serves on :8099
     expect(r.ok && r.value.probes[0]).toEqual({
@@ -291,7 +291,7 @@ describe("gate", () => {
     let r = await uc.run(head, { only: ["sessions"] });
     expect(!r.ok && r.message).toContain("--live");
     p.http.on(/8099\/health$/, () => {
-      throw new Error("ECONNREFUSED");
+      throw connectionRefused();
     });
     r = await uc.run(head, { only: ["concurrency"], live: true });
     expect(!r.ok && r.message).toContain("no healthy head at http://127.0.0.1:8099");

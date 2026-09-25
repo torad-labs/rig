@@ -34,6 +34,8 @@ export interface InstallOptions {
 export interface InstallReport {
   unit: string;
   path: string;
+  /** where the unit writes the server's stdout and stderr (not the journal) */
+  log: string;
   state: "current" | "installed" | "updated";
   backup?: string;
   cacheRam: number;
@@ -57,6 +59,10 @@ export class ManageUnit {
 
   unitPath(head: Head) {
     return join(this.deps.systemd.unitDir(), unitName(head.name));
+  }
+
+  logPath(head: Head) {
+    return join(this.layout.logsDir, `${head.name}.log`);
   }
 
   async render(
@@ -83,7 +89,7 @@ export class ManageUnit {
     const text = renderUnit({
       head,
       root: this.layout.root,
-      logPath: join(this.layout.logsDir, `${head.name}.log`),
+      logPath: this.logPath(head),
       argv: plan.value.argv,
       env: plan.value.env,
       gpu: options.gpu,
@@ -102,7 +108,8 @@ export class ManageUnit {
     const existed = await this.deps.fs.exists(path);
     if (existed && (await this.deps.fs.readText(path)) === rendered.value.text) {
       const linger = await this.ensureLinger();
-      return ok({ unit, path, state: "current", cacheRam: rendered.value.cacheRam, linger });
+      const { cacheRam } = rendered.value;
+      return ok({ unit, path, log: this.logPath(head), state: "current", cacheRam, linger });
     }
     let backup: string | undefined;
     if (existed) {
@@ -118,6 +125,7 @@ export class ManageUnit {
     return ok({
       unit,
       path,
+      log: this.logPath(head),
       state: existed ? "updated" : "installed",
       ...(backup ? { backup } : {}),
       cacheRam: rendered.value.cacheRam,

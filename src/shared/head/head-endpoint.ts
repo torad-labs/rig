@@ -22,10 +22,9 @@ const QUICK_MS = 3000;
  *  (a timeout, a reset): "unknown" is never treated as idle by anything that restarts */
 export type Presence = "server" | "none" | "unknown";
 
-/** the one error that proves nothing listens: a refused connection (Bun sets the code; fakes the text) */
+/** the one error that proves nothing listens: a refused connection, named by the Http port */
 function refused(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  return code === "ECONNREFUSED" || /ECONNREFUSED/.test(String(error));
+  return (error as { name?: unknown } | null)?.name === "ConnectionRefused";
 }
 
 export class HeadEndpoint {
