@@ -38,7 +38,9 @@ const h100: Offer = {
   downMbps: 219,
 };
 
-async function setup() {
+/** boxServes: the pack the box answers /props with — its public pack, the default a box derives
+ *  without the private adapter, or this machine's served pack (--private) */
+async function setup(boxServes: "public" | "served" = "public") {
   const p = fakePorts();
   const layout = layoutAt("/r");
   putHead(p.fs, "/r", headToml); // ships the adapter: this fixture's head is drived, not undrived
@@ -59,8 +61,9 @@ async function setup() {
   p.rental.offers = [h100];
   p.shell.on(/^tar /, { code: 0, stdout: "", stderr: "" });
   p.http.json(/8100\/health$/, { status: "ok" });
+  const boxPack = boxServes === "served" ? head.value.served.file : head.value.public?.file;
   p.http.json(/8100\/props$/, {
-    model_path: `/workspace/rig/local/packs/bonsai-2-27b/${head.value.served.file}`,
+    model_path: `/workspace/rig/local/packs/bonsai-2-27b/${boxPack}`,
     total_slots: 16,
   });
   const uc = new RentGpu(
@@ -111,7 +114,7 @@ describe("vast up", () => {
     expect(p.rental.instances.size).toBe(0);
     expect(p.fs.text("/r/local/rented-box/offers.json")).toContain("50262229");
   });
-  test("rents, ships rig + head + engine pin, brings the head up on the box with rig's own steps, opens the tunnel and arms the idle timer", async () => {
+  test("rents, ships rig + head (its private adapter kept here) + engine pin, brings the head up on the box with rig's own steps, opens the tunnel and arms the idle timer", async () => {
     const { p, head, uc } = await setup();
     p.ssh.on(/rig build/, { code: 0, stdout: "", stderr: "" });
     const r = await uc.up(head, { gpu: "H100_SXM" });
@@ -124,13 +127,15 @@ describe("vast up", () => {
       sshHost: "ssh5.vast.ai",
       sshPort: 12345,
       localUrl: "http://127.0.0.1:8100",
-      serving: { model: head.served.file, slots: 16 },
+      serving: { model: head.public?.file, slots: 16 },
     });
     expect(p.rental.ops.at(-1)).toBe("create 50262229 nvidia/cuda:13.0.3-devel-ubuntu24.04 40");
+    // a rented box is someone else's machine: the adapter stays here, the box derives the public pack
     expect(p.shell.calls.find((c) => c[0] === "tar")).toEqual([
       "tar",
       "-C",
       "/r",
+      "--exclude=heads/bonsai-2-27b/assets/lora/bonsai-abliterate-lora.gguf",
       "-czf",
       "/r/local/rented-box/payload.tar.gz",
       "dist/rig",
@@ -182,6 +187,35 @@ describe("vast up", () => {
     expect(p.fs.text("/home/u/.config/systemd/user/rig-vast-idle.service")).toContain(
       "ExecStart=/r/dist/rig vast idle-check",
     );
+  });
+  test("--private ships the adapter, and the box must serve this machine's pack", async () => {
+    const { p, head, uc } = await setup("served");
+    const r = await uc.up(head, { gpu: "H100_SXM", private: true });
+    expect(r.ok && r.value.kind === "up" && r.value.serving.model).toBe(head.served.file);
+    expect(p.shell.calls.find((c) => c[0] === "tar")?.some((a) => a.startsWith("--exclude"))).toBe(
+      false,
+    );
+    // and the box answering with its public pack is refused as a lesser pack than asked for
+    const other = await setup("public");
+    const refused = await other.uc.up(other.head, { gpu: "H100_SXM", private: true });
+    expect(!refused.ok && refused.message).toContain(`not the pinned ${head.served.file}`);
+  });
+  test("a card the pin publishes a prebuilt for installs it on the box: no compile, no cached build shipped", async () => {
+    const { p, head, uc } = await setup();
+    expect(engine.prebuiltFor("120")).toBeDefined(); // engine.toml pins one; the case below depends on it
+    p.rental.offers = [{ ...h100, gpu: "RTX 5090", computeCap: "120", bandwidth: 1790, dph: 0.6 }];
+    p.fs.put(`/r/local/rented-box/cached-builds/engine-sm120-${engine.sha7}.tar.gz`, "tgz");
+    const r = await uc.up(head, { gpu: "RTX_5090" });
+    expect(r.ok).toBe(true);
+    const rigCalls = p.ssh.calls
+      .filter((c) => c.includes("/workspace/rig/dist/rig "))
+      .map((c) => c.replace(/.*\/dist\/rig /, "").split(" >>")[0] ?? "");
+    expect(rigCalls).toContain("build --gpu 0");
+    expect(rigCalls.some((c) => c.includes("--portable") || c.includes("--from-tarball"))).toBe(
+      false,
+    );
+    expect(p.ssh.pushed.map((x) => x[1])).toEqual(["/workspace/rig/payload.tar.gz"]);
+    expect(p.ssh.pulled).toEqual([]);
   });
   test("a cached tarball for the card's sm is pushed and used instead of a build", async () => {
     const { p, head, uc } = await setup();
@@ -252,7 +286,7 @@ describe("vast up", () => {
     const r = await uc.up(head, { gpu: "H100_SXM" });
     expect(!r.ok && r.code).toBe(1);
     expect(!r.ok && r.message).toContain(
-      `the box serves some-other-pack.gguf, not the pinned ${head.served.file}`,
+      `the box serves some-other-pack.gguf, not the pinned ${head.public?.file}`,
     );
     expect(!r.ok && r.message).toContain("box 1000 left running for inspection");
     expect(p.rental.instances.size).toBe(1); // left running, not destroyed

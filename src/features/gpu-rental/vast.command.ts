@@ -11,7 +11,7 @@ import { ExitCode } from "../../shared/result.ts";
 import type { BenchReport, RentGpu, StatusReport } from "./gpu-rental.service.ts";
 
 const USAGE =
-  "vast up <head> --gpu CLASS [--gpus N] [--max-price DPH] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--dry-run] | down [--all] | status | idle-check | bench <head>   a rented card as a head, reached through an ssh tunnel";
+  "vast up <head> --gpu CLASS [--gpus N] [--max-price DPH] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--private] [--dry-run] | down [--all] | status | idle-check | bench <head>   a rented card as a head, reached through an ssh tunnel (its public pack; --private ships the private [derive] assets)";
 const FORM = USAGE.split("   ")[0] ?? USAGE;
 
 export function gpuRentalCommand(service: RentGpu, loadHead: LoadHead, log: Log): Command {
@@ -47,6 +47,7 @@ export function gpuRentalCommand(service: RentGpu, loadHead: LoadHead, log: Log)
               allowArch: flagStr(args, "allow-arch"),
               diskGb,
               idleMinutes,
+              private: flagBool(args, "private"),
             });
             return reportJson(log, args, result);
           });

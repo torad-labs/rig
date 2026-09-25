@@ -205,9 +205,10 @@ describe("head.toml", () => {
         r5090.slots * h.geometry.compute_per_output_row_mib * s.n_max +
         r5090.slots * h.geometry.state_per_slot_mib * s.n_max,
     );
-    expect(tierNeedMiB(h, r5090)).toBe(23456); // 8 slots × (44 MiB of rollback state + 3 MiB of verify row) × n_max 2, and each slot's own row
-    // the 5080: full-pool MTP KV and bit-packed attention masks, 4 × (44 + 3) × 2 of rollback state and verify rows
-    expect(tierNeedMiB(h, r5080)).toBe(13652);
+    expect(tierNeedMiB(h, r5090)).toBe(23960); // 8 slots × (44 MiB of rollback state + 3 MiB of verify row) × n_max 3, and each slot's own row
+    // the 5080: full-pool MTP KV and bit-packed attention masks, 4 × (44 + 3) × 3 of rollback state and verify rows,
+    // the draft vocabulary's 127.5 MiB of LM-head rows in weights_mib
+    expect(tierNeedMiB(h, r5080)).toBe(13968);
     // the compute buffer as the 5080 measured it (167.22 MiB at 294,912 and 12 = 4 × (1 + 2) rows) is
     // charged in full: the fixed part, the per-token mask and every output row, the first per slot too
     const row = h.geometry.compute_per_output_row_mib;
@@ -254,7 +255,7 @@ describe("head.toml", () => {
     expect(r.ok).toBe(false);
     if (!r.ok)
       expect(r.message).toContain(
-        "cannot hold slots=4 ctx=425984: needs 16116 MiB (KV + weights + compute + slot state + draft weights, overhead, compute and rollback snapshots)",
+        "cannot hold slots=4 ctx=425984: needs 16432 MiB (KV + weights + compute + slot state + draft weights, overhead, compute and rollback snapshots)",
       );
   });
 });
@@ -265,11 +266,13 @@ describe("evidence.md", () => {
   // charge (2026-09-21). The table is held against the constants here rather than by hand.
   const num = (cell: string) => Number(cell.replace(/,/g, "").match(/\d+/)![0]);
 
-  test("every cell of the geometry table is what the head's own constants charge at n_max 2 and 8", () => {
+  test("every cell of the geometry table is what the head's own constants charge at its n_max and at 8", () => {
     const r = parseHeadToml(real);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const at = (n: number) => ({ ...r.value, speculative: { ...r.value.speculative!, n_max: n } });
+    const served = r.value.speculative!.n_max;
+    expect(evidence).toContain(`needs by the constants (n_max ${served} / 8)`); // the column names the n_max the head serves
     const body = evidence.slice(evidence.indexOf("| card | VRAM |")).split("\n").slice(2); // past the header and its rule
     const end = body.findIndex((line) => !line.startsWith("|")); // this table only, not the next one
     const rows = body.slice(0, end).map((line) => line.split("|").slice(1, -1));
@@ -291,9 +294,11 @@ describe("evidence.md", () => {
         tier,
         `${card.trim()}: no tier with slots=${num(slots)} ctx=${num(ctx)}`,
       ).toBeDefined();
-      const [two, eight] = needs.split("/").map(num) as [number, number];
-      written.push(`${card.trim()}: ${two} / ${eight}`);
-      charged.push(`${card.trim()}: ${tierNeedMiB(at(2), tier!)} / ${tierNeedMiB(at(8), tier!)}`);
+      const [atServed, eight] = needs.split("/").map(num) as [number, number];
+      written.push(`${card.trim()}: ${atServed} / ${eight}`);
+      charged.push(
+        `${card.trim()}: ${tierNeedMiB(at(served), tier!)} / ${tierNeedMiB(at(8), tier!)}`,
+      );
     }
     expect(written).toEqual(charged);
   });

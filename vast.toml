@@ -13,7 +13,7 @@ idle_minutes = 45              # a box nobody talks to is destroyed, not left bi
 remote_dir = "/workspace/rig"
 query = "verified=true rentable=true reliability>0.98 cuda_max_good>=13.0 cpu_ram>=48 inet_down>=200 direct_port_count>=2"
 
-# per card class: the memory bandwidth floor (decode at 1.72 bpw is bandwidth-bound) and the
+# per card class: the memory bandwidth floor (decode at 2.13 bpw is bandwidth-bound) and the
 # price ceiling; a class not listed gets [cards.default]
 [cards.default]
 min_bandwidth = 0

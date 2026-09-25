@@ -79,12 +79,43 @@ export async function evaluate(
   };
 }
 
+/** P(X >= lost) for X ~ Binomial(lost + gained, 1/2): how often a pack that neither loses nor gains
+ *  problems against the base would lose at least this many of the problems the two legs disagree on */
+export function signTestP(lost: number, gained: number): number {
+  const n = lost + gained;
+  let coefficient = 1; // C(n, k)
+  let tail = 0;
+  for (let k = 0; k <= n; k++) {
+    if (k >= lost) tail += coefficient;
+    coefficient = (coefficient * (n - k)) / (k + 1);
+  }
+  return tail / 2 ** n;
+}
+
+/** The served pack against the base pack, problem by problem. A greedy leg on `workers` slots is not
+ *  repeatable: how requests share a batch changes the numerics, and near-ties go either way. One
+ *  build and the same two packs ran 113 -> 112 (six lost, five gained) and then 113 -> 113, with 16
+ *  of 164 base programs different between the runs (engine 3c7e643, 2026-09-25). A pass-count
+ *  threshold judges those flips; a one-sided sign test on the disagreements judges the pack, and
+ *  fails it only when it loses significantly more problems than it gains (p < alpha). */
+export function humanevalVerdict(base: HumanEvalResult, served: HumanEvalResult, alpha: number) {
+  const servedPassed = new Map(served.results.map((result) => [result.task_id, result.passed]));
+  const lost = base.results
+    .filter((result) => result.passed && !servedPassed.get(result.task_id))
+    .map((result) => result.task_id);
+  const gained = base.results
+    .filter((result) => !result.passed && servedPassed.get(result.task_id))
+    .map((result) => result.task_id);
+  const p = signTestP(lost.length, gained.length);
+  return { lost, gained, p, pass: p >= alpha };
+}
+
 export const humanevalProbe: Probe = {
   name: "humaneval",
   needs: "server",
   async run(ctx) {
     const problems = await loadProblems(ctx);
-    const { workers, tolerance } = ctx.gates.humaneval;
+    const { workers, alpha } = ctx.gates.humaneval;
     const leg = { ctx: 32768, slots: workers };
     const base = await ctx.server.leg(
       { label: "humaneval-base", pack: ctx.head.sourcePath, ...leg },
@@ -96,12 +127,19 @@ export const humanevalProbe: Probe = {
     );
     const line = (label: string, result: HumanEvalResult) =>
       `${label}: pass@1 = ${result.passed}/${result.total} = ${(result.passed / result.total).toFixed(3)}   (generation ${result.generationSecs.toFixed(0)} s)`;
+    const verdict = humanevalVerdict(base, served, alpha);
+    const tasks = (ids: string[]) => ids.join(" ") || "none";
     return {
       name: "humaneval",
-      pass: served.passed >= base.passed - tolerance,
-      summary: `pass@1 base ${base.passed}/${base.total}, served ${served.passed}/${served.total}`,
-      lines: [line("base  ", base), line("served", served)],
-      data: { base, served },
+      pass: verdict.pass,
+      summary: `pass@1 base ${base.passed}/${base.total}, served ${served.passed}/${served.total}; served lost ${verdict.lost.length} and gained ${verdict.gained.length} (sign test p ${verdict.p.toFixed(3)})`,
+      lines: [
+        line("base  ", base),
+        line("served", served),
+        `lost:   ${tasks(verdict.lost)}`,
+        `gained: ${tasks(verdict.gained)}`,
+      ],
+      data: { base, served, lost: verdict.lost, gained: verdict.gained, p: verdict.p },
     };
   },
 };

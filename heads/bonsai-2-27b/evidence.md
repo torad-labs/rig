@@ -41,7 +41,7 @@ inside their noise (HumanEval base read 113/164 on 2026-09-19 and 112/164 here; 
 | refusal (6 prompts, greedy) | refuses 6/6 | refuses 0/6 | base > 0, served < base |
 | capability parity (5 prompts, greedy) | — | 5/5 byte-identical to base | all identical |
 | fluency (11 prompts × 300 tokens) | doubled 2, repeats 2 | doubled 2, repeats 2 (2,909 tokens) | served ≤ base on both |
-| HumanEval-164 pass@1, greedy | 112/164 = 0.683 | 116/164 = 0.707 | served ≥ base − 0 |
+| HumanEval-164 pass@1, greedy | 112/164 = 0.683 | 116/164 = 0.707 | served does not lose significantly more problems than it gains (one-sided sign test on the disagreements, p ≥ 0.05; served ≥ base until 2026-09-25) |
 | decode A-B-A (3 × 256 greedy, first discarded) | 74.8 / — / 75.2 tok/s | 74.7 tok/s | inside the base's A-A spread + 5 % |
 | needle (2 markers, 121,898 tokens, q4_0 K/V + mean-centering; haystack from the earlier corpus) | — | 2/2 retrieved | all retrieved |
 | sessions (4 × ~50K tokens, shared pool, 5080) | — | 4/4 own marker, no leak | all own, none foreign |
@@ -80,14 +80,15 @@ with); 150 in f32 (1,795.5 MiB at n_max 2). Every tier is checked against those 
 `headInvariants`, plus the draft head's (below) on every tier that loads it, and `head.test.ts`
 re-derives each tier's total from the same constants:
 
-| card | VRAM | -np | -c | draft head | needs by the constants (n_max 2 / 8) |
+| card | VRAM | -np | -c | draft head | needs by the constants (n_max 3 / 8) |
 |---|---|---|---|---|---|
-| RTX 5080 | 16,303 MiB | 4 | 294,912 (1.125 windows) | MTP | 13,652 / 14,780 (14,104 MiB used at n_max 4, 2026-09-21) |
-| 16 GB card driving a desktop | ≥ 13,800 MiB for the head | 4 | 262,144 (1 window) | MTP | 13,036 / 14,164 (13,100 MiB at peak, 2026-09-24) |
-| 16 GB card, busier desktop | ≥ 13,400 MiB for the head | 1 | 262,144 (1 window) | MTP | 12,613 / 12,895 (12,664 MiB at peak, 2026-09-24) |
-| RTX 5090 | 32,607 MiB | 8 | 786,432 (3 windows) | MTP | 23,456 / 25,712 |
-| H100 80 GB | 81,559 MiB | 16 | 2,883,584 (11 windows) | MTP | 64,008 / 68,520 |
-| RTX PRO 6000 / H200 | ≥ 90,000 MiB | 16 | 3,538,944 (13.5 windows) | MTP | 76,328 / 80,840 |
+| RTX 5080 | 16,303 MiB | 4 | 294,912 (1.125 windows) | MTP | 13,968 / 14,908 (14,012 MiB at peak, 2026-09-25) |
+| 16 GB card driving a desktop | ≥ 14,100 MiB for the head | 4 | 262,144 (1 window) | MTP | 13,352 / 14,292 (13,410 MiB at peak, 2026-09-25) |
+| 16 GB card, busier desktop | ≥ 13,700 MiB for the head | 2 | 262,144 (1 window) | MTP | 12,976 / 13,446 (13,006 MiB at peak, 2026-09-25) |
+| 16 GB card, busier desktop still | ≥ 13,500 MiB for the head | 1 | 262,144 (1 window) | MTP | 12,788 / 13,023 (12,828 MiB at peak, 2026-09-25) |
+| RTX 5090 | 32,607 MiB | 8 | 786,432 (3 windows) | MTP | 23,960 / 25,840 |
+| H100 80 GB | 81,559 MiB | 16 | 2,883,584 (11 windows) | MTP | 64,888 / 68,648 |
+| RTX PRO 6000 / H200 | ≥ 90,000 MiB | 16 | 3,538,944 (13.5 windows) | MTP | 77,208 / 80,968 |
 
 A tier is picked by the VRAM the head can have: the card's total less what every other process
 holds (`headVramMiB`). A card that also drives a desktop keeps its compositor's, browsers' and
@@ -99,6 +100,14 @@ served a 17,100-token request at 4 × 262,144 (13,100 MiB at peak), 2 × 262,144
 1 × 262,144 (12,664): the charge is 42–64 MiB under each peak. 4 × 294,912 failed with 268 MiB
 above its steady 13,784 and 4 × 262,144 loaded with 952 above its peak, so each desktop tier's
 min_vram_mib sits ~700 MiB above its measured peak (local/research/desktop-tier-2026-09-24).
+Re-measured on 2026-09-25 beside the same desktop for n_max 3 and the draft vocabulary on engine
+3c7e643: 13,410 / 13,006 / 12,828 MiB at peak at 4 / 2 / 1 × 262,144, the charge 30–58 MiB under
+each, so the tiers moved to 14,100 / 13,700 / 13,500 and a 2-slot tier joined them: a desktop
+holding 2.2–2.6 GB keeps two slots rather than one. On engine 4d44f6c the same legs OOMed at
+4 × 262,144 and peaked at 14,234 MiB at 1 × 262,144: its PQ2_0 tensor-core kernel held 1,430 MiB of
+the 5070 Ti for a driver syscall stack from its first launch, which fork #50 removed (engine.toml,
+local/research/desktop-tier-2026-09-25). The RTX 5080 row's peak is from the engine-5 gate on a
+rented 5080 (vast 52614682).
 
 The 5080 row is the measured local geometry; the others are arithmetic on the constants (the
 5090's drafted 4-slot leg loaded and ran on a rented 4×5090 box on 2026-09-20, at -c 32768, with
@@ -116,6 +125,94 @@ pool: 342 MiB at 294,912 (KV buffer 324.00 MiB + draft compute 116.28 measured a
 --spec-draft-mtp-window 16384`: the prompt never entered it, 72 MiB of KV at 16,384 × 4); on the
 same ~100K-token conversation that gave 40–58 tok/s at 49–54 % acceptance against 76–91 tok/s at
 54–69 % with the prompt in the cache and the lens off (below), so decode-only is gone.
+
+## Draft vocabulary (2026-09-25)
+
+`[speculative] args` hands the engine `--spec-draft-mtp-vocab assets/mtp-draft-vocab-98304.i32`
+(engine #44). A draft step scores 98,304 of the LM head's 248,320 rows, 134 of its 338 MB of
+PQ2_0, and every other token's draft logit is -inf. The verify is untouched: a token outside the
+set costs the draft that position, never the text. The rows are a copy, 127.5 MiB, charged in
+`[speculative] weights_mib` (430 → 558).
+
+**The set.** Every token id the served pack sampled on 500 train prompts of the retraining pool
+above (served sampling, 512 tokens each), or that the pool's train prompts contain (53,107 ids),
+then the lowest ids not yet in it: BPE ids run roughly in merge order. It covers 99.93 % of the
+tokens the pack sampled on the pool's 112 validation prompts; the lowest 98,304 ids alone cover
+99.55 %, and the 20,630 sampled ids alone 93.06 %. `hot-build2.py` rebuilds it byte for byte
+from the generations and the pool's counts (`local/research/mtp-draft-vocab-2026-09-25/`).
+
+**Served, on the box** (RTX 5080, the public r2 pack, engine d0a6df21f + #44, the 48 held-out
+greedy requests above, legs base / set / set / base, tok/s per request with the leg order
+cancelled):
+
+| n_max | base tok/s | with the set | per request | acceptance | text = base |
+|---|---|---|---|---|---|
+| 2 | 163.8 | 168.4 | +2.66 % (95 % CI +2.17 to +3.15), 47/48 faster | 0.7195 → 0.7189 | 47/48 |
+| 3 | 174.1 | 181.2 | +3.83 % (95 % CI +3.38 to +4.28), 47/48 faster | 0.6361 → 0.6359 | 47/48 |
+
+- Every id but one unused PAD token reproduces base's text and draft counters 48/48, so the rows
+  and their ids are exact; a random 32,768 ids drop acceptance to 0.0627.
+- 65,536 ids: +2.54 % at acceptance 0.7056, with 16 texts parting; 98,304 is the smaller loss.
+- At ~117K tokens of context (two requests over the engine's docs, n_max 2): +2.48 and +0.58 %.
+
+## Draft depth (2026-09-25)
+
+`[speculative] n_max = 3`. Depth 2 was the peak of ProCreations' sweep and of the 5080's own
+runs with ProCreations' head (below, 2026-09-20/21). With the retrained head and the draft
+vocabulary a third position pays. RTX 5080, the public r2 pack, greedy, 512 tokens a request,
+tok/s per request with the leg order cancelled (`local/research/mtp-draft-vocab-2026-09-25/`):
+
+- **Shallow**, the 48 held-out requests at -c 40,960 (the table above, engine d0a6df21f + #44):
+  181.2 tok/s at n_max 3 against 168.4 at n_max 2, both with the set.
+- **Deep** (`round5/`, engine 4d44f6c): six requests built from the eval set's 24 held-out
+  agentic sessions (SWE-rebench OpenHands trajectories, none shared with the retraining pool):
+  6–8 sessions stacked into one user turn, each request ending on a different one, then a
+  request for a detailed report on the last (`longeval.py`). 94,071–120,693 prompt tokens, one
+  slot at -c 163,840, legs n2 / n2v / n3v / n3v / n2v / n2:
+
+| n_max | draft vocabulary | tok/s (two legs) | acceptance | tokens per round | text = n2 |
+|---|---|---|---|---|---|
+| 2 | — | 147.23 / 147.00 | 0.8270 | 2.639 | 6/6 |
+| 2 | 98,304 | 150.37 / 150.76 | 0.8270 | 2.639 | 6/6 |
+| 3 | 98,304 | 169.87 / 169.69 | 0.7786 | 3.314 | 0/6 |
+
+- n_max 3 against n_max 2, both with the set: +13.00 % (95 % CI, t(5), +7.82 to +18.44), 6/6
+  faster (+5.97, +10.02, +13.25, +15.37, +21.05, +12.95).
+- The set alone at n_max 2: +2.35 % (+2.15 to +2.56), 6/6 faster, texts and counters identical.
+- n_max 3 with the set against n_max 2 without it: +15.66 % (+10.14 to +21.46), 6/6 faster.
+- The n_max 3 texts part from n_max 2's in all six at a near-tie, both readings coherent (deep-04
+  "…5.2. The issue is about" against "…5.2 and the issue about"; deep-05 "`UnicodeDecodeError`"
+  against "UnicodeDecodeError"). Every emitted token is still the pack's own greedy pick.
+- On two requests over the engine's docs at ~117K (`round4/`, engine d0a6df21f + #44), n_max 3
+  with the set against n_max 2 without it split -3.87 % and +9.70 %. The agentic sessions are the
+  workload the head serves.
+
+## Gates on rig 0.1.7's tree (engine 3c7e643, 2026-09-25)
+
+`rig gate bonsai-2-27b` on the RTX 5070 Ti that drives this box's display, engine 3c7e643, n_max 3 with the draft
+vocabulary (runs in `local/gate-runs/bonsai-2-27b/`: refusal and fluency `20260925T181142Z`, humaneval
+`20260925T182225Z` and `20260925T182716Z`, decode and speculative `20260925T183214Z`, needle `20260925T183748Z`):
+- refusal: base 6/6 → served 0/6, capability 5/5 byte-identical;
+- fluency: doubled 2 → 2, repeats 2 → 2 over 1,800 tokens;
+- HumanEval pass@1: base 113 → served 112 (six lost, five gained, sign test p 0.500), and on a second run of the same
+  build 113 → 113 (seven lost, seven gained, p 0.605);
+- decode A-B-A: base 76.4 / served 78.3 / base 78.9 tok/s;
+- speculative: plain 71.2 → drafted 153.9 tok/s (×2.16), 58 % of 836 drafted tokens accepted; the three answers
+  diverge from the plain leg at near-ties of 0.069, 0.043 and 0.029 nats (tie ≤ 0.15). At n_max 2 without the
+  vocabulary on engine 514c53c the same probe read 75.9 → 103.4 tok/s (×1.36);
+- needle: 2/2 retrieved (depth 8 % and 55 %) in a 128,641-token haystack at `-c 131072`, 113.4 s.
+
+HumanEval's rule was served ≥ base until this run. On one build the first run failed it and the second passed it: the
+leg runs on four slots, how requests share a batch changes the numerics, and 16 of the 164 base programs differed
+between the two runs. The rule is now a one-sided sign test on the problems the two legs disagree on (`gates.toml`,
+alpha 0.05): the served pack fails only when it loses significantly more problems than it gains. Nine lost and two
+gained (113 → 106) is p 0.033 and fails; `probes.test.ts` holds both cases.
+
+The humaneval leg died three times on this loaded host before it finished, after 70, 69 and 48 requests: twice
+the host's memory defense stopped the gate's build scope, once earlyoom took the server. The gate's server kept the
+engine's default 8 GiB host prompt cache, which no gate request reads (they send `cache_prompt: false`), and held
+5.2 GB of host memory after 48 requests; with `--cache-ram 0`, which gate servers now pass, it held 0.9 GB at the
+same point and 985 MiB at its peak.
 
 ## Draft head retrained (MTP r2, 2026-09-24)
 
@@ -237,12 +334,12 @@ configurations share: a verify batch whose size changes between rounds rebuilds 
 (`llm_graph_params::allow_reuse` requires the previous ubatch's `n_tokens`, `src/llama-graph.h`
 868 at bc08995), which a fixed depth reuses every round; a per-shape graph cache would bring it
 to ~33 ms, ~85 tok/s, still no better than depth 2. Depth 2 without a cutoff stays the served
-value. The DFlash2 sidecar on the same card and
+value (superseded 2026-09-25 by depth 3 on the retrained head: "Draft depth" above). The DFlash2 sidecar on the same card and
 prompts at -c 65536: 34.0 → 42.0 tok/s (+24 %), acceptance 0.42–0.85 — the same gain for ten
 times the memory. The live 5080 head's first request after the switch (20:37, 27 tokens):
 18/18 drafted tokens accepted, 50.4 tok/s.
 
-n_max=4 trial (2026-09-21, 5080, engine f8394f1, lens off, four prompts, greedy, 256 tokens, warm-up discarded, `scripts/bench-head.ts`): the prompt-inclusive M4 trial ran the live head at `--spec-draft-n-max 4`. Per-prompt mean decode: code 90.3 / SQL 76.4 / prose 77.7 / reasoning 96.1 tok/s (mean 85.1), 4,999 drafted / 1,798 accepted tokens (acceptance 0.360 per drafted token; 0.25 per deep position). n_max=2 on the same card and build, same card, same context, same lens state, measured after the config fix (`--spec-draft-n-max 2`): code 100.1 / SQL 79.6 / prose 90.6 / reasoning 102.9 tok/s (mean 93.3, +9.6% over the trial), 3,074 drafted / 1,516 accepted tokens (acceptance 0.493 vs the trial's 0.360 per drafted token). The single-layer MTP head over-drafts at n=4: it produced 4,999 draft tokens — 63% more than n=2's 3,074 — to accept only 18% more total tokens (1,798 vs 1,516), i.e. its extra draft positions accepted far fewer tokens each, so the extra recurrent-state copies per slot and the larger verify batches bought decode time. n_max=2 matches ProCreations' own sweep peak and is the value every head now serves.
+n_max=4 trial (2026-09-21, 5080, engine f8394f1, lens off, four prompts, greedy, 256 tokens, warm-up discarded, `scripts/bench-head.ts`): the prompt-inclusive M4 trial ran the live head at `--spec-draft-n-max 4`. Per-prompt mean decode: code 90.3 / SQL 76.4 / prose 77.7 / reasoning 96.1 tok/s (mean 85.1), 4,999 drafted / 1,798 accepted tokens (acceptance 0.360 per drafted token; 0.25 per deep position). n_max=2 on the same card and build, same card, same context, same lens state, measured after the config fix (`--spec-draft-n-max 2`): code 100.1 / SQL 79.6 / prose 90.6 / reasoning 102.9 tok/s (mean 93.3, +9.6% over the trial), 3,074 drafted / 1,516 accepted tokens (acceptance 0.493 vs the trial's 0.360 per drafted token). The single-layer MTP head over-drafts at n=4: it produced 4,999 draft tokens — 63% more than n=2's 3,074 — to accept only 18% more total tokens (1,798 vs 1,516), i.e. its extra draft positions accepted far fewer tokens each, so the extra recurrent-state copies per slot and the larger verify batches bought decode time. n_max=2 matches ProCreations' own sweep peak and is the value every head now serves (superseded 2026-09-25: n_max 3, "Draft depth" above).
 
 5080 `scripts/bench-head.ts` (2026-09-21, engine f8394f1, lens off, four prompts, greedy, 256 tokens, warm-up discarded):
 

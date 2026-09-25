@@ -32,7 +32,7 @@ export const GatesSchema = v.strictObject({
     workers: posInt,
     n_predict: posInt,
     stop: v.array(v.string()),
-    tolerance: v.pipe(v.number(), v.integer(), v.minValue(0)),
+    alpha: v.pipe(v.number(), v.minValue(0), v.maxValue(1)),
   }),
   decode: v.strictObject({
     prompt: v.string(),

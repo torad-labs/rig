@@ -53,6 +53,12 @@ export class GateServer implements GateLegs {
       String(options.ctx),
       "-np",
       String(options.slots),
+      // every gate request turns the prompt cache off (llama-client.ts), so the host prompt cache is
+      // written and never read: at the engine's default 8 GiB the humaneval leg's server held 5.2 GB
+      // of host memory after 48 requests, 0.9 GB without it, and the host's memory killers took the
+      // leg twice (2026-09-25). No gate result reads it.
+      "--cache-ram",
+      "0",
       "--host",
       "127.0.0.1",
       "--port",

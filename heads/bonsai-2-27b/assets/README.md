@@ -8,6 +8,9 @@ head's directory, and `rig verify` refuses to start a server while any of them i
 - `kv-mean-center-PQ2_0.gguf` — the calibrated K-cache mean-centering bias (16 vectors, no
   text), calibrated on the engine corpus rig builds itself; the recipe and its KL are in
   evidence.md.
+- `mtp-draft-vocab-98304.i32` — the MTP draft head's vocabulary (`--spec-draft-mtp-vocab`, in
+  `[speculative] args`): 98,304 strictly increasing int32 token ids, sha256 94a6035d…; how it was
+  chosen and what it measured are in evidence.md, "Draft vocabulary".
 - `lora/bonsai-abliterate-lora.gguf` — the rank-1 refusal adapter the `[derive]` step bakes
   into the served pack; pinned by `lora_sha256`. A private asset, not in git: `torad model pull
   bonsai-2-27b-derive` fetches it on Torad's machines. A machine with neither it nor the derived
