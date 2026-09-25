@@ -225,10 +225,10 @@ describe("up", () => {
     expect(!r.ok && r.message).toContain(
       "held by pid 1214085, not rig-bonsai-2-27b.service's main process (pid 4243)",
     );
-    p.host.listeners.delete(8099); // ss cannot name an owner: not proved either
+    p.host.listeners.delete(8099); // no owner this user can see: not proved either
     polls = 0;
     r = await uc.run(head, { gpu: 0 });
-    expect(!r.ok && r.message).toContain("held by no process ss can name");
+    expect(!r.ok && r.message).toContain("held by no process this user can see");
     p.host.listeners.set(8099, 4243);
     polls = 0;
     r = await uc.run(head, { gpu: 0 });

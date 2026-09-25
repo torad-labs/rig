@@ -131,7 +131,7 @@ export class BringUpHead {
     // joins them (a leftover server answers 200 while the unit's own start dies on the bind)
     const owner = await this.deps.host.listeningPid(head.port);
     if (owner !== pid) {
-      const who = owner === null ? "no process ss can name" : `pid ${owner}`;
+      const who = owner === null ? "no process this user can see" : `pid ${owner}`;
       return fail(
         ExitCode.Failure,
         `:${head.port} is held by ${who}, not ${unit}'s main process (pid ${pid}) — a leftover server answers while the unit's own start fails on the port`,
