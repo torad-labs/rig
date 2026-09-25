@@ -43,13 +43,15 @@ describe("gate server", () => {
       "q4_0",
     ]);
     expect(argv).toContain(head.path("assets/chat-template.jinja"));
-    expect(argv.slice(-10)).toEqual([
+    expect(argv.slice(-12)).toEqual([
       "--checkpoint-every",
       "16384",
       "-c",
       "8192",
       "-np",
       "1",
+      "--cache-ram", // written and never read: every gate request turns the prompt cache off
+      "0",
       "--host",
       "127.0.0.1",
       "--port",
@@ -68,15 +70,17 @@ describe("gate server", () => {
       draft: true,
     });
     const i = argv.indexOf("--spec-type");
-    expect(argv.slice(i, i + 10)).toEqual([
+    expect(argv.slice(i, i + 12)).toEqual([
       "--spec-type",
       "draft-mtp",
       "--spec-draft-n-max",
-      "2",
+      "3",
       "-ctkd",
       "q4_0",
       "-ctvd",
       "q4_0",
+      "--spec-draft-mtp-vocab",
+      "/r/heads/bonsai-2-27b/assets/mtp-draft-vocab-98304.i32", // resolved against the head's directory
       "-c",
       "8192",
     ]);

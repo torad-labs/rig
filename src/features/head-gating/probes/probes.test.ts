@@ -3,6 +3,7 @@ import { FakeHttp } from "../../../../test/fakes/index.ts";
 import { LlamaClient } from "../llama-client.ts";
 import { abaVerdict } from "./decode-probe.ts";
 import { countDoubled, countRepeats } from "./fluency-probe.ts";
+import { type HumanEvalResult, humanevalVerdict, signTestP } from "./human-eval-probe.ts";
 import { grow, plant } from "./needle-probe.ts";
 import { capabilityVerdicts, countRefusals, harmVerdict, parity } from "./refusal-probe.ts";
 import { firstDivergence, speculativeVerdict } from "./speculative-probe.ts";
@@ -81,6 +82,42 @@ describe("decode A-B-A verdict", () => {
     expect(abaVerdict(80.0, 76.5, 80.1, 0)).toBe(false); // the ordered A-then-B capgate saw, judged without tolerance
     expect(abaVerdict(80.0, 76.5, 80.1, 5)).toBe(true); // inside 5%
     expect(abaVerdict(80.0, 70.0, 80.1, 5)).toBe(false); // a real cost fails
+  });
+});
+
+describe("humaneval verdict", () => {
+  // 164 problems, the first `passing` passed; `flip` lists problems whose outcome is the other one
+  const leg = (passing: number, flip: number[] = []): HumanEvalResult => {
+    const results = Array.from({ length: 164 }, (_, i) => ({
+      task_id: `HumanEval/${i}`,
+      passed: i < passing !== flip.includes(i),
+    }));
+    return {
+      passed: results.filter((r) => r.passed).length,
+      total: 164,
+      generationSecs: 70,
+      results,
+    };
+  };
+  test("the sign test: how often a pack that neither loses nor gains loses this many of the disagreements", () => {
+    expect(signTestP(6, 5)).toBeCloseTo(0.5, 12);
+    expect(signTestP(9, 2)).toBeCloseTo(67 / 2048, 12);
+    expect(signTestP(0, 0)).toBe(1);
+    expect(signTestP(0, 7)).toBe(1);
+  });
+  test("the served pack fails only when it loses significantly more problems than it gains", () => {
+    const base = leg(113);
+    // engine 3c7e643, 2026-09-25: 113 -> 112, six lost and five gained; served >= base failed it, and the same build passed it on the next run
+    const near = humanevalVerdict(
+      base,
+      leg(113, [0, 1, 2, 3, 4, 5, 113, 114, 115, 116, 117]),
+      0.05,
+    );
+    expect([near.lost.length, near.gained.length, near.pass]).toEqual([6, 5, true]);
+    // a pack that lost nine and gained two, 113 -> 106: the damage this leg is for
+    const damaged = humanevalVerdict(base, leg(113, [0, 1, 2, 3, 4, 5, 6, 7, 8, 113, 114]), 0.05);
+    expect([damaged.lost.length, damaged.gained.length, damaged.pass]).toEqual([9, 2, false]);
+    expect(humanevalVerdict(base, base, 0.05)).toEqual({ lost: [], gained: [], p: 1, pass: true });
   });
 });
 

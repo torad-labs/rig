@@ -4,10 +4,13 @@
 // destroy that did not answer is still billing). `idleCheck` is the cost control, run by the
 // timer. `bench` runs the head's gates on the box and the live probes through the tunnel, the
 // evidence pulled back. The box gets no credential: the server binds loopback and ssh is the
-// only way in. Remote command lines live in rented-box.ts; the tunnel's http in head-endpoint.ts.
+// only way in. Nor a private [derive] asset unless `--private` asks: a rented box is someone
+// else's machine, so by default it derives and serves the head's public pack. Remote command lines
+// live in rented-box.ts; the tunnel's http in head-endpoint.ts.
 import { basename, join } from "node:path";
 import type { Engine } from "../../shared/engine/engine.ts";
 import type { Head } from "../../shared/head/head.ts";
+import { deriveAsset } from "../../shared/head/head-config.ts";
 import { HeadEndpoint, type Serving } from "../../shared/head/head-endpoint.ts";
 import type { Layout } from "../../shared/layout.ts";
 import type {
@@ -73,6 +76,8 @@ export interface RentOptions {
   /** this box's idle budget, over vast.toml's idle_minutes: a job the server's counters cannot
    *  see (training beside it) needs longer, and the budget is still the cost cap */
   idleMinutes?: number | undefined;
+  /** ship the head's private [derive] assets too, so the box serves this machine's pack */
+  private?: boolean;
 }
 
 export interface RentReport {
@@ -133,6 +138,11 @@ interface Pick {
 /** a box with its ssh endpoint known */
 type ReachableBox = BoxState & { sshHost: string; sshPort: number };
 
+type EngineSource =
+  | { kind: "prebuilt" }
+  | { kind: "cached"; tarball: string }
+  | { kind: "compile" };
+
 const SERVER_HEALTHY_TIMEOUT_MS = 600_000;
 /** the card's utilization at which the box is in use whatever its server says: an idle
  *  llama-server with its model loaded reads 0 */
@@ -167,16 +177,16 @@ export class RentGpu {
     if (!box.ok) return box;
     const remote = this.remote(config.value, box.value);
 
-    const shipped = await this.shipPayload(remote, head);
+    const shipped = await this.shipPayload(remote, head, options.private ?? false);
     if (!shipped.ok) return shipped;
-    const cachedBuild = await this.shipCachedBuild(remote, pick.value.offer);
+    const engine = await this.engineSource(remote, pick.value.offer);
 
     const broughtUp = await this.bringUp(
       remote,
       box.value,
       head,
       pick.value.offer,
-      cachedBuild,
+      engine,
       options,
     );
     if (!broughtUp.ok) return broughtUp;
@@ -201,7 +211,7 @@ export class RentGpu {
     // already checks for a local start: a mismatch here is either a leftover process on the
     // port or the box's own derive resolving differently than this machine did, and either way
     // READY would be false — not a cosmetic mismatch to warn past on a fresh, still-billing box
-    const expected = basename(head.servedPath);
+    const expected = boxServedFile(head, options.private ?? false);
     if (serving.model !== expected) {
       const message = `the box serves ${serving.model}, not the pinned ${expected} (box ${box.value.instanceId} left running for inspection)`;
       return fail(ExitCode.Failure, message);
@@ -464,14 +474,26 @@ export class RentGpu {
     return ok(reachable);
   }
 
-  /** rig, the head and the engine pin, as one tarball */
-  private async shipPayload(remote: RentedBox, head: Head): Promise<Result<void>> {
+  /** rig, the head and the engine pin, as one tarball; the head's private [derive] assets only
+   *  with --private */
+  private async shipPayload(
+    remote: RentedBox,
+    head: Head,
+    shipPrivate: boolean,
+  ): Promise<Result<void>> {
     const payload = this.state.path("payload.tar.gz");
+    const held = shipPrivate ? [] : privateAssets(head);
+    if (held.length > 0) {
+      this.deps.log.info(
+        `kept here: ${held.join(", ")} (private); the box serves ${boxServedFile(head, false)} — --private ships them`,
+      );
+    }
     const tar = await this.deps.shell.run(
       [
         "tar",
         "-C",
         this.layout.root,
+        ...held.map((path) => `--exclude=heads/${head.name}/${path}`),
         "-czf",
         payload,
         "dist/rig",
@@ -483,6 +505,15 @@ export class RentGpu {
     if (tar.code !== 0) return fail(ExitCode.Failure, `tar: ${tar.stderr.trim()}`);
     await remote.receivePayload(payload);
     return ok(undefined);
+  }
+
+  /** how the box gets its engine: the pin's prebuilt for this sm, installed as on any machine
+   *  (prepare installs no compiler for a card a prebuilt covers); else a build of this sm cached
+   *  from an earlier box, shipped; else a compile on the box */
+  private async engineSource(remote: RentedBox, offer: Offer): Promise<EngineSource> {
+    if (this.engine.prebuiltFor(offer.computeCap)) return { kind: "prebuilt" };
+    const tarball = await this.shipCachedBuild(remote, offer);
+    return tarball ? { kind: "cached", tarball } : { kind: "compile" };
   }
 
   /** a build for this card's sm from an earlier box skips the box's compile; its name, or null */
@@ -503,7 +534,7 @@ export class RentGpu {
     box: ReachableBox,
     head: Head,
     offer: Offer,
-    cachedBuild: string | null,
+    engine: EngineSource,
     options: RentOptions,
   ): Promise<Result<void>> {
     const allowArch = options.allowArch ? ` --allow-arch ${options.allowArch}` : "";
@@ -513,12 +544,15 @@ export class RentGpu {
       return fail(ExitCode.Failure, `prepare failed on box ${box.instanceId}`);
     }
     const fetching = remote.rig(`fetch ${head.name}`);
-    const built = cachedBuild
-      ? await step(
-          "build",
-          `build --gpu 0 --from-tarball ${remote.buildTarball(cachedBuild)}${allowArch}`,
-        )
-      : await this.buildOnBox(remote, offer, step, allowArch);
+    const built =
+      engine.kind === "prebuilt"
+        ? await step("build", `build --gpu 0${allowArch}`)
+        : engine.kind === "cached"
+          ? await step(
+              "build",
+              `build --gpu 0 --from-tarball ${remote.buildTarball(engine.tarball)}${allowArch}`,
+            )
+          : await this.buildOnBox(remote, offer, step, allowArch);
     const fetched = await fetching;
     if (!built) return fail(ExitCode.Failure, `build failed on box ${box.instanceId}`);
     if (fetched.code !== 0) {
@@ -760,3 +794,15 @@ function parseJson<T>(stdout: string): T | null {
 }
 
 const lastLines = (text: string, count: number) => text.trim().split("\n").slice(-count).join("\n");
+
+/** the head's private [derive] assets (no url), head-relative: what a box gets only with --private */
+function privateAssets(head: Head): string[] {
+  return (head.derive ?? []).map(deriveAsset).flatMap((asset) => (asset.url ? [] : [asset.path]));
+}
+
+/** the pack the box serves: this machine's with its private assets, else what a machine without
+ *  them serves (head.ts): the [public] pack when head.toml declares one, else the source pack */
+function boxServedFile(head: Head, shipPrivate: boolean): string {
+  if (shipPrivate || privateAssets(head).length === 0) return basename(head.servedPath);
+  return basename(head.declaredPublic?.path ?? head.sourcePath);
+}

@@ -72,12 +72,45 @@
 # text byte-identical on every leg, draft acceptance identical (315/392 ... 313/394); rig gate: refusal 6/6 -> 0/6, capability
 # 4/5 identical (1 near-tie), fluency 2 -> 2, humaneval base 111/164 served 115/164 (3b67615's scores). Evidence in
 # local/research/engine-pin-2026-09-24 and cuda-graph-src-type-2026-09-24 (2026-09-24).
+# 4d44f6c (fork main after PRs #25-#44: the trains engine-1 #36, engine-2 #40 and engine-3 #45 and the PRs merged before
+# them) is what moved it past c008fe8: the served step on sm_120, each change behind its own off switch (TORAD.md).
+# #39 with #37 (PQ2_0 x q8_1 at 1-8 columns on int8 tensor cores, the weights streamed through a TMA ring per SM, requested
+# before the PDL wait that #37 keeps unbroken through the Hadamard rotations): the 5080 step at 1 / 3 / 8 rows
+# 10.47 / 11.94 / 21.02 -> 10.42 / 10.80 / 13.05 ms, served +6.37 % (95 % CI +5.10 to +7.66), KL at the rounding floor
+# (0.0029 / 0.0024 / 0.0020 at 1 / 3 / 8 rows against a floor of 0.0022). #41 the PQ2_0 matmuls that read one activation
+# as one launch (-0.9 to -2.4 % per step); #42 the MTP head's catch-up computes only K/V (+1.95 %); #43 a new checkpoint
+# takes the buffers of the one the slot dropped (prompt time -9 %); #44 --spec-draft-mtp-vocab, which [speculative] args
+# pass (+2.66 % at n_max 2); #38 top-k over the logits first (+1.62 %); #29/#31/#32/#34 the fused adds, the state gather,
+# the conv-state chain and the gated norm on the Gated DeltaNet path (-0.5 to -2.8 % per step each; #26 lets the output
+# projection's add fuse); #30/#33 flash attention and the KQ mask skip other slots' cells (+9.5 to +12.6 % for a slot
+# beside a long one); #35 the MTP head starts a prompt from a zero h row (a fix: a request's drafts and text depended on
+# the request before it). The engine-3 gate on the train's sha (RTX 5080): #41-#43 exact against main (text and draft
+# counters 48/48, KL 0.000000 at 1 / 3 / 8 rows, multi-turn 12/12 with 11 restores), +1.12 % (95 % CI +0.96 to +1.29).
+# Evidence in local/research/prebuilt-engine3-2026-09-25 and engine3-gate-2026-09-25 (2026-09-25).
+# 3c7e643 (fork main after the trains engine-4 #49 and engine-5: #46-#48 and #50) is what moved it past 4d44f6c, which was
+# never served: #39's kernel held device memory no tier is sized by. #50 is the fix. The kernel addressed its TMA load to
+# .shared::cluster, which compiles on sm_120 to a branch whose other side is a driver syscall, and the driver gives every
+# resident thread of a kernel that can make one the syscall's 14,512-byte stack from its first launch on: 1,430 MiB of a
+# 70-SM 5070 Ti, 1,732 of the 84-SM 5080. .shared::cta names the same bytes and compiles to the TMA load alone
+# (test-pq2-mma-device-memory: 1,732 MiB taken on 43469aa0d, 4 on the train, 4 on 43469aa0d with the kernel off). The
+# 5080 tier, 4 x 294,912 at n_max 3 with the draft vocabulary, peaks at 14,012 MiB against 15,708; beside the 5070 Ti's
+# desktop 4 x 262,144 OOMed on 4d44f6c and peaks at 13,410 here, 1 x 262,144 at 12,828 against 14,234. #46 runs a Gated
+# DeltaNet layer's ssm_beta and ssm_alpha projections as one mul_mat_vec_f launch, #47 uploads a split's small host inputs
+# through a staging slot, #48 builds GB10's Q8 consumer counts at their first read: logits byte-identical to 4d44f6c's at
+# ubatch 1 / 3 / 8 / 512, served +2.83 % (95 % CI +2.58 to +3.07) on a 5080. The engine-5 gate on the train's sha (RTX
+# 5080): logits byte-identical to 43469aa0d's at ubatch 1 / 3 / 8 / 512, test-backend-ops MUL_MAT 1433/1433, MUL_MAT_GROUP
+# 24/24, MUL_MAT_VEC_FUSION 1010/1010 and MUL_MAT_PAIR 114/114; served at rig 0.1.7's head args, 48 greedy requests, legs
+# main / train / train / main: text and draft counters identical 48/48, +0.14 % (95 % CI -0.07 to +0.35); multi-turn
+# on the prompt cache text 12/12 with 11 restores each side.
+# rig 0.1.7's head on this build against rig 0.1.6's on c008fe8 (RTX 5080, each pin's prebuilt, 48 held-out greedy
+# requests at 40,960): 190.2 against 141.9 tok/s, +36.84 % per request (95 % CI +33.99 to +39.74), 48/48 faster.
+# Evidence in local/research/engine4-gate-2026-09-25, prebuilt-engine5-2026-09-25 and desktop-tier-2026-09-25 (2026-09-25).
 # ORDER: publish the build (rig build) BEFORE merging a pin move. The unit's ExecStartPre verify refuses
 # to start a head whose pin has no complete build, so a restart in the gap is an outage: 2026-09-21
 # 00:38, four refused starts, 90 s down, while 60493a5-sm120 was still compiling.
 [fork]
 repo = "https://github.com/torad-labs/llama.cpp.git"
-sha = "c008fe8cf5d8086586d3527c41868d0da8781f39"
+sha = "3c7e643262468316e0ba04b70293c7b1a912c4f5"
 base = "prism-b10685-7dffb15"   # PrismML's llama.cpp (ggml-org b10685 + the ternary kernels) this branch sits on
 
 # Compute capabilities with a measured run behind them — anything else is refused by prepare and
@@ -117,6 +150,6 @@ libs = ["libcublas.so.13", "libcublasLt.so.13"]
 # sha, so a rebuild of the same commit is a new release, engine-<sha7>-<n>.
 [[prebuilt]]
 cap = "120"
-url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-c008fe8/engine-sm120-c008fe8.tar.gz"
-sha256 = "12aeb3b24497dec4b1a8536585c66ee585ebd82ed13d663a1b9d82e9b812a8d5"
+url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-3c7e643/engine-sm120-3c7e643.tar.gz"
+sha256 = "01520ce38d31369146e5bff3f3e75cbde1d735606471ed1367de1bc1bd66a300"
 glibc = "2.35"                 # scripts/prebuilt/Dockerfile's Ubuntu 22.04; its ELF files need GLIBC_2.34 at most

@@ -54,7 +54,10 @@ url = "https://github.com/openai/human-eval/raw/master/data/HumanEval.jsonl.gz"
 workers = 4
 n_predict = 384
 stop = ["\ndef ", "\nclass ", "\nif __name__", "\nprint(", "\n#"]
-tolerance = 0    # the served pack may not pass fewer problems than the base pack (measured 116 vs 113)
+alpha = 0.05     # the served pack fails when it loses significantly more problems than it gains against the base pack: a one-sided sign test on the
+                 # problems the two legs disagree on. The pass counts alone are not repeatable (four slots batch differently on each run): one build
+                 # and the same packs ran 113 -> 112 (six lost, five gained, p 0.500) and then 113 -> 113, with 16 of 164 base programs different
+                 # between the runs, and the old rule (served >= base) failed the first and passed the second (engine 3c7e643, 2026-09-25)
 
 # 4. Decode A-B-A: base, served, base again, 3 x 256 greedy tokens per fresh server, first
 #    discarded as warmup — separates the pack from the clocks (a 2-bit dequant cannot depend on

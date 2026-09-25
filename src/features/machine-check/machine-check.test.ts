@@ -194,7 +194,7 @@ describe("room, before the first byte is fetched", () => {
     const r = await new CheckMachine(p, building).room(await bonsai(p), { gpu: 0 });
     expect(!r.ok && r.code).toBe(ExitCode.Unsupported);
     expect(!r.ok && r.message).toBe(
-      "NVIDIA GeForce RTX 5070 at index 0 cannot serve bonsai-2-27b: 12227 MiB of VRAM for it is below the smallest tier this head declares (13400 MiB)",
+      "NVIDIA GeForce RTX 5070 at index 0 cannot serve bonsai-2-27b: 12227 MiB of VRAM for it is below the smallest tier this head declares (13500 MiB)",
     );
   });
   test("what other processes hold is not the head's: a 16 GB card whose desktop keeps 4 GB is refused, naming the share", async () => {
@@ -203,7 +203,7 @@ describe("room, before the first byte is fetched", () => {
     const r = await new CheckMachine(p, building).room(await bonsai(p), { gpu: 0 });
     expect(!r.ok && r.code).toBe(ExitCode.Unsupported);
     expect(!r.ok && r.message).toBe(
-      "NVIDIA GeForce RTX 5070 Ti at index 0 cannot serve bonsai-2-27b (4000 of its 16303 MiB are held by other processes: a desktop, another model): 12303 MiB of VRAM for it is below the smallest tier this head declares (13400 MiB)",
+      "NVIDIA GeForce RTX 5070 Ti at index 0 cannot serve bonsai-2-27b (4000 of its 16303 MiB are held by other processes: a desktop, another model): 12303 MiB of VRAM for it is below the smallest tier this head declares (13500 MiB)",
     );
   });
   test("a card driving a desktop gets the tier that fits beside it; the head already serving keeps its own share", async () => {
@@ -211,7 +211,7 @@ describe("room, before the first byte is fetched", () => {
     p.fs.free = Number.MAX_SAFE_INTEGER;
     p.gpu.card(0, { usedMiB: 2318 }); // the 5070 Ti here: compositor, browsers, editors
     const desktop = await new CheckMachine(p, building).room(await bonsai(p), { gpu: 0 });
-    expect(desktop.ok && desktop.value.tier.min_vram_mib).toBe(13800);
+    expect(desktop.ok && desktop.value.tier.min_vram_mib).toBe(13700);
     p.gpu.card(0, { usedMiB: 13796 }); // the head itself serving on :8099 holds all but 12 of it
     p.host.listeners.set(8099, 3919564);
     p.gpu.held.set(3919564, 13784);

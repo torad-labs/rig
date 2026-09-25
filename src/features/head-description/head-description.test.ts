@@ -42,7 +42,7 @@ describe("describe", () => {
       serving: false,
       server_facts: { rejects_reasoning_effort: true, slot_pinning: true, any_model_id: true },
       sampling: ["--temp", "1.0", "--top-p", "0.95", "--top-k", "20"],
-      speculative: { type: "draft-mtp", file: null, n_max: 2 },
+      speculative: { type: "draft-mtp", file: null, n_max: 3 },
       repo: "/r",
       head_dir: "/r/heads/bonsai-2-27b",
     });

@@ -56,15 +56,17 @@ describe("argv", () => {
     if (!r.ok) return;
     expect(r.value).toMatchObject({ speculative: true, slots: 8, ctx: 786432 });
     const i = r.value.argv.indexOf("--spec-type");
-    expect(r.value.argv.slice(i, i + 8)).toEqual([
+    expect(r.value.argv.slice(i, i + 10)).toEqual([
       "--spec-type",
       "draft-mtp",
       "--spec-draft-n-max",
-      "2",
+      "3",
       "-ctkd",
       "q4_0",
       "-ctvd",
       "q4_0",
+      "--spec-draft-mtp-vocab",
+      `${root}/heads/bonsai-2-27b/assets/mtp-draft-vocab-98304.i32`, // an asset in [speculative] args resolves as the runtime args' do
     ]);
     expect(r.value.argv).not.toContain("-md"); // the head is in the pack
     expect(r.value.argv).not.toContain("--spec-draft-p-min");
@@ -157,7 +159,7 @@ describe("draft cutoffs", () => {
     const i = r.value.argv.indexOf("--spec-draft-n-max");
     expect(r.value.argv.slice(i, i + 6)).toEqual([
       "--spec-draft-n-max",
-      "2",
+      "3",
       "--spec-draft-p-min",
       "0.5",
       "--spec-draft-chain-p-min",
@@ -184,7 +186,7 @@ describe("geometry", () => {
     p.gpu.card(0, { usedMiB: 2251 }); // the 5070 Ti driving this box's display, 2026-09-24
     const desktop = await uc.plan(head, { gpu: 0, cacheRam: 8192 });
     expect(desktop.ok && [desktop.value.slots, desktop.value.ctx, desktop.value.vramMiB]).toEqual([
-      4, 262144, 14052,
+      2, 262144, 14052,
     ]);
     const ctx = desktop.ok ? desktop.value.argv[desktop.value.argv.indexOf("-c") + 1] : undefined;
     expect(ctx).toBe("262144");
@@ -241,6 +243,9 @@ describe("verify", () => {
     p.fs.put(head.path("assets/kv-mean-center-PQ2_0.gguf"), "b");
     p.fs.put(head.path("assets/chat-template.jinja"), "t");
     r = await uc.verify(head, 0);
+    expect(!r.ok && r.message).toContain("asset assets/mtp-draft-vocab-98304.i32 is missing"); // [speculative] args' assets too
+    p.fs.put(head.path("assets/mtp-draft-vocab-98304.i32"), "v");
+    r = await uc.verify(head, 0);
     expect(r.ok).toBe(true);
     p.hasher.pinned.set(head.servedPath, "0".repeat(64));
     r = await uc.verify(head, 0);
@@ -258,6 +263,7 @@ describe("verify", () => {
     p.hasher.pinned.set(head.servedPath, head.served.sha256);
     p.fs.put(head.path("assets/kv-mean-center-PQ2_0.gguf"), "b");
     p.fs.put(head.path("assets/chat-template.jinja"), "t");
+    p.fs.put(head.path("assets/mtp-draft-vocab-98304.i32"), "v");
     let r = await uc.verify(head, 0);
     expect(!r.ok && r.message).toContain("asset assets/lens-out is missing");
     p.fs.put(head.path("assets/lens-out"), "");
@@ -274,6 +280,7 @@ describe("verify", () => {
     p.hasher.pinned.set(head.servedPath, head.served.sha256);
     p.fs.put(head.path("assets/kv-mean-center-PQ2_0.gguf"), "b");
     p.fs.put(head.path("assets/chat-template.jinja"), "t");
+    p.fs.put(head.path("assets/mtp-draft-vocab-98304.i32"), "v");
     let r = await uc.verify(head, 1);
     expect(!r.ok && r.message).toContain("draft head is missing");
     p.fs.put(head.draftPath!, "draft");
@@ -315,6 +322,7 @@ describe("verify", () => {
     p.fs.put(`${bin}/BUILD`, "fork=… cap=sm_120");
     p.fs.put(head.path("assets/kv-mean-center-PQ2_0.gguf"), "b");
     p.fs.put(head.path("assets/chat-template.jinja"), "t");
+    p.fs.put(head.path("assets/mtp-draft-vocab-98304.i32"), "v");
     const packAtInstall = head.servedPath; // the unit was rendered while this machine served the derived pack
     p.fs.put(head.sourcePath, "source");
     p.hasher.pinned.set(head.sourcePath, head.source.sha256);
@@ -355,6 +363,7 @@ describe("verify", () => {
     p.hasher.pinned.set(atInstall.value.sourcePath, atInstall.value.source.sha256);
     p.fs.put(atInstall.value.path("assets/kv-mean-center-PQ2_0.gguf"), "b");
     p.fs.put(atInstall.value.path("assets/chat-template.jinja"), "t");
+    p.fs.put(atInstall.value.path("assets/mtp-draft-vocab-98304.i32"), "v");
     // the adapter is pulled later: no longer undrived, but the derived pack is not on disk yet
     p.fs.put(`${root}/heads/bonsai-2-27b/assets/lora/bonsai-abliterate-lora.gguf`, "adapter");
     const now = await loadHead(p.fs, layout, "bonsai-2-27b");

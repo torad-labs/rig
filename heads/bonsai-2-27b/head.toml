@@ -3,7 +3,7 @@
 # windows, the geometry constants the -np/-c tiers are checked against, and the arguments the
 # server is loaded with. The WHY behind each number is in evidence.md beside this file.
 name = "bonsai-2-27b"
-title = "Ternary Bonsai 2 27B (PQ2_0, 1.72 bpw)"
+title = "Ternary Bonsai 2 27B (PQ2_0, 2.13 bpw)"
 port = 8099
 gpu = 0
 
@@ -54,22 +54,23 @@ row_cap = 0.10
 # rejected draft, which costs n_max more state copies per slot (charged by the tier check).
 [speculative]
 type = "draft-mtp"
-n_max = 2                      # each level is one more q8_0 state copy per slot (4 × 44 MiB on the 5080); ProCreations' sweep: n2 174.6 > n3 172.7
-                               # > n1 153.6 tok/s. Measured here on the 173–187K conversation,
-                               # per round: M2 27.0 ms = 3.5 draft + 23.5 verify, 2.2–2.4 tokens, 78–102 tok/s at acc rate/pos (0.75–0.78, 0.55–0.62);
-                               # M4 no cutoff 33.8 ms, 2.72 tokens, 80.5; M8 p_min 0.3 48.3 ms, 2.8 tokens, 59; M8 chain_p_min 0.3 38.0 ms, 2.82 tokens,
-                               # 75.8. A position costs ~5.7 ms all in (1.5–1.8 ms of draft, the rest verify rows) against ~12 ms per generated
-                               # token, so it pays only where the chain lands above ~0.45, and position 3 lands 0.24 here; ~5 ms per round also
-                               # scales with n_max itself (the rollback snapshots), open in the fork. p_min and chain_p_min (engine e785bcc,
-                               # --spec-draft-p-min / --spec-draft-chain-p-min) stay available to a head that wants them (2026-09-21)
-weights_mib = 430              # the head's share of the model buffer: 6,970.08 - 6,539.67 MiB
+n_max = 3                      # each level is one more q8_0 state copy per slot (4 × 44 MiB on the 5080) and one more verify row. With the retrained
+                               # head and the draft vocabulary a third position pays: 48 held-out requests at 40,960, 181.2 against 168.4 tok/s at n2
+                               # (engine d0a6df21f + #44); 6 held-out agentic sessions of 94K–121K tokens on 4d44f6c, +13.0 % per request (95 % CI
+                               # +7.8 to +18.4), 6/6 faster, 3.31 against 2.64 tokens per round (evidence.md, "Draft depth"). On f8394f1 with
+                               # ProCreations' head it did not: n4 ran 85.1 against n2's 93.3 tok/s (2026-09-21). p_min and chain_p_min (engine
+                               # e785bcc) stay available to a head that wants them
+weights_mib = 558              # the head's share of the model buffer: 6,970.08 - 6,539.67 MiB, plus the draft vocabulary's copy of 98,304 LM-head rows (127.5 MiB of PQ2_0)
 overhead_mib = 100             # the fixed part of the MTP draft context's compute buffer beyond its per-token growth (196 MiB at 131,072, 388 at 327,680)
 bytes_per_token = 1216         # per pooled token: the head's one full-attention layer's q4_0 K + V (1,152: 144 MiB at 131,072, 360 at 327,680) + its compute buffer (64, the
                                # bit-packed mask under --attn-mask-bits below; 1,024 as f16: 64.00 → 4.00 MB in the draft graph at 65,536 cells × 512, CPU, 2026-09-21).
 # Prompt and generated rows both enter the MTP cache. Its allocation follows the target's shared
 # pool: 294,912 cells across four slots on the 5080, not per slot. Q4_0 K/V is unchanged; the
 # draft's KV plus per-token compute is charged above for the entire pool (342 MiB on the 5080).
-args = ["-ctkd", "q4_0", "-ctvd", "q4_0"]
+# The draft vocabulary (engine #44): a draft step scores 98,304 of the LM head's 248,320 rows (134 of 338 MB) and every other
+# token's draft logit is -inf; the verify is untouched, so a token outside it costs the draft that position, never the text.
+# +2.66 % tok/s at n_max 2 and +3.83 % at n_max 3 on the 48 held-out requests, acceptance within 0.0006 (evidence.md, "Draft vocabulary").
+args = ["-ctkd", "q4_0", "-ctvd", "q4_0", "--spec-draft-mtp-vocab", "assets/mtp-draft-vocab-98304.i32"]
 
 [context]
 model = 262144                 # the trained window: n_ctx_slot on every card
@@ -111,12 +112,17 @@ min_vram_mib = 16000           # 5080 (16 GiB): 1.125 windows + the MTP head (1.
 slots = 4
 ctx = 294912
 [[geometry.tiers]]
-min_vram_mib = 13800           # a 16 GB card that also drives a desktop (up to ~2.5 GB held by it): one window shared by 4 slots. Measured beside a desktop holding
-                               # 2,251 MiB of a 5070 Ti: 13,100 MiB at peak through a 17,100-token request; 4 × 294,912 OOMed there (evidence.md, 2026-09-24)
+min_vram_mib = 14100           # a 16 GB card that also drives a desktop (up to ~2.2 GB held by it): one window shared by 4 slots. Measured on a 5070 Ti beside
+                               # its desktop, engine 3c7e643 at n_max 3 with the draft vocabulary: 13,410 MiB at peak through a 17,100-token request (13,100 at
+                               # n_max 2 before the vocabulary); 4 × 294,912 OOMed beside 2,251 MiB (evidence.md, 2026-09-24 and 2026-09-25)
 slots = 4
 ctx = 262144
 [[geometry.tiers]]
-min_vram_mib = 13400           # the same card with a busier desktop (up to ~2.9 GB): one window, one slot; 12,664 MiB at peak in the same run
+min_vram_mib = 13700           # the same card with a busier desktop (up to ~2.6 GB): one window shared by 2 slots; 13,006 MiB at peak in the same run
+slots = 2
+ctx = 262144
+[[geometry.tiers]]
+min_vram_mib = 13500           # a busier desktop still (up to ~2.8 GB): one window, one slot; 12,828 MiB at peak in the same run
 slots = 1
 ctx = 262144
 
