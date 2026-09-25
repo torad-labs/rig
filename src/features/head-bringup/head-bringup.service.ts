@@ -26,7 +26,7 @@ export interface BringUpSteps {
   installUnit(
     head: Head,
     options: { gpu: number; cacheRam?: number | undefined },
-  ): Promise<Result<{ unit: string; state: string; linger: boolean | null }>>;
+  ): Promise<Result<{ unit: string; log: string; state: string; linger: boolean | null }>>;
 }
 
 export interface BringUpHeadDeps {
@@ -70,7 +70,7 @@ export class BringUpHead {
   async run(head: Head, options: BringUpOptions): Promise<Result<BringUpReport>> {
     const prepared = await this.prepared(head, options);
     if (!prepared.ok) return prepared;
-    const { steps, unit, linger } = prepared.value;
+    const { steps, unit, log, linger } = prepared.value;
 
     this.announce("start");
     const endpoint = new HeadEndpoint(
@@ -79,17 +79,19 @@ export class BringUpHead {
       `http://127.0.0.1:${head.port}`,
     );
     const presence = await endpoint.presence();
-    if (presence !== "none" && !options.restart) {
+    // "unknown" is neither: a port that did not answer /health in time and did not refuse the
+    // connection may hold a busy head, or nothing that is one — never reported as a head serving
+    if (presence === "unknown") {
+      return fail(
+        ExitCode.Busy,
+        `REFUSING to start — :${head.port} did not answer /health in time and did not refuse the connection; a head may be there and busy`,
+      );
+    }
+    if (presence === "server" && !options.restart) {
       this.deps.log.info(
         `a head is already serving on :${head.port} — left running; the unit now carries the new build and pack. Switch when it is quiet: rig up ${head.name} --restart (refuses while a request is processing or queued)`,
       );
       return ok({ steps, linger, start: "left-running" });
-    }
-    if (presence === "unknown") {
-      return fail(
-        ExitCode.Busy,
-        `REFUSING to restart — :${head.port} did not answer /health in time and did not refuse the connection; a head may be there and busy`,
-      );
     }
     if (presence === "server") {
       const inFlight = await endpoint.inFlight();
@@ -113,7 +115,7 @@ export class BringUpHead {
     );
     if (came !== "healthy") {
       const why = came === "dead" ? `${unit} is no longer active` : "did not come up";
-      const message = `the head ${why} on :${head.port} — journalctl --user -u ${unit} -n 40`;
+      const message = `the head ${why} on :${head.port} — its log: tail -n 40 ${log}`;
       return fail(ExitCode.Failure, message);
     }
     // the answer must be this unit's process serving the pinned pack: a leftover server on the
@@ -154,7 +156,7 @@ export class BringUpHead {
   private async prepared(
     head: Head,
     options: BringUpOptions,
-  ): Promise<Result<{ steps: StepStates; unit: string; linger: boolean | null }>> {
+  ): Promise<Result<{ steps: StepStates; unit: string; log: string; linger: boolean | null }>> {
     const machine = { gpu: options.gpu, allowArch: options.allowArch };
 
     this.announce("prepare");
@@ -188,7 +190,8 @@ export class BringUpHead {
       derive: derived.value.state,
       unit: unit.value.state,
     };
-    return ok({ steps, unit: unit.value.unit, linger: unit.value.linger });
+    const { log, linger } = unit.value;
+    return ok({ steps, unit: unit.value.unit, log, linger });
   }
 
   private announce(step: string): void {

@@ -187,6 +187,13 @@ export class FakeShell implements Shell {
   }
 }
 
+/** what the Http port rejects with when nothing listens on the port (FetchHttp's contract) */
+export function connectionRefused(): Error {
+  const error = new Error("fake http: nothing is listening");
+  error.name = "ConnectionRefused";
+  return error;
+}
+
 export class FakeHttp implements Http {
   requests: Array<{ method: string; url: string; body?: unknown }> = [];
   private routes: Array<

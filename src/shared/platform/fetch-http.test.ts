@@ -25,11 +25,12 @@ describe("FetchHttp", () => {
       expect((error as Error).message).toContain("/completion");
     }
   });
-  test("a refused connection is not ConnectionClosed: nothing is listening", async () => {
+  test("a refused connection rejects as ConnectionRefused, the one answer that proves nothing listens", async () => {
     const error = await new FetchHttp()
       .request("GET", "http://127.0.0.1:1/health")
       .catch((e: unknown) => e as Error);
     expect(error).toBeInstanceOf(Error);
-    expect((error as Error).name).not.toBe("ConnectionClosed");
+    expect((error as Error).name).toBe("ConnectionRefused");
+    expect((error as Error).message).toContain("127.0.0.1:1/health");
   });
 });

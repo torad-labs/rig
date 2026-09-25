@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { putHead } from "../../../test/fakes/head-fixtures.ts";
-import { fakePorts } from "../../../test/fakes/index.ts";
+import { connectionRefused, fakePorts } from "../../../test/fakes/index.ts";
 import { loadHead } from "../../shared/head/head.ts";
 import { layoutAt } from "../../shared/layout.ts";
 import { ExitCode, fail, ok } from "../../shared/result.ts";
@@ -38,7 +38,8 @@ async function setup(over: (calls: string[]) => Partial<BringUpSteps> = () => ({
     },
     installUnit: async () => {
       calls.push("unit");
-      return ok({ unit: "rig-bonsai-2-27b.service", state: "current", linger: true });
+      const log = "/r/local/logs/bonsai-2-27b.log";
+      return ok({ unit: "rig-bonsai-2-27b.service", log, state: "current", linger: true });
     },
     ...over(calls),
   };
@@ -51,7 +52,7 @@ describe("up", () => {
     let polls = 0;
     p.http.on(/\/health$/, () => {
       polls++;
-      if (polls < 3) throw new Error("ECONNREFUSED");
+      if (polls < 3) throw connectionRefused();
       return { status: polls < 5 ? 503 : 200, text: "" };
     });
     p.http.json(/\/props$/, {
@@ -86,7 +87,7 @@ describe("up", () => {
     let polls = 0;
     p.http.on(/\/health$/, () => {
       polls++;
-      if (polls < 3) throw new Error("ECONNREFUSED");
+      if (polls < 3) throw connectionRefused();
       return { status: polls < 5 ? 503 : 200, text: "" };
     });
     p.http.json(/\/props$/, { model_path: undrived.value.servedPath, total_slots: 4 });
@@ -174,11 +175,21 @@ describe("up", () => {
     expect(!r.ok && r.message).toContain("did not refuse the connection");
     expect(p.systemd.ops).toEqual([]);
   });
+  test("a port that neither answers nor refuses is never reported as a head serving: without --restart it refuses too", async () => {
+    const { p, head, uc } = await setup();
+    p.http.on(/\/health$/, () => {
+      throw new Error("The operation timed out");
+    });
+    const r = await uc.run(head, { gpu: 0 });
+    expect(!r.ok && r.code).toBe(ExitCode.Busy);
+    expect(!r.ok && r.message).toContain("did not refuse the connection");
+    expect(p.systemd.ops).toEqual([]);
+  });
   test("a start whose answer is not the unit's own process serving the pinned pack is a failure, not a green line", async () => {
     const { p, head, uc } = await setup();
     let polls = 0;
     p.http.on(/\/health$/, () => {
-      if (polls++ === 0) throw new Error("ECONNREFUSED");
+      if (polls++ === 0) throw connectionRefused();
       return { status: 200, text: "" };
     });
     p.http.json(/\/props$/, {
@@ -200,7 +211,7 @@ describe("up", () => {
     const { p, head, uc } = await setup();
     let polls = 0; // the port is free before each start; the answer after it is the question
     p.http.on(/\/health$/, () => {
-      if (polls++ === 0) throw new Error("ECONNREFUSED");
+      if (polls++ === 0) throw connectionRefused();
       return { status: 200, text: "" };
     });
     p.http.json(/\/props$/, {
@@ -226,7 +237,7 @@ describe("up", () => {
   test("a unit that dies while the head is awaited ends the wait at once, naming the unit", async () => {
     const { p, head, uc } = await setup();
     p.http.on(/\/health$/, () => {
-      throw new Error("ECONNREFUSED");
+      throw connectionRefused();
     });
     let polls = 0;
     p.systemd.isActive = async () => polls++ < 2; // restart activates it, ExecStartPre then fails
@@ -237,10 +248,12 @@ describe("up", () => {
   test("a head that never comes healthy fails after the timeout", async () => {
     const { p, head, uc } = await setup();
     p.http.on(/\/health$/, () => {
-      throw new Error("ECONNREFUSED");
+      throw connectionRefused();
     });
     const r = await uc.run(head, { gpu: 0, healthTimeoutMs: 5000 });
     expect(!r.ok && r.message).toContain("did not come up");
+    // the unit appends the server's output to its log file, not the journal
+    expect(!r.ok && r.message).toContain("its log: tail -n 40 /r/local/logs/bonsai-2-27b.log");
     expect(p.clock.slept.length).toBe(3);
   });
 });
