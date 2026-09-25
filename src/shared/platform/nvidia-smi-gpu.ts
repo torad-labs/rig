@@ -8,7 +8,7 @@ export class NvidiaSmiGpu implements Gpu {
         "nvidia-smi",
         "-i",
         String(index),
-        "--query-gpu=name,memory.total,compute_cap,driver_version",
+        "--query-gpu=name,memory.total,memory.used,compute_cap,driver_version",
         "--format=csv,noheader,nounits",
       ],
       { timeoutMs: 15_000 },
@@ -16,9 +16,27 @@ export class NvidiaSmiGpu implements Gpu {
     if (result.code !== 0) return null;
     const line = result.stdout.split("\n").find((candidate) => candidate.trim());
     if (!line) return null;
-    const [name, memory, cap, driver] = line.split(",").map((field) => field.trim());
-    if (!name || !memory || !cap || !driver) return null;
-    return { index, name, memoryMiB: Number(memory), computeCap: cap.replace(".", ""), driver };
+    const [name, memory, used, cap, driver] = line.split(",").map((field) => field.trim());
+    if (!name || !memory || !used || !cap || !driver) return null;
+    const computeCap = cap.replace(".", "");
+    return { index, name, memoryMiB: Number(memory), usedMiB: Number(used), computeCap, driver };
+  }
+  async processMiB(index: number, pid: number): Promise<number> {
+    const result = await this.shell.run(
+      [
+        "nvidia-smi",
+        "-i",
+        String(index),
+        "--query-compute-apps=pid,used_memory",
+        "--format=csv,noheader,nounits",
+      ],
+      { timeoutMs: 15_000 },
+    );
+    for (const line of result.stdout.split("\n")) {
+      const [app, used] = line.split(",").map((field) => field.trim());
+      if (Number(app) === pid) return Number(used) || 0;
+    }
+    return 0;
   }
   async driverCuda(): Promise<string | null> {
     const result = await this.shell.run(["nvidia-smi", "-q"], { timeoutMs: 15_000 });

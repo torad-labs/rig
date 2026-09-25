@@ -83,9 +83,22 @@ re-derives each tier's total from the same constants:
 | card | VRAM | -np | -c | draft head | needs by the constants (n_max 2 / 8) |
 |---|---|---|---|---|---|
 | RTX 5080 | 16,303 MiB | 4 | 294,912 (1.125 windows) | MTP | 13,652 / 14,780 (14,104 MiB used at n_max 4, 2026-09-21) |
+| 16 GB card driving a desktop | ≥ 13,800 MiB for the head | 4 | 262,144 (1 window) | MTP | 13,036 / 14,164 (13,100 MiB at peak, 2026-09-24) |
+| 16 GB card, busier desktop | ≥ 13,400 MiB for the head | 1 | 262,144 (1 window) | MTP | 12,613 / 12,895 (12,664 MiB at peak, 2026-09-24) |
 | RTX 5090 | 32,607 MiB | 8 | 786,432 (3 windows) | MTP | 23,456 / 25,712 |
 | H100 80 GB | 81,559 MiB | 16 | 2,883,584 (11 windows) | MTP | 64,008 / 68,520 |
 | RTX PRO 6000 / H200 | ≥ 90,000 MiB | 16 | 3,538,944 (13.5 windows) | MTP | 76,328 / 80,840 |
+
+A tier is picked by the VRAM the head can have: the card's total less what every other process
+holds (`headVramMiB`). A card that also drives a desktop keeps its compositor's, browsers' and
+editors' share, and the 16 GB tier did not fit beside it: on 2026-09-24 a fresh `splice setup`
+container on the RTX 5070 Ti that drives this box's display (2,251 MiB held by the desktop,
+14,052 left) failed to allocate the MTP head's 116.28 MiB compute buffer at 4 × 294,912 and
+crash-looped. Beside the same desktop, the live unit's argv with the public r2 pack loaded and
+served a 17,100-token request at 4 × 262,144 (13,100 MiB at peak), 2 × 262,144 (12,796) and
+1 × 262,144 (12,664): the charge is 42–64 MiB under each peak. 4 × 294,912 failed with 268 MiB
+above its steady 13,784 and 4 × 262,144 loaded with 952 above its peak, so each desktop tier's
+min_vram_mib sits ~700 MiB above its measured peak (local/research/desktop-tier-2026-09-24).
 
 The 5080 row is the measured local geometry; the others are arithmetic on the constants (the
 5090's drafted 4-slot leg loaded and ran on a rented 4×5090 box on 2026-09-20, at -c 32768, with

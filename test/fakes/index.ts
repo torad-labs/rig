@@ -218,11 +218,14 @@ export class FakeGpu implements Gpu {
   cards = new Map<number, GpuInfo>();
   driver: string | null = "13.0";
   toolkit: string | null = "13.0";
+  /** MiB each pid holds, on whichever card a test asks about */
+  held = new Map<number, number>();
   card(index: number, info: Partial<GpuInfo> = {}) {
     this.cards.set(index, {
       index,
       name: "NVIDIA GeForce RTX 5080",
       memoryMiB: 16303,
+      usedMiB: 0,
       computeCap: "120",
       driver: "610.43.02",
       ...info,
@@ -231,6 +234,9 @@ export class FakeGpu implements Gpu {
   }
   async query(index: number) {
     return this.cards.get(index) ?? null;
+  }
+  async processMiB(_index: number, pid: number) {
+    return this.held.get(pid) ?? 0;
   }
   async driverCuda() {
     return this.driver;

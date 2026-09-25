@@ -87,7 +87,8 @@ compute_mib = 114              # the compute buffer's fixed part at no output ro
 compute_per_output_row_mib = 3 # the compute buffer grows 3.0 MiB per output row: n_outputs_max = slots × (1 + n_max), 167.22 MiB at 12 rows and 239.22 at 36
                                # on the 5080 (2026-09-21); charged slots × (1 + n_max) on a drafting tier, slots on one that does not
 
-# -np / -c by the card's VRAM, largest first; the first tier whose min_vram_mib fits is used.
+# -np / -c by the VRAM the head can have on the card (its total less what other processes hold: a
+# desktop's compositor and browsers), largest first; the first tier whose min_vram_mib fits is used.
 # The window one conversation may use is context.model on every card: a bigger card buys slots
 # sharing one --kv-unified pool, never a longer window. Every tier carries the MTP head: its
 # weights_mib, overhead_mib and bytes_per_token above, plus state_per_slot_mib × n_max of
@@ -109,6 +110,15 @@ min_vram_mib = 16000           # 5080 (16 GiB): 1.125 windows + the MTP head (1.
                                # head's 388 MiB compute buffer under the f16 mask, 2026-09-20)
 slots = 4
 ctx = 294912
+[[geometry.tiers]]
+min_vram_mib = 13800           # a 16 GB card that also drives a desktop (up to ~2.5 GB held by it): one window shared by 4 slots. Measured beside a desktop holding
+                               # 2,251 MiB of a 5070 Ti: 13,100 MiB at peak through a 17,100-token request; 4 × 294,912 OOMed there (evidence.md, 2026-09-24)
+slots = 4
+ctx = 262144
+[[geometry.tiers]]
+min_vram_mib = 13400           # the same card with a busier desktop (up to ~2.9 GB): one window, one slot; 12,664 MiB at peak in the same run
+slots = 1
+ctx = 262144
 
 [runtime]
 # how the pack is loaded, wherever it is loaded (the gates use the same list); "assets/…" paths
