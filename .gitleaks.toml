@@ -1,3 +1,8 @@
+# ---
+# MANAGED FILE — do not edit here.
+# Source: torad-labs/github-operator policy/gitleaks/rig.toml
+# Synced by `operator sync`; local edits are overwritten on the next sync.
+# ---
 # Repo-local gitleaks config, auto-loaded from the scan root.
 #
 # Written 2026-09-19 from the full-history scan of torad-labs/bonsai-head (renamed rig
