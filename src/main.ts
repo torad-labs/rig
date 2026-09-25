@@ -70,6 +70,7 @@ async function main(argv: string[]): Promise<number> {
     ...ports,
     steps: {
       prepare: (options) => prepare.run(options),
+      room: (head, options) => prepare.room(head, options),
       fetch: (head) => fetch.run(head),
       build: (options) => build.run(options),
       derive: (head) => derive.run(head),

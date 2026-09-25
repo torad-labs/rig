@@ -15,6 +15,8 @@ import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 
 export interface BringUpSteps {
   prepare(options: { gpu: number; allowArch?: string | undefined }): Promise<Result<unknown>>;
+  /** the card fits one of the head's tiers and the disk holds what the steps below will write */
+  room(head: Head, options: { gpu: number }): Promise<Result<unknown>>;
   fetch(head: Head): Promise<Result<{ state: string }>>;
   build(options: {
     gpu: number;
@@ -158,6 +160,8 @@ export class BringUpHead {
     this.announce("prepare");
     const prepared = await this.deps.steps.prepare(machine);
     if (!prepared.ok) return prepared;
+    const room = await this.deps.steps.room(head, { gpu: options.gpu });
+    if (!room.ok) return room;
 
     this.announce("fetch");
     const fetched = await this.deps.steps.fetch(head);

@@ -38,4 +38,7 @@ export interface FileSystem {
   linkOrCopy(from: string, to: string): Promise<void>;
   /** the canonical path; throws ENOENT for a path that does not exist, like the OS call */
   realpath(path: string): Promise<string>;
+  /** the bytes an unprivileged writer can still write on the filesystem that holds `path` (its
+   *  nearest existing ancestor when `path` is not there yet) */
+  freeBytes(path: string): Promise<number>;
 }

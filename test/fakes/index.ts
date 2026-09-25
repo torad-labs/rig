@@ -153,6 +153,11 @@ export class InMemoryFileSystem implements FileSystem {
     if (!(await this.exists(path))) throw new Error(`ENOENT ${path}`);
     return path;
   }
+  /** the disk a test sets; unset, a disk no fetch fills */
+  free = Number.MAX_SAFE_INTEGER;
+  async freeBytes(_path: string) {
+    return this.free;
+  }
 }
 const dirOf = (p: string) => p.slice(0, p.lastIndexOf("/"));
 

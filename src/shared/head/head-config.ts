@@ -69,6 +69,7 @@ export const SpeculativeSchema = v.pipe(
       rev: hex(40),
       file: relPath,
       sha256: hex(64),
+      bytes: posInt, // its size, which `rig up` checks the disk has room for before it fetches
       ...speculativeFootprint,
     }),
     // a multi-token-prediction head carried inside the served pack: pinned by the pack's own sha
@@ -105,6 +106,7 @@ export const DeriveSchema = v.variant("kind", [
     kind: v.literal("pq2-lattice-ablation"),
     lora: relPath,
     lora_sha256: hex(64),
+    lora_bytes: v.optional(posInt), // its size; required with a url (`rig up` checks the disk has room for what it fetches)
     blocks: v.pipe(v.string(), v.regex(/^\d+-\d+$/, "an inclusive block range like 15-63")),
     rows: posInt,
     lambda: v.pipe(v.number(), v.minValue(0), v.maxValue(1)),
@@ -118,6 +120,7 @@ export const DeriveSchema = v.variant("kind", [
     kind: v.literal("draft-head-splice"),
     head: relPath,
     head_sha256: hex(64),
+    head_bytes: v.optional(posInt), // its size; required with a url (`rig up` checks the disk has room for what it fetches)
     ...assetUrl,
   }),
 ]);
@@ -139,11 +142,12 @@ export const HeadSchema = v.strictObject({
     rev: hex(40),
     file: relPath,
     sha256: hex(64),
+    bytes: posInt, // its size: `rig up` checks the disk has room for every file it writes before it fetches
   }),
-  served: v.strictObject({ file: relPath, sha256: hex(64) }),
+  served: v.strictObject({ file: relPath, sha256: hex(64), bytes: posInt }),
   // the pack the public steps alone produce (the leading [[derive]] steps with a url): what a
   // machine without the private assets serves, instead of the source pack
-  public: v.optional(v.strictObject({ file: relPath, sha256: hex(64) })),
+  public: v.optional(v.strictObject({ file: relPath, sha256: hex(64), bytes: posInt })),
   derive: v.optional(v.pipe(v.array(DeriveSchema), v.minLength(1))), // [[derive]] steps, applied in order
   speculative: v.optional(SpeculativeSchema),
   context: v.strictObject({ model: posInt, advertise: posInt }),
@@ -180,15 +184,22 @@ export const HeadSchema = v.strictObject({
 export type HeadConfig = v.InferOutput<typeof HeadSchema>;
 export type Derive = v.InferOutput<typeof DeriveSchema>;
 
+const sized = (bytes: number | undefined) => (bytes ? { bytes } : {});
+
 /** the file a derive step reads, pinned by its sha256: public (fetched from url into the packs
  *  directory) or private (fetched out of band into the head's directory, never in git) */
-export function deriveAsset(step: Derive): { path: string; sha256: string; url?: string } {
+export function deriveAsset(step: Derive): {
+  path: string;
+  sha256: string;
+  url?: string;
+  bytes?: number;
+} {
   const url = step.url ? { url: step.url } : {};
   switch (step.kind) {
     case "pq2-lattice-ablation":
-      return { path: step.lora, sha256: step.lora_sha256, ...url };
+      return { path: step.lora, sha256: step.lora_sha256, ...url, ...sized(step.lora_bytes) };
     case "draft-head-splice":
-      return { path: step.head, sha256: step.head_sha256, ...url };
+      return { path: step.head, sha256: step.head_sha256, ...url, ...sized(step.head_bytes) };
   }
 }
 
@@ -270,13 +281,23 @@ export function headInvariants(head: HeadConfig): string[] {
       "runtime.lens.enabled = true but its args name no --lens-layers: the unit would be identical to lens off",
     );
   }
-  if (!head.derive && (served.file !== source.file || served.sha256 !== source.sha256)) {
+  const differs =
+    served.file !== source.file || served.sha256 !== source.sha256 || served.bytes !== source.bytes;
+  if (!head.derive && differs) {
     violations.push("served must equal source when there is no [derive] step");
   }
   if (head.derive && served.sha256 === source.sha256) {
     violations.push("a [derive] step must produce a different file than source");
   }
   const derive = head.derive ?? [];
+  for (const step of derive) {
+    const asset = deriveAsset(step);
+    if (asset.url && !asset.bytes) {
+      violations.push(
+        `the [derive] asset ${asset.path} has a url but no size: \`rig up\` checks the disk has room for what it fetches`,
+      );
+    }
+  }
   const leading = publicSteps(derive).length;
   if (derive.slice(leading).some((step) => step.url)) {
     violations.push(

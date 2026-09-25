@@ -146,7 +146,7 @@ describe("head.toml", () => {
       "follows a private one",
     );
     // mixed steps without [public]: a stranger would get the source pack
-    refused(real.replace(/\[public\][^\n]*\n[^\n]*\n[^\n]*\n/, ""), "declares no [public]");
+    refused(real.replace(/\[public\][^\n]*\n(?:[^\n[]+\n)+/, ""), "declares no [public]");
     // [public] with no private step after the public ones (every step public, or none)
     refused(real.replace(url, ""), "[public] needs public [derive] steps");
     // [public] that is the source's own bytes
@@ -157,6 +157,16 @@ describe("head.toml", () => {
       ),
       "must be its own file and bytes",
     );
+  });
+  test("every file rig writes pins its size, so `rig up` checks the disk before it fetches: a public asset without one is rejected by name", () => {
+    const source = parseHeadToml(real.replace(/^bytes = .*$/m, ""));
+    expect(!source.ok && source.message).toContain("source.bytes");
+    const asset = parseHeadToml(real.replace(/^head_bytes = .*$/m, ""));
+    expect(!asset.ok && asset.message).toContain(
+      "the [derive] asset bonsai-2-27b-mtp-r2.gguf has a url but no size",
+    );
+    // the private adapter is never fetched, so it needs none
+    expect(real).not.toContain("lora_bytes");
   });
   test("served must equal source without a derive step", () => {
     const noDerive = real.replace(/\[\[derive\]\][\s\S]*?\n\n/g, "\n");
@@ -322,6 +332,7 @@ describe("loadHead", () => {
     expect(clone.value.served).toEqual({
       file: "Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf",
       sha256: "0e5524befc7cf0c446a2d003bc5c71c39bd4816fdbb49dc38c248eab0e08d4d1",
+      bytes: 7657489728,
     });
     expect(clone.value.servedPath).toBe(
       "/r/local/packs/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf",

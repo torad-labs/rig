@@ -16,14 +16,17 @@ repo = "ProCreations/Ternary-Bonsai-2-27B-MTP"
 rev = "efffdea64c1f9e93cc7fa6bb24f72ae9d66ecf51"
 file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf"
 sha256 = "3cb3f0056d2e34ee44245a64396004a21f8492573d6ce1266ec4b7222c131dd4"
+bytes = 7657489728
 
 [served]                       # the pack the server loads: the source with our retrained MTP head (blk.64) and the refusal ablation baked in (blocks 15-63)
 file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf"
 sha256 = "389b6d3caefc1fa15eb94d82008562919142ec10051fc0109b464104ee52cae2"
+bytes = 7657489728
 
 [public]                       # what a machine without the private adapter serves: the source with our retrained MTP head (the first step alone)
 file = "Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf"
 sha256 = "0e5524befc7cf0c446a2d003bc5c71c39bd4816fdbb49dc38c248eab0e08d4d1"
+bytes = 7657489728
 
 # How served is produced from source, byte-for-byte reproducibly (steps, in order). The two steps
 # write disjoint tensors (blk.64; the residual writers of blocks 15-63), so the order moves no byte.
@@ -31,6 +34,7 @@ sha256 = "0e5524befc7cf0c446a2d003bc5c71c39bd4816fdbb49dc38c248eab0e08d4d1"
 kind = "draft-head-splice"
 head = "bonsai-2-27b-mtp-r2.gguf"
 head_sha256 = "7fe0f04c61be6403934da9f4cd52282a20b3d815e6c123232f2f90b06c21bd7a"
+head_bytes = 451320896
 url = "https://github.com/torad-labs/rig/releases/download/bonsai-2-27b-mtp-r2/bonsai-2-27b-mtp-r2.gguf"
 
 [[derive]]

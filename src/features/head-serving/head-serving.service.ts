@@ -10,9 +10,10 @@ import type { Engine } from "../../shared/engine/engine.ts";
 import { isBuilt } from "../../shared/engine/engine.ts";
 import type { Head } from "../../shared/head/head.ts";
 import { draftSidecar, type Speculative, tierSpeculates } from "../../shared/head/head-config.ts";
+import { pickTier } from "../../shared/head/tier.ts";
 import type { FileSystem, Gpu, Hasher, Host, Log, Shell } from "../../shared/ports/index.ts";
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
-import { defaultCacheRam, pickTier } from "./geometry.ts";
+import { defaultCacheRam } from "./geometry.ts";
 import { serverArgv, serverEnv } from "./server-argv.ts";
 
 export interface VerifyReport {

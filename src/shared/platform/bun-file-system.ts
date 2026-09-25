@@ -104,4 +104,10 @@ export class BunFileSystem implements FileSystem {
   realpath(path: string) {
     return fsp.realpath(path);
   }
+  async freeBytes(path: string) {
+    let at = path;
+    while (!(await this.exists(at)) && dirname(at) !== at) at = dirname(at);
+    const fs = await fsp.statfs(at);
+    return fs.bavail * fs.bsize;
+  }
 }
