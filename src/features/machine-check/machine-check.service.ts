@@ -13,7 +13,7 @@ import { stagingPath } from "../../shared/artifact.ts";
 import { type Engine, isBuilt, prebuiltSkip } from "../../shared/engine/engine.ts";
 import type { Head } from "../../shared/head/head.ts";
 import { deriveAsset, draftSidecar, type Tier } from "../../shared/head/head-config.ts";
-import { pickTier } from "../../shared/head/tier.ts";
+import { headVramMiB, pickTier } from "../../shared/head/tier.ts";
 import type { FileSystem, Gpu, GpuInfo, Host, Log, Shell } from "../../shared/ports/index.ts";
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 
@@ -130,9 +130,15 @@ export class CheckMachine {
   async room(head: Head, options: { gpu: number }): Promise<Result<RoomReport>> {
     const card = await this.deps.gpu.query(options.gpu);
     if (!card) return fail(ExitCode.Failure, `no CUDA card at nvidia-smi index ${options.gpu}`);
-    const tier = pickTier(head, card.memoryMiB);
+    const vram = await headVramMiB(this.deps, card, head.port);
+    const tier = pickTier(head, vram);
     if (!tier.ok) {
-      const message = `${card.name} at index ${options.gpu} cannot serve ${head.name}: ${tier.message}`;
+      const held = card.memoryMiB - vram;
+      const others =
+        held > 0
+          ? ` (${held} of its ${card.memoryMiB} MiB are held by other processes: a desktop, another model)`
+          : "";
+      const message = `${card.name} at index ${options.gpu} cannot serve ${head.name}${others}: ${tier.message}`;
       return fail(tier.code, message);
     }
     const needs = await this.needs(head, card.computeCap);
@@ -146,7 +152,7 @@ export class CheckMachine {
       );
     }
     this.deps.log.info(
-      `${card.name} (${card.memoryMiB} MiB) fits ${head.name}; ${gb(total)} still to write, ${gb(free)} free`,
+      `${card.name} (${vram} of ${card.memoryMiB} MiB for it) fits ${head.name} at ${tier.value.slots} slots; ${gb(total)} still to write, ${gb(free)} free`,
     );
     return ok({ tier: tier.value, needs, freeBytes: free });
   }

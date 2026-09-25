@@ -179,6 +179,21 @@ describe("geometry", () => {
       expect(t.ok && [t.value.slots, t.value.ctx]).toEqual([slots, ctx]);
     }
   });
+  test("the plan sizes the head to what it can have: beside a desktop the 16 GB card renders one window, its own serving share stays its own", async () => {
+    const { p, head, uc } = await setup();
+    p.gpu.card(0, { usedMiB: 2251 }); // the 5070 Ti driving this box's display, 2026-09-24
+    const desktop = await uc.plan(head, { gpu: 0, cacheRam: 8192 });
+    expect(desktop.ok && [desktop.value.slots, desktop.value.ctx, desktop.value.vramMiB]).toEqual([
+      4, 262144, 14052,
+    ]);
+    const ctx = desktop.ok ? desktop.value.argv[desktop.value.argv.indexOf("-c") + 1] : undefined;
+    expect(ctx).toBe("262144");
+    p.gpu.card(0, { usedMiB: 13796 }); // re-rendered while the head itself serves on :8099
+    p.host.listeners.set(8099, 3919564);
+    p.gpu.held.set(3919564, 13784);
+    const serving = await uc.plan(head, { gpu: 0, cacheRam: 8192 });
+    expect(serving.ok && [serving.value.slots, serving.value.ctx]).toEqual([4, 294912]);
+  });
   test("a card below the smallest tier is refused with exit 3", async () => {
     const { head } = await setup();
     const t = pickTier(head, 12000);

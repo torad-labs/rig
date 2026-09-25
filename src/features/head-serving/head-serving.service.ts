@@ -10,7 +10,7 @@ import type { Engine } from "../../shared/engine/engine.ts";
 import { isBuilt } from "../../shared/engine/engine.ts";
 import type { Head } from "../../shared/head/head.ts";
 import { draftSidecar, type Speculative, tierSpeculates } from "../../shared/head/head-config.ts";
-import { pickTier } from "../../shared/head/tier.ts";
+import { headVramMiB, pickTier } from "../../shared/head/tier.ts";
 import type { FileSystem, Gpu, Hasher, Host, Log, Shell } from "../../shared/ports/index.ts";
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 import { defaultCacheRam } from "./geometry.ts";
@@ -129,7 +129,7 @@ export class ServeHead {
         );
       }
     }
-    const tier = pickTier(head, card.memoryMiB);
+    const tier = pickTier(head, await headVramMiB(this.deps, card, head.port));
     if (!tier.ok) return tier;
     const sidecar = head.speculative && draftSidecar(head.speculative);
     if (tierSpeculates(head, tier.value) && sidecar) {
@@ -155,7 +155,8 @@ export class ServeHead {
   async plan(head: Head, options: PlanOptions): Promise<Result<ServePlan>> {
     const card = await this.deps.gpu.query(options.gpu);
     if (!card) return fail(ExitCode.Failure, `no CUDA card at nvidia-smi index ${options.gpu}`);
-    const tier = pickTier(head, card.memoryMiB);
+    const vramMiB = await headVramMiB(this.deps, card, head.port);
+    const tier = pickTier(head, vramMiB);
     if (!tier.ok) return tier;
     const slots = options.slots ?? tier.value.slots;
     const ctx = options.ctx ?? tier.value.ctx;
@@ -170,7 +171,7 @@ export class ServeHead {
       slots,
       ctx,
       cacheRam,
-      vramMiB: card.memoryMiB,
+      vramMiB,
       speculative,
     });
   }
