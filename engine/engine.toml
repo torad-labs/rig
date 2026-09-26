@@ -105,12 +105,41 @@
 # rig 0.1.7's head on this build against rig 0.1.6's on c008fe8 (RTX 5080, each pin's prebuilt, 48 held-out greedy
 # requests at 40,960): 190.2 against 141.9 tok/s, +36.84 % per request (95 % CI +33.99 to +39.74), 48/48 faster.
 # Evidence in local/research/engine4-gate-2026-09-25, prebuilt-engine5-2026-09-25 and desktop-tier-2026-09-25 (2026-09-25).
+# c1518d4 (fork main after the trains engine-6 #56, engine-7 #62, engine-8 #64 and engine-9 #69) is what moved it past
+# 3c7e643: the operator's RTX 5090 head (eight slots over one unified pool of 786,432 cells) slowed as the evening's
+# conversations filled its pool. After three conversations of 178,000 tokens a 245,760-token prompt in the pool's last
+# cells decoded at 22.31 ms per draft round against 14.75 in its first cells, and prefilled in 364.7 s against 117.3.
+# #30's range pre-pass held each Q tile to its own cells, but stream-k divided the pool's whole span among the blocks
+# (ntiles_KV over K->ne[1]), so about 31 % of them had work, and prefill ran no pre-pass; c008fe8 reads the same there.
+# #63, with engine-9's fixup, marks the KV steps each Q tile sees and splits only those: 13.32 against 13.15 ms and
+# 116.8 against 115.2 s, the conversations before it 72 / 72 / 72 s against 73 / 132 / 192 (bonsai-2-27b evidence.md,
+# "The pool's far end"). Alongside, each behind its own off switch (TORAD.md): #65 builds the KQ mask from each
+# sequence's cell bits; #51/#58 run rms_norm, its weight multiply and the signed FWHT as one kernel; #61 stores no
+# partial state for a cache without a window (the MTP draft context's KV was copied to host memory at every
+# checkpoint); #66 the drafters read the slot's own token list; #67 a resumed prompt copies no checkpoint twice and the
+# sampler replays only its window; #68 a restore copies a run of cells at a time; engine-9 reads the attention gate and
+# the Gated DeltaNet output in place (cpy_scalar 64 -> 0 a step, gates.toml's census); #55 binds the server to its
+# GPUs' NUMA node. #60 (--spec-draft-mtp-swa) is opt-in and no head passes it. The card holds the same memory:
+# 24,336-24,346 MiB at the 5090 geometry on both engines, 12,844 against engine-8's 12,836-12,848 at one slot of
+# 262,144 on a 5080. The engine-9 gate on the train (RTX 5080, 24 greedy questions after the 245K prompt, legs B C C B
+# against engine-8): 1.68 % faster per round (95 % CI 1.57 to 1.80), the resumed first token 122 ms sooner. #67's
+# checkpoint dedup alone moves the text of 19 resumed questions: from the fifth on a resume starts 5 tokens earlier,
+# since the next checkpoint's thinning drops the one the dedup kept instead of copying (a defect; the fork's fix is
+# ab8f91a23 on train/engine-10). The restored state is right and 5 more tokens are processed again, so the text moves
+# at batch-boundary numerics; with only its switch set the 24 are engine-8's, and acceptance moves with the text,
+# -0.024 (95 % CI -0.056 to +0.009). This prebuilt against 3c7e643's (RTX 5080, one slot at 262,144, the 245K prompt's
+# four questions greedy with top-5 logprobs): every first difference at a tie (0.011 to 0.137 nats), |dlogprob| p99
+# 0.085 over the agreeing tokens (3c7e643 against c008fe8: 0.070), plain decode there 58.6 against 47.3-48.0 tok/s;
+# the served draft against plain, three differences, each at a tie; a 245K conversation swapped out and back at the
+# 5080 tier, its first token after 3.2 s and the same answer in both legs.
+# Evidence in local/research/highidx-2026-09-26, evening-2026-09-26, engine8-2026-09-25 and
+# prebuilt-engine9-2026-09-26 (2026-09-26).
 # ORDER: publish the build (rig build) BEFORE merging a pin move. The unit's ExecStartPre verify refuses
 # to start a head whose pin has no complete build, so a restart in the gap is an outage: 2026-09-21
 # 00:38, four refused starts, 90 s down, while 60493a5-sm120 was still compiling.
 [fork]
 repo = "https://github.com/torad-labs/llama.cpp.git"
-sha = "3c7e643262468316e0ba04b70293c7b1a912c4f5"
+sha = "c1518d4cd04217e63a31fbdd3791e07c92b2a45b"
 base = "prism-b10685-7dffb15"   # PrismML's llama.cpp (ggml-org b10685 + the ternary kernels) this branch sits on
 
 # Compute capabilities with a measured run behind them — anything else is refused by prepare and
@@ -123,6 +152,15 @@ evidence = "Bonsai-demo runs/2026-09-19/decode-profile-5070ti and runs/2026-09-2
 cap = "90"
 cards = "H100 SXM / NVL, H200"
 evidence = "Bonsai-demo runs/2026-09-19/vast-h100-sxm: M=1/2/4 aggregate 50/83/131 tok/s, needle OK"
+
+# Compilers that build the pin's kernels wrong for a card, each with its evidence: a compile for that card with one
+# of them is refused, by prepare before anything is downloaded (nvcc on PATH) and by build after configure (the
+# compiler cmake chose), because the engine it makes loads and serves wrong numbers without an error. A prebuilt
+# was compiled elsewhere and is not affected. An entry leaves only with evidence that the pin builds right with it.
+[[miscompilers]]
+nvcc = "13.2.78"
+caps = ["120"]
+why = "CUDA 13.2.1's compiler computes the IQ1_S, IQ2_S and IQ3_S matmuls wrong on sm_120a: test-backend-ops 0/33 built with it, with its own CUDA libraries or 13.2.2's, and 33/33 built with 13.2.2's nvcc 13.2.86, driver 595.58.03 throughout (torad-labs/llama.cpp#56, 2026-09-25); install CUDA 13.2.2 (nvcc 13.2.86) or newer"
 
 # The CUDA runtime every build links (libcudart, libcublas, libcublasLt), as NVIDIA redistributes it: a
 # prebuilt engine installs these beside its binaries, so a machine needs only a driver that runs CUDA
@@ -150,6 +188,6 @@ libs = ["libcublas.so.13", "libcublasLt.so.13"]
 # sha, so a rebuild of the same commit is a new release, engine-<sha7>-<n>.
 [[prebuilt]]
 cap = "120"
-url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-3c7e643/engine-sm120-3c7e643.tar.gz"
-sha256 = "01520ce38d31369146e5bff3f3e75cbde1d735606471ed1367de1bc1bd66a300"
+url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-c1518d4/engine-sm120-c1518d4.tar.gz"
+sha256 = "c41ac41cf83f1b4a20ee0101afddefaf3d98ccd149f9c52e6a13cecd0fe86854"
 glibc = "2.35"                 # scripts/prebuilt/Dockerfile's Ubuntu 22.04; its ELF files need GLIBC_2.34 at most

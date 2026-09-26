@@ -18,6 +18,7 @@ import {
   engineSource,
   engineTarballName,
   isBuilt,
+  miscompiles,
   type Prebuilt,
   prebuiltSkip,
 } from "../../shared/engine/engine.ts";
@@ -194,6 +195,14 @@ export class BuildEngine {
     if (configure.code !== 0) {
       return fail(ExitCode.Failure, `cmake configure failed (local/logs/configure-${tag}.log)`);
     }
+    // the compiler cmake chose, which need not be the nvcc on PATH prepare asked: one engine.toml
+    // lists for this card builds an engine that serves wrong numbers without an error
+    const nvcc = await this.deps.gpu.toolkitCuda(
+      await this.cmakeCache(buildTree, "CMAKE_CUDA_COMPILER"),
+    );
+    const miscompiled = miscompiles(this.engine, nvcc, cap);
+    if (miscompiled)
+      return fail(ExitCode.Failure, `${miscompiled} (the compiler cmake configured)`);
 
     // A power cut mid-compile leaves an output whose data never reached the disk as a 0-byte file
     // with a fresh mtime, and ninja trusts it; deleted, it is rebuilt (2026-09-23, pq2_0's MMQ
@@ -228,9 +237,7 @@ export class BuildEngine {
 
   /** where the compiler cmake configured with keeps each PORTABLE_RUNTIME library */
   private async portableRuntime(buildTree: string): Promise<Result<string[]>> {
-    const cache = join(buildTree, "CMakeCache.txt");
-    const text = (await this.deps.fs.exists(cache)) ? await this.deps.fs.readText(cache) : "";
-    const cxx = /^CMAKE_CXX_COMPILER:\w+=(.+)$/m.exec(text)?.[1] ?? "c++";
+    const cxx = (await this.cmakeCache(buildTree, "CMAKE_CXX_COMPILER")) ?? "c++";
     const files: string[] = [];
     for (const lib of PORTABLE_RUNTIME) {
       const found = await this.deps.shell.run([cxx, `-print-file-name=${lib}`], {
@@ -246,6 +253,13 @@ export class BuildEngine {
       files.push(path);
     }
     return ok(files);
+  }
+
+  /** an entry of the tree's CMakeCache.txt, undefined when the cache or the entry is missing */
+  private async cmakeCache(buildTree: string, key: string): Promise<string | undefined> {
+    const cache = join(buildTree, "CMakeCache.txt");
+    if (!(await this.deps.fs.exists(cache))) return undefined;
+    return new RegExp(`^${key}:\\w+=(.+)$`, "m").exec(await this.deps.fs.readText(cache))?.[1];
   }
 
   /** a build tree is reused only when CMakeCache.txt names this source and this directory:

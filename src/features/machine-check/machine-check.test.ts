@@ -29,6 +29,12 @@ const withPrebuilt = {
     c === "120" ? { cap: "120", url: "u", sha256: "s", glibc: "2.35" } : undefined,
 } as unknown as Engine;
 
+/** the engine with CUDA 13.2.1's compiler known to build its kernels wrong for sm_120 */
+const miscompiled = {
+  ...engine,
+  miscompilers: [{ nvcc: "13.2.78", caps: ["120"], why: "the IQ matmuls compute wrong" }],
+} as unknown as Engine;
+
 /** a driver-only machine: nvidia-smi, curl, tar, xz; no git, cmake, ninja or toolkit */
 function driverOnly() {
   const p = fakePorts();
@@ -90,6 +96,24 @@ describe("prepare", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe(ExitCode.Driver);
   });
+  test("a compiler engine.toml knows to build the card's kernels wrong is refused before any download, by name", async () => {
+    const p = ready();
+    p.gpu.toolkit = "13.2.78";
+    const r = await new CheckMachine(p, miscompiled).run({ gpu: 0, uid: 1000 });
+    expect(!r.ok && r.code).toBe(ExitCode.Failure);
+    expect(!r.ok && r.message).toBe(
+      "nvcc 13.2.78 compiles this engine wrong for sm_120: the IQ matmuls compute wrong",
+    );
+  });
+  test("the same compiler passes for a card it is not known to miscompile, and a fixed build passes for the card", async () => {
+    const p = ready();
+    p.gpu.toolkit = "13.2.78";
+    p.gpu.card(0, { computeCap: "90" });
+    expect((await new CheckMachine(p, miscompiled).run({ gpu: 0, uid: 1000 })).ok).toBe(true);
+    const fixed = ready();
+    fixed.gpu.toolkit = "13.2.86";
+    expect((await new CheckMachine(fixed, miscompiled).run({ gpu: 0, uid: 1000 })).ok).toBe(true);
+  });
   test("a root box with apt installs the toolchain first", async () => {
     const p = ready();
     p.shell.tools.add("apt-get");
@@ -106,6 +130,16 @@ describe("prepare, a card with a published prebuilt", () => {
     const p = driverOnly();
     const r = await new CheckMachine(p, withPrebuilt).run({ gpu: 0, uid: 1000 });
     expect(r.ok && r.value).toMatchObject({ supported: true, prebuilt: true, toolkitCuda: null });
+  });
+  test("a prebuilt is not compiled here, so the machine's miscompiling toolkit does not matter", async () => {
+    const p = driverOnly();
+    p.gpu.toolkit = "13.2.78";
+    const withBoth = {
+      ...withPrebuilt,
+      miscompilers: miscompiled.miscompilers,
+    } as unknown as Engine;
+    const r = await new CheckMachine(p, withBoth).run({ gpu: 0, uid: 1000 });
+    expect(r.ok && r.value).toMatchObject({ prebuilt: true, toolkitCuda: "13.2.78" });
   });
   test("it still needs what fetches and unpacks the build: xz missing is named", async () => {
     const p = driverOnly();

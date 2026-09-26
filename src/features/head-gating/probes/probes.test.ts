@@ -4,6 +4,7 @@ import { LlamaClient } from "../llama-client.ts";
 import { abaVerdict } from "./decode-probe.ts";
 import { countDoubled, countRepeats } from "./fluency-probe.ts";
 import { type HumanEvalResult, humanevalVerdict, signTestP } from "./human-eval-probe.ts";
+import { type DepthLeg, depthVerdict } from "./longctx-probe.ts";
 import { grow, plant } from "./needle-probe.ts";
 import { capabilityVerdicts, countRefusals, harmVerdict, parity } from "./refusal-probe.ts";
 import { firstDivergence, speculativeVerdict } from "./speculative-probe.ts";
@@ -266,6 +267,28 @@ describe("llama client", () => {
     const bare = await client.chat("hey", { maxTokens: 4 });
     expect(bare.tokens).toEqual([]);
     expect(bodies[1]).not.toHaveProperty("logprobs");
+    // greedy turns the prompt cache off; a probe that resumes one document turns it back on
+    expect(bodies[1]).toMatchObject({ temperature: 0, cache_prompt: false });
+    await client.chat("hey", { maxTokens: 4, cachePrompt: true });
+    expect(bodies[2]).toMatchObject({ temperature: 0, cache_prompt: true });
+  });
+});
+
+describe("longctx verdict", () => {
+  const leg = (tps: number[], draftN = 0): DepthLeg => ({
+    tps,
+    promptTokens: 245_300,
+    prefillSecs: 290,
+    draftN,
+    accepted: draftN >> 1,
+  });
+  test("the drafted leg's mean decode over the plain leg's, against min_gain, and the draft must run", () => {
+    const plain = leg([60, 62, 61, 61]);
+    const pass = depthVerdict(plain, leg([120, 124, 122, 122], 900), 1.0);
+    expect(pass).toEqual({ gain: 2, ran: true, fast: true });
+    expect(depthVerdict(plain, leg([58, 60, 59, 59], 900), 1.0).fast).toBe(false);
+    expect(depthVerdict(plain, leg([120, 118, 125, 121]), 1.0).ran).toBe(false);
+    expect(depthVerdict(plain, leg([120, 118, 125, 121], 900), 2.5).fast).toBe(false);
   });
 });
 

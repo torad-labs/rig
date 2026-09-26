@@ -12,7 +12,7 @@ import { ExitCode } from "../../shared/result.ts";
 import type { ManageUnit, UnitStatus } from "./systemd-unit.service.ts";
 
 const USAGE =
-  "unit install|render|status|uninstall <head> [--gpu N] [--cache-ram MiB] [--json]   the systemd user unit that keeps the head running";
+  "unit install|render|status|uninstall <head> [--gpu N] [--cache-ram MiB] [--slots N] [--json]   the systemd user unit that keeps the head running";
 const FORM = USAGE.split("   ")[0] ?? USAGE;
 
 export function manageUnitCommand(service: ManageUnit, loadHead: LoadHead, log: Log): Command {
@@ -29,6 +29,7 @@ export function manageUnitCommand(service: ManageUnit, loadHead: LoadHead, log: 
         const options = {
           gpu: flagInt(args, "gpu") ?? head.gpu,
           cacheRam: flagInt(args, "cache-ram"),
+          slots: flagInt(args, "slots"),
         };
         switch (subcommand) {
           case "install":

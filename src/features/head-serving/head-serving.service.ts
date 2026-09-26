@@ -159,7 +159,13 @@ export class ServeHead {
     const tier = pickTier(head, vramMiB);
     if (!tier.ok) return tier;
     const slots = options.slots ?? tier.value.slots;
-    const ctx = options.ctx ?? tier.value.ctx;
+    if (slots < 1 || slots > tier.value.slots)
+      return fail(
+        ExitCode.Failure,
+        `REFUSING: ${slots} slots — this card's tier (${vramMiB} MiB for the head) holds 1 to ${tier.value.slots}`,
+      );
+    // fewer slots than the tier's share its pool, never a longer window than the model's own for one conversation
+    const ctx = options.ctx ?? Math.min(tier.value.ctx, slots * head.context.model);
     const cacheRam = options.cacheRam ?? defaultCacheRam(await this.deps.host.ramMiB());
     const binDir = this.engine.binDir(card.computeCap);
     const speculative = tierSpeculates(head, tier.value);

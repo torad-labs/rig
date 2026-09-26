@@ -32,4 +32,20 @@ describe("NvidiaSmiGpu", () => {
     expect(await gpu.processMiB(0, 4750)).toBe(284);
     expect(await gpu.processMiB(0, 391956)).toBe(0);
   });
+  test("toolkitCuda is the compiler's build number, of nvcc on PATH or of the compiler named", async () => {
+    const version = (release: string, build: string) => ({
+      code: 0,
+      stdout: `nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2026 NVIDIA Corporation\nCuda compilation tools, release ${release}, V${build}\nBuild cuda_${release}.r${release}/compiler.37061995_0\n`,
+      stderr: "",
+    });
+    const shell = new FakeShell();
+    shell.tools.add("nvcc");
+    shell.on(/^nvcc --version$/, version("13.2", "13.2.78"));
+    shell.on(/^\/usr\/local\/cuda-13\.3\/bin\/nvcc --version$/, version("13.3", "13.3.33"));
+    const gpu = new NvidiaSmiGpu(shell);
+    expect(await gpu.toolkitCuda()).toBe("13.2.78");
+    expect(await gpu.toolkitCuda("/usr/local/cuda-13.3/bin/nvcc")).toBe("13.3.33");
+    shell.tools.delete("nvcc");
+    expect(await gpu.toolkitCuda()).toBeNull();
+  });
 });

@@ -36,10 +36,13 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 stage=$(mktemp -d "$root/local/e2e-driver-only-XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
-# the release, as release.yml packs it
+# the release, as release.yml packs it: its checkout holds only the files git tracks and a dist/ with the one binary
+# it built. A copy of this checkout's directories would also carry what git ignores here: the private refusal-ablation
+# LoRA under heads/bonsai-2-27b/assets/lora, which `rig derive` then applies, and old dist/rig.bak-* binaries.
 (cd "$root" && bun run build > /dev/null)
-mkdir -p "$stage/pack/rig/engine" "$stage/release"
-cp -r "$root/dist" "$root/heads" "$root/LICENSE" "$root/README.md" "$stage/pack/rig/"
+mkdir -p "$stage/pack/rig/engine" "$stage/pack/rig/dist" "$stage/release"
+cp "$root/dist/rig" "$stage/pack/rig/dist/"
+git -C "$root" ls-files -z -- heads LICENSE README.md | tar -C "$root" --null -T - -cf - | tar -C "$stage/pack/rig" -xf -
 cp "$root/engine/engine.toml" "$stage/pack/rig/engine/"
 mounts=()
 if [ -n "$prebuilt" ]; then

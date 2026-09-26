@@ -3,21 +3,25 @@
 // daemon-reloaded and enabled. Never started here: starting is `up`'s decision, after the build
 // and the pack have been verified and the live head is idle. The host's --cache-ram choice lives
 // IN THE UNIT: without --cache-ram, the value the installed unit carries is kept, so a re-run
-// cannot silently move a shared host to the box rule (RAM/4).
+// cannot silently move a shared host to the box rule (RAM/4). An operator's `--slots N` (one slot
+// where one conversation is served) is recorded in the unit and kept the same way; without one,
+// the card's tier picks the slots at every render, and serve refuses a count the tier cannot hold.
 import { join } from "node:path";
 import type { Head } from "../../shared/head/head.ts";
 import type { Layout } from "../../shared/layout.ts";
 import type { Clock, FileSystem, Log, Systemd } from "../../shared/ports/index.ts";
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 import { compactStamp } from "../../shared/stamp.ts";
-import { cacheRamOf, renderUnit, unitName } from "./unit-file.ts";
+import { cacheRamOf, renderUnit, slotsOf, unitName } from "./unit-file.ts";
 
 /** what unit needs from serve: a plan for the head on this machine (injected; unit never imports serve) */
 export interface Planner {
   plan(
     head: Head,
-    options: { gpu: number; cacheRam?: number | undefined },
-  ): Promise<Result<{ argv: string[]; env: Record<string, string>; cacheRam: number }>>;
+    options: { gpu: number; cacheRam?: number | undefined; slots?: number | undefined },
+  ): Promise<
+    Result<{ argv: string[]; env: Record<string, string>; cacheRam: number; slots: number }>
+  >;
 }
 export interface ManageUnitDeps {
   fs: FileSystem;
@@ -30,6 +34,7 @@ export interface ManageUnitDeps {
 export interface InstallOptions {
   gpu: number;
   cacheRam?: number | undefined;
+  slots?: number | undefined;
 }
 export interface InstallReport {
   unit: string;
@@ -39,6 +44,7 @@ export interface InstallReport {
   state: "current" | "installed" | "updated";
   backup?: string;
   cacheRam: number;
+  slots: number;
   /** whether the unit outlives its user's last session (logind's Linger): null when unreadable */
   linger: boolean | null;
 }
@@ -68,22 +74,23 @@ export class ManageUnit {
   async render(
     head: Head,
     options: InstallOptions,
-  ): Promise<Result<{ text: string; cacheRam: number }>> {
+  ): Promise<Result<{ text: string; cacheRam: number; slots: number }>> {
     const path = this.unitPath(head);
-    const previous = (await this.deps.fs.exists(path))
-      ? cacheRamOf(await this.deps.fs.readText(path))
+    const installed = (await this.deps.fs.exists(path))
+      ? await this.deps.fs.readText(path)
       : undefined;
-    if (
-      options.cacheRam === undefined &&
-      previous === undefined &&
-      (await this.deps.fs.exists(path))
-    )
+    const previous = installed === undefined ? undefined : cacheRamOf(installed);
+    // --slots 0 gives the choice back to the card's tier
+    const kept = installed === undefined ? undefined : slotsOf(installed);
+    const chosen = options.slots === 0 ? undefined : (options.slots ?? kept);
+    if (options.cacheRam === undefined && previous === undefined && installed !== undefined)
       this.deps.log.warn(
         `${path} exists but carries no --cache-ram to keep; the box rule (RAM/4) applies — pass --cache-ram to pin a shared host's bound`,
       );
     const plan = await this.deps.planner.plan(head, {
       gpu: options.gpu,
       cacheRam: options.cacheRam ?? previous,
+      slots: chosen,
     });
     if (!plan.ok) return plan;
     const text = renderUnit({
@@ -94,8 +101,9 @@ export class ManageUnit {
       env: plan.value.env,
       gpu: options.gpu,
       self: this.deps.self,
+      slots: chosen,
     });
-    return ok({ text, cacheRam: plan.value.cacheRam });
+    return ok({ text, cacheRam: plan.value.cacheRam, slots: plan.value.slots });
   }
 
   async install(head: Head, options: InstallOptions): Promise<Result<InstallReport>> {
@@ -108,8 +116,8 @@ export class ManageUnit {
     const existed = await this.deps.fs.exists(path);
     if (existed && (await this.deps.fs.readText(path)) === rendered.value.text) {
       const linger = await this.ensureLinger();
-      const { cacheRam } = rendered.value;
-      return ok({ unit, path, log: this.logPath(head), state: "current", cacheRam, linger });
+      const { cacheRam, slots } = rendered.value;
+      return ok({ unit, path, log: this.logPath(head), state: "current", cacheRam, slots, linger });
     }
     let backup: string | undefined;
     if (existed) {
@@ -120,7 +128,7 @@ export class ManageUnit {
     await this.deps.systemd.daemonReload();
     await this.deps.systemd.enable(unit);
     this.deps.log.info(
-      `${existed ? "updated" : "installed"} ${path} (GPU ${options.gpu}, --cache-ram ${rendered.value.cacheRam}) and enabled it; it takes effect at the next restart`,
+      `${existed ? "updated" : "installed"} ${path} (GPU ${options.gpu}, -np ${rendered.value.slots}, --cache-ram ${rendered.value.cacheRam}) and enabled it; it takes effect at the next restart`,
     );
     return ok({
       unit,
@@ -129,6 +137,7 @@ export class ManageUnit {
       state: existed ? "updated" : "installed",
       ...(backup ? { backup } : {}),
       cacheRam: rendered.value.cacheRam,
+      slots: rendered.value.slots,
       linger: await this.ensureLinger(),
     });
   }

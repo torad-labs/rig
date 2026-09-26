@@ -25,7 +25,7 @@ export interface BringUpSteps {
   derive(head: Head): Promise<Result<{ state: string }>>;
   installUnit(
     head: Head,
-    options: { gpu: number; cacheRam?: number | undefined },
+    options: { gpu: number; cacheRam?: number | undefined; slots?: number | undefined },
   ): Promise<Result<{ unit: string; log: string; state: string; linger: boolean | null }>>;
 }
 
@@ -43,6 +43,8 @@ export interface BringUpOptions {
   /** switch a serving head to the new build and pack; refused while a slot is processing */
   restart?: boolean;
   cacheRam?: number | undefined;
+  /** the unit's -np, kept through re-renders (one slot where the operator runs one conversation) */
+  slots?: number | undefined;
   allowArch?: string | undefined;
   healthTimeoutMs?: number;
 }
@@ -181,6 +183,7 @@ export class BringUpHead {
     const unit = await this.deps.steps.installUnit(head, {
       gpu: options.gpu,
       cacheRam: options.cacheRam,
+      slots: options.slots,
     });
     if (!unit.ok) return unit;
 

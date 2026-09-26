@@ -4,7 +4,7 @@ import { fakePorts } from "../../../test/fakes/index.ts";
 import { loadHead } from "../../shared/head/head.ts";
 import { deriveAsset } from "../../shared/head/head-config.ts";
 import { layoutAt } from "../../shared/layout.ts";
-import { GgmlType, parseGgufHeader } from "./gguf.ts";
+import { GgmlType, parseGgufHeader, readGguf, relayoutGguf } from "./gguf.ts";
 import { DerivePack } from "./pack-derivation.service.ts";
 import { unpack } from "./pq2.ts";
 
@@ -65,6 +65,7 @@ const loraBytes = () =>
     },
   ]);
 const sha = (b: Uint8Array) => new Bun.CryptoHasher("sha256").update(b).digest("hex");
+const BF16 = 30; // a type the reader cannot size, as the real pack's ssm_alpha and ssm_beta are
 
 function headToml(o: {
   servedSha: string;
@@ -330,7 +331,47 @@ describe("derive: draft-head splice", () => {
     const r = await good.uc.run(good.head);
     expect(r.ok && r.value).toMatchObject({ state: "derived", flipped: 2 * K, spliced: 2 });
   });
-  test("a head tensor the pack lacks, or one of another type or shape, is refused and the staged copy removed", async () => {
+  test("a head tensor of another type re-lays the pack out: that tensor takes the head's type and bytes, the rest keep theirs, the metadata stays", async () => {
+    const q4 = writeGguf([
+      {
+        name: "blk.3.nextn.eh_proj.weight",
+        ne: [32, 2],
+        type: GgmlType.Q4_0,
+        data: new Uint8Array(2 * 18).fill(0x44),
+      },
+      ...headTensors(0x22, 2).slice(1),
+    ]);
+    const { p, head, uc } = await setup({ splice: true, draftHead: q4 });
+    p.hasher.pinned.set(head.path("assets/draft-head.gguf"), deriveAsset(head.derive![1]!).sha256);
+    p.hasher.pinned.set(`${head.servedPath}.deriving`, head.served.sha256);
+    const r = await uc.run(head);
+    expect(r.ok && r.value).toMatchObject({ state: "derived", flipped: 2 * K, spliced: 2 });
+    const out = p.fs.files.get(head.servedPath)!;
+    const ablatedOnly = await expectedOutput();
+    const [after, before] = [parseGgufHeader("out", out), parseGgufHeader("in", ablatedOnly)];
+    expect(after.kv).toEqual(before.kv);
+    expect(after.tensors.map((t) => [t.name, t.type])).toEqual(
+      before.tensors.map((t) => [
+        t.name,
+        t.name === "blk.3.nextn.eh_proj.weight" ? GgmlType.Q4_0 : t.type,
+      ]),
+    );
+    expect(after.tensors.every((t) => (t.offset - after.dataOffset) % 32 === 0)).toBe(true);
+    expect(tensorBytesOf(out, "blk.3.nextn.eh_proj.weight", 36)).toEqual(Array(36).fill(0x44));
+    expect(tensorBytesOf(out, "blk.3.nextn.enorm.weight", 16)).toEqual(
+      Array.from(f32Bytes([2, 2, 2, 2])),
+    ); // after the retyped tensor, so it moved
+    for (const other of [
+      "blk.0.ffn_down.weight",
+      "blk.0.attn_q.weight",
+      "blk.1.ffn_down.weight",
+      "blk.2.ffn_down.weight",
+    ])
+      expect(tensorBytesOf(out, other, N * 34)).toEqual(tensorBytesOf(ablatedOnly, other, N * 34));
+    expect(out.length).toBe(ablatedOnly.length - 96 + 64); // 68 bytes padded to 96, now 36 padded to 64
+    expect([...p.fs.files.keys()].some((path) => path.endsWith(".relayout"))).toBe(false);
+  });
+  test("a head tensor the pack lacks, of another shape, or of a type rig cannot size, is refused and the staged copy removed", async () => {
     const cases: [Uint8Array, string][] = [
       [
         writeGguf([
@@ -352,18 +393,13 @@ describe("derive: draft-head splice", () => {
             data: new Uint8Array(34),
           },
         ]),
-        "never a layout",
+        "never its shape",
       ],
       [
         writeGguf([
-          {
-            name: "blk.3.nextn.enorm.weight",
-            ne: [4],
-            type: GgmlType.F16,
-            data: new Uint8Array(8),
-          },
+          { name: "blk.3.nextn.enorm.weight", ne: [4], type: BF16, data: new Uint8Array(8) },
         ]),
-        "never a layout",
+        "unsupported ggml type 30",
       ],
     ];
     for (const [draftHead, message] of cases) {
@@ -433,5 +469,34 @@ describe("derive: a public draft head", () => {
     expect(!r.ok && r.message).toContain(
       "the draft head is missing: /r/local/packs/tiny/draft-head.gguf",
     );
+  });
+});
+
+describe("gguf relayout", () => {
+  test("a tensor of a type the reader cannot size is copied through by its span, and the tensors after a retyped one move up", async () => {
+    const p = fakePorts();
+    const source = writeGguf(
+      [
+        { name: "a", ne: [4], type: BF16, data: Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]) },
+        { name: "b", ne: [32, 2], type: GgmlType.Q8_0, data: new Uint8Array(68).fill(9) },
+        { name: "c", ne: [4], type: BF16, data: Uint8Array.from([8, 7, 6, 5, 4, 3, 2, 1]) },
+      ],
+      { "general.architecture": "test" },
+    );
+    await p.fs.writeBytes("/in.gguf", source);
+    const retype = new Map([["b", { type: GgmlType.Q4_0, bytes: new Uint8Array(36).fill(7) }]]);
+    await relayoutGguf(p.fs, await readGguf(p.fs, "/in.gguf"), retype, "/out.gguf");
+    const out = p.fs.files.get("/out.gguf")!;
+    const parsed = parseGgufHeader("out", out);
+    const read = (name: string, length: number) => {
+      const t = parsed.tensors.find((x) => x.name === name)!;
+      return [t.type, Array.from(out.subarray(t.offset, t.offset + length))];
+    };
+    expect(read("a", 8)).toEqual([BF16, [1, 2, 3, 4, 5, 6, 7, 8]]);
+    expect(read("b", 36)).toEqual([GgmlType.Q4_0, Array(36).fill(7)]);
+    expect(read("c", 8)).toEqual([BF16, [8, 7, 6, 5, 4, 3, 2, 1]]);
+    expect(parsed.tensors.map((t) => t.offset - parsed.dataOffset)).toEqual([0, 32, 96]); // b: 68 bytes in 96, now 36 in 64
+    expect(parsed.kv.get("general.architecture")).toBe("test");
+    expect(out.length).toBe(source.length - 32);
   });
 });

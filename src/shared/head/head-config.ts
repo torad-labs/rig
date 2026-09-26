@@ -114,8 +114,10 @@ export const DeriveSchema = v.variant("kind", [
     ...assetUrl,
   }),
   // Write a draft head over the pack's own (a retrained MTP block): every tensor in the asset
-  // replaces the pack's tensor of the same name, type and shape, byte for byte, and nothing else
-  // moves; the served file is reproducible from source + asset like any other step.
+  // replaces the pack's tensor of the same name and shape, byte for byte. Of the same type nothing
+  // else moves; of another type (a requantized head) the tensors after it move to their new
+  // offsets and every other byte stays. The served file is reproducible from source + asset like
+  // any other step.
   v.strictObject({
     kind: v.literal("draft-head-splice"),
     head: relPath,

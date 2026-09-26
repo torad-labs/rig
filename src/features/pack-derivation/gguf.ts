@@ -1,13 +1,15 @@
 // A GGUF reader sufficient for editing: the tensor table (name, shape, type, absolute byte offset,
 // byte length) and the metadata needed to place the data section. It reads the header from a
 // growing prefix of the file, so a 7 GB pack costs a few MB of reads, and it never loads tensor
-// data itself — callers read ranges by offset.
+// data itself — callers read ranges by offset. relayoutGguf writes a copy with some tensors
+// retyped.
 import type { FileSystem } from "../../shared/ports/index.ts";
 
 export const GGUF_MAGIC = 0x46554747; // "GGUF" little-endian
 export enum GgmlType {
   F32 = 0,
   F16 = 1,
+  Q4_0 = 2,
   Q8_0 = 8,
   PQ2_0 = 142,
 }
@@ -19,6 +21,8 @@ export function typeLayout(type: number): { blockBytes: number; blockElems: numb
       return { blockBytes: 4, blockElems: 1 };
     case GgmlType.F16:
       return { blockBytes: 2, blockElems: 1 };
+    case GgmlType.Q4_0:
+      return { blockBytes: 18, blockElems: 32 }; // fp16 scale + 32 4-bit codes
     case GgmlType.Q8_0:
       return { blockBytes: 34, blockElems: 32 }; // fp16 scale + 32 int8
     case GgmlType.PQ2_0:
@@ -53,6 +57,8 @@ export interface GgufFile {
   version: number;
   alignment: number;
   dataOffset: number;
+  /** where the tensor table sits in the header, and its length */
+  table: { offset: number; bytes: number };
   tensors: TensorInfo[];
   kv: Map<string, unknown>;
 }
@@ -179,6 +185,7 @@ export function parseGgufHeader(path: string, bytes: Uint8Array): GgufFile {
     kv.set(key, cursor.value(valueType));
   }
   const alignment = Number(kv.get("general.alignment") ?? 32);
+  const tableOffset = cursor.pos;
   const tensors: TensorInfo[] = [];
   for (let i = 0; i < nTensors; i++) {
     const name = cursor.str();
@@ -189,9 +196,117 @@ export function parseGgufHeader(path: string, bytes: Uint8Array): GgufFile {
     const offset = cursor.u64();
     tensors.push({ name, ne, type, offset });
   }
+  const table = { offset: tableOffset, bytes: cursor.pos - tableOffset };
   const dataOffset = Math.ceil(cursor.pos / alignment) * alignment;
   for (const tensor of tensors) tensor.offset += dataOffset; // absolute in the file
-  return { path, version, alignment, dataOffset, tensors, kv };
+  return { path, version, alignment, dataOffset, table, tensors, kv };
+}
+
+/** the tensor table as GGUF writes it, offsets relative to the data section */
+function encodeTable(tensors: TensorInfo[], dataOffset: number): Uint8Array {
+  const rows = tensors.map((tensor) => ({ tensor, name: new TextEncoder().encode(tensor.name) }));
+  const length = rows.reduce(
+    (total, { tensor, name }) => total + 8 + name.length + 4 + 8 * tensor.ne.length + 4 + 8,
+    0,
+  );
+  const bytes = new Uint8Array(length);
+  const view = new DataView(bytes.buffer);
+  let pos = 0;
+  for (const { tensor, name } of rows) {
+    view.setBigUint64(pos, BigInt(name.length), true);
+    bytes.set(name, pos + 8);
+    pos += 8 + name.length;
+    view.setUint32(pos, tensor.ne.length, true);
+    pos += 4;
+    for (const dim of tensor.ne) {
+      view.setBigUint64(pos, BigInt(dim), true);
+      pos += 8;
+    }
+    view.setUint32(pos, tensor.type, true);
+    view.setBigUint64(pos + 4, BigInt(tensor.offset - dataOffset), true);
+    pos += 12;
+  }
+  return bytes;
+}
+
+/** a tensor's new type and bytes in a relayout: the same name and shape */
+export interface Retype {
+  type: number;
+  bytes: Uint8Array;
+}
+
+const COPY_CHUNK = 64 << 20;
+
+/** `file` written to `out` with the named tensors in other types. The tensor table keeps its
+ *  length (a type and an offset are fixed-width), so the metadata, the table's place and the data
+ *  section's start do not move; the data is laid out again in file order, each tensor at the
+ *  offset its predecessors now end at: a retyped tensor's bytes padded to the alignment, every
+ *  other tensor's bytes and padding copied as they are, in chunks (a 7 GB pack is never held in
+ *  memory). */
+export async function relayoutGguf(
+  fs: FileSystem,
+  file: GgufFile,
+  retype: Map<string, Retype>,
+  out: string,
+): Promise<void> {
+  const size = (await fs.stat(file.path))?.size;
+  if (size === undefined) throw new Error(`${file.path} does not exist`);
+  const inFileOrder = [...file.tensors].sort((left, right) => left.offset - right.offset);
+  interface Span {
+    from: number;
+    length: number;
+    to: number;
+  }
+  const moved = new Map<string, Span>();
+  let next = file.dataOffset;
+  inFileOrder.forEach((tensor, index) => {
+    const end = inFileOrder[index + 1]?.offset ?? size;
+    const bytes = retype.get(tensor.name)?.bytes.length;
+    const length =
+      bytes === undefined
+        ? end - tensor.offset
+        : Math.ceil(bytes / file.alignment) * file.alignment;
+    moved.set(tensor.name, { from: tensor.offset, length, to: next });
+    next += length;
+  });
+  const at = (name: string) => moved.get(name) as Span;
+
+  const table = encodeTable(
+    file.tensors.map((tensor) => ({
+      ...tensor,
+      type: retype.get(tensor.name)?.type ?? tensor.type,
+      offset: at(tensor.name).to,
+    })),
+    file.dataOffset,
+  );
+  if (table.length !== file.table.bytes) {
+    throw new Error(
+      `${file.path}: the rewritten tensor table is ${table.length} bytes, the file's ${file.table.bytes}`,
+    );
+  }
+  const header = await fs.readRange(file.path, 0, file.dataOffset);
+  header.set(table, file.table.offset);
+  await fs.writeBytes(out, header);
+
+  for (const tensor of inFileOrder) {
+    const span = at(tensor.name);
+    const replaced = retype.get(tensor.name);
+    // a retyped tensor's padding is zeros, as a GGUF writer's is
+    if (replaced) {
+      const padded = new Uint8Array(span.length);
+      padded.set(replaced.bytes);
+      await fs.writeAt(out, span.to, padded);
+      continue;
+    }
+    for (let done = 0; done < span.length; done += COPY_CHUNK) {
+      const length = Math.min(COPY_CHUNK, span.length - done);
+      await fs.writeAt(
+        out,
+        span.to + done,
+        await fs.readRange(file.path, span.from + done, length),
+      );
+    }
+  }
 }
 
 /** Read the header from a growing prefix: start at 8 MB, double until the tensor table fits. */

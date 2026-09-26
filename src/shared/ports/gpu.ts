@@ -14,6 +14,7 @@ export interface Gpu {
   processMiB(index: number, pid: number): Promise<number>;
   /** the CUDA major.minor the driver can run, from the driver, not the toolkit */
   driverCuda(): Promise<string | null>;
-  /** the CUDA toolkit release, from nvcc, or null when there is no toolkit */
-  toolkitCuda(): Promise<string | null>;
+  /** the version of the CUDA compiler at `compiler` (nvcc on PATH when omitted) as --version
+   *  prints it, major.minor.build like 13.2.78, or null when there is none */
+  toolkitCuda(compiler?: string): Promise<string | null>;
 }

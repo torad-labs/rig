@@ -18,8 +18,10 @@ import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 import {
   GgmlType,
   type GgufFile,
+  type Retype,
   readGguf,
   readTensorF32,
+  relayoutGguf,
   type TensorInfo,
   tensorBytes,
 } from "./gguf.ts";
@@ -125,9 +127,11 @@ export class DerivePack {
     }
   }
 
-  /** the draft head's tensors written over the pack's own, in place in the staged copy: each one
-   *  must already be in the pack with the same type and shape, so a splice replaces bytes and never
-   *  a layout (a new tensor or shape would be a different pack format, not an edit) */
+  /** the draft head's tensors written over the pack's own: each one must already be in the pack
+   *  with the same shape (a new tensor or shape would be a different pack format, not an edit). Of
+   *  the same type, the splice replaces bytes in place in the staged copy; of another type (a head
+   *  requantized so a draft step reads fewer bytes), the staged copy is written again with those
+   *  tensors retyped and the data laid out anew, every other byte as it was */
   private async splice(
     head: Head,
     step: DraftHeadSplice,
@@ -142,7 +146,9 @@ export class DerivePack {
     if (donor.tensors.length === 0) {
       return fail(ExitCode.Failure, `the draft head ${step.head} holds no tensors`);
     }
-    const pack = new Map((await readGguf(this.deps.fs, staged)).tensors.map((t) => [t.name, t]));
+    const packFile = await readGguf(this.deps.fs, staged);
+    const pack = new Map(packFile.tensors.map((t) => [t.name, t]));
+    const pieces: { tensor: TensorInfo; into: TensorInfo; bytes: number }[] = [];
     for (const tensor of donor.tensors) {
       const into = pack.get(tensor.name);
       if (!into) {
@@ -151,17 +157,48 @@ export class DerivePack {
           `${tensor.name} (in ${step.head}) is not a tensor of the pack`,
         );
       }
-      if (into.type !== tensor.type || into.ne.join("x") !== tensor.ne.join("x")) {
-        const message = `${tensor.name}: the draft head's is type ${tensor.type} [${tensor.ne.join(", ")}], the pack's type ${into.type} [${into.ne.join(", ")}] — a splice replaces bytes, never a layout`;
+      if (into.ne.join("x") !== tensor.ne.join("x")) {
+        const message = `${tensor.name}: the draft head's is [${tensor.ne.join(", ")}], the pack's [${into.ne.join(", ")}] — a splice replaces a tensor, never its shape`;
         return fail(ExitCode.Failure, message);
       }
+      try {
+        pieces.push({ tensor, into, bytes: tensorBytes(tensor) });
+      } catch (error) {
+        return fail(
+          ExitCode.Failure,
+          `${tensor.name} (in ${step.head}): ${(error as Error).message}`,
+        );
+      }
     }
-    for (const tensor of donor.tensors) {
-      const bytes = await this.deps.fs.readRange(asset.path, tensor.offset, tensorBytes(tensor));
-      await this.deps.fs.writeAt(staged, (pack.get(tensor.name) as TensorInfo).offset, bytes);
+    const read = ({ tensor, bytes }: (typeof pieces)[number]) =>
+      this.deps.fs.readRange(asset.path, tensor.offset, bytes);
+    const retyped = pieces.filter(({ tensor, into }) => tensor.type !== into.type);
+    if (retyped.length === 0) {
+      for (const piece of pieces)
+        await this.deps.fs.writeAt(staged, piece.into.offset, await read(piece));
+      this.deps.log.info(`spliced ${pieces.length} draft-head tensors from ${step.head}`);
+      return ok({ spliced: pieces.length });
     }
-    this.deps.log.info(`spliced ${donor.tensors.length} draft-head tensors from ${step.head}`);
-    return ok({ spliced: donor.tensors.length });
+
+    const retype = new Map<string, Retype>();
+    for (const piece of pieces) {
+      retype.set(piece.tensor.name, { type: piece.tensor.type, bytes: await read(piece) });
+    }
+    const relaid = stagingPath(staged, "relayout");
+    await this.deps.fs.remove(relaid);
+    try {
+      await relayoutGguf(this.deps.fs, packFile, retype, relaid);
+      await this.deps.fs.rename(relaid, staged);
+    } finally {
+      await this.deps.fs.remove(relaid);
+    }
+    const changes = new Set(
+      retyped.map(({ tensor, into }) => `${typeName(into.type)} → ${typeName(tensor.type)}`),
+    );
+    this.deps.log.info(
+      `spliced ${pieces.length} draft-head tensors from ${step.head}, ${retyped.length} retyped (${[...changes].join(", ")}): the pack's data laid out anew`,
+    );
+    return ok({ spliced: pieces.length });
   }
 
   /** the refusal direction from the adapter's B matrices, removed from every residual writer
@@ -239,3 +276,5 @@ function residualWriters(pack: GgufFile, blocks: string): TensorInfo[] {
 }
 
 const percent = (part: number, whole: number) => ((100 * part) / whole).toFixed(3);
+
+const typeName = (type: number) => GgmlType[type] ?? `type ${type}`;

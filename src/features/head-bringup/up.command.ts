@@ -4,7 +4,7 @@ import type { Log } from "../../shared/ports/index.ts";
 import type { BringUpHead } from "./head-bringup.service.ts";
 
 const USAGE =
-  "up <head> [--gpu N] [--restart] [--cache-ram MiB] [--allow-arch CAP] [--json]   prepare, fetch, build, derive, unit, start — the whole bring-up";
+  "up <head> [--gpu N] [--restart] [--cache-ram MiB] [--slots N] [--allow-arch CAP] [--json]   prepare, fetch, build, derive, unit, start — the whole bring-up";
 
 export function bringUpHeadCommand(service: BringUpHead, loadHead: LoadHead, log: Log): Command {
   return {
@@ -16,6 +16,7 @@ export function bringUpHeadCommand(service: BringUpHead, loadHead: LoadHead, log
           gpu: flagInt(args, "gpu") ?? head.gpu,
           restart: flagBool(args, "restart"),
           cacheRam: flagInt(args, "cache-ram"),
+          slots: flagInt(args, "slots"),
           allowArch: flagStr(args, "allow-arch"),
         });
         return reportJson(log, args, result);

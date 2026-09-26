@@ -12,6 +12,8 @@ import { LlamaClient } from "./llama-client.ts";
 export interface GateCard {
   gpu: number;
   binDir: string;
+  /** the card's compute capability, 120 for sm_120 */
+  cap: string;
 }
 
 export interface GateCardDeps {
@@ -58,5 +60,5 @@ export async function claimGateCard(
     }
   }
 
-  return ok({ gpu, binDir });
+  return ok({ gpu, binDir, cap: card.computeCap });
 }

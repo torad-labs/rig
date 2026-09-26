@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { fakePorts } from "../../../test/fakes/index.ts";
 import { layoutAt } from "../layout.ts";
-import { engineSource, loadEngine, type Prebuilt, prebuiltSkip } from "./engine.ts";
+import { engineSource, loadEngine, miscompiles, type Prebuilt, prebuiltSkip } from "./engine.ts";
 
 const root = `${import.meta.dir}/../../..`;
 const engineToml = await Bun.file(`${root}/engine/engine.toml`).text();
@@ -48,6 +48,27 @@ describe("engine pin", () => {
     expect(e.supports("90")).toBe(true);
     expect(e.supports("89")).toBe(false);
     expect(e.binDir("120")).toBe(`/r/local/engine-builds/${e.sha7}-sm120`);
+  });
+  test("CUDA 13.2.1's nvcc is listed as miscompiling sm_120, with its evidence, and nothing else is", async () => {
+    const e = await engine();
+    expect(miscompiles(e, "13.2.78", "120")).toContain("torad-labs/llama.cpp#56");
+    expect(miscompiles(e, "13.2.86", "120")).toBeUndefined();
+    expect(miscompiles(e, "13.2.78", "90")).toBeUndefined();
+    expect(miscompiles(e, null, "120")).toBeUndefined();
+  });
+  test("a miscompiler entry needs the full nvcc version and a card", async () => {
+    for (const [entry, path] of [
+      ['nvcc = "13.2"\ncaps = ["120"]\nwhy = "w"', "miscompilers.0.nvcc"],
+      ['nvcc = "13.2.78"\ncaps = []\nwhy = "w"', "miscompilers.0.caps"],
+    ] as const) {
+      const p = fakePorts();
+      p.fs.put(
+        "/r/engine/engine.toml",
+        engineToml.replace(/^\[\[miscompilers\]\]\n(?:.+\n)+/m, `[[miscompilers]]\n${entry}\n`),
+      );
+      const e = await loadEngine(p.fs, layoutAt("/r"));
+      expect(!e.ok && e.message).toContain(path);
+    }
   });
   test("the submodule at engine/llama.cpp is committed at the sha engine.toml pins — one pin, two readers", async () => {
     const e = await engine();
