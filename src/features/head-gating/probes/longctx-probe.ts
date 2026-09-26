@@ -28,8 +28,11 @@ export interface DepthVerdict {
 
 const mean = (values: number[]) => sum(values) / (values.length || 1);
 
+/** a plain leg that measured no decode (no timings, nothing predicted) is no baseline: its gain is
+ *  0, never the drafted leg's own tok/s over 1 */
 export function depthVerdict(plain: DepthLeg, drafted: DepthLeg, minGain: number): DepthVerdict {
-  const gain = mean(drafted.tps) / (mean(plain.tps) || 1);
+  const base = mean(plain.tps);
+  const gain = base > 0 ? mean(drafted.tps) / base : 0;
   return { gain, ran: drafted.draftN > 0, fast: gain >= minGain };
 }
 

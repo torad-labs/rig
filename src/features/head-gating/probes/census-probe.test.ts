@@ -126,10 +126,8 @@ describe("census probe", () => {
   }
   const ctx = (shell: FakeShell, cap = "120") =>
     ({
-      head: {
-        servedPath: "/packs/served.gguf",
-        runtime: { args: ["--cache-type-k", "q4_0", "--cache-type-v", "q4_0", "-fa", "on"] },
-      },
+      head: { servedPath: "/packs/served.gguf" },
+      cache: { k: "q4_0", v: "q4_0", s: "q8_0" }, // the gate card's tier's formats
       gates: { census: { gen: 8, kernels: { sm120: FIX } } },
       binDir: "/r/local/engine-builds/abc1234-sm120",
       gpu: 1,

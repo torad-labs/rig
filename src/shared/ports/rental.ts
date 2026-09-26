@@ -31,6 +31,8 @@ export interface Rental {
   registerSshKey(pubkey: string): Promise<void>;
   searchOffers(query: string): Promise<Offer[]>;
   create(offerId: number, o: { image: string; diskGb: number; label: string }): Promise<number>;
+  /** the instance, or null when the market lists no such instance; throws when the market cannot
+   *  be read, which is no evidence the instance is gone */
   show(id: number): Promise<Instance | null>;
   list(): Promise<Instance[]>;
   destroy(id: number): Promise<void>;

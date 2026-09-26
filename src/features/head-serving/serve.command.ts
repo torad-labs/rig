@@ -1,6 +1,8 @@
 import { type Args, flagBool, flagInt } from "../../shared/cli/args.ts";
 import { type Command, type LoadHead, printJson, withHead } from "../../shared/cli/command.ts";
+import { renderedFlag } from "../../shared/head/head-config.ts";
 import type { Log } from "../../shared/ports/index.ts";
+import { ExitCode } from "../../shared/result.ts";
 import type { ServeHead } from "./head-serving.service.ts";
 
 const USAGE =
@@ -13,6 +15,15 @@ export function serveHeadCommand(service: ServeHead, loadHead: LoadHead, log: Lo
     run(args: Args) {
       const [name, ...extra] = args.positionals;
       return withHead(name, "serve <head>", loadHead, log, async (head) => {
+        // llama-server takes a flag's last occurrence, so one of serve's own after -- would replace what the tier check
+        // charged and the engine's [caches] allowed (a K/V pair with no CUDA kernel, a -c the card cannot hold)
+        const clash = extra.filter(renderedFlag);
+        if (clash.length > 0) {
+          log.error(
+            `REFUSING: ${clash.join(", ")} after -- would override what serve renders from ${head.name} and its tier; use --ctx, --slots or --cache-ram, or the head's [cache] and tiers`,
+          );
+          return ExitCode.Usage;
+        }
         const gpu = flagInt(args, "gpu") ?? head.gpu;
         const plan = await service.plan(head, {
           gpu,

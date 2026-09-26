@@ -10,6 +10,7 @@ import { ExitCode } from "../../shared/result.ts";
 import { defaultCacheRam } from "./geometry.ts";
 import golden from "./golden-argv.json";
 import { ServeHead, type ServePlan, serveLogLine } from "./head-serving.service.ts";
+import { serveHeadCommand } from "./serve.command.ts";
 
 const root = "/opt/rig"; // the golden was captured on the operator's checkout and re-rooted here; only the argv order and values are compared
 const headToml = await Bun.file(`${import.meta.dir}/../../../heads/bonsai-2-27b/head.toml`).text();
@@ -96,6 +97,71 @@ describe("argv", () => {
     const local = await uc.plan(head, { gpu: 0, cacheRam: 8192 });
     expect(local.ok && local.value.speculative).toBe(true);
     expect(local.ok && local.value.argv).toContain("draft-mtp");
+  });
+  test("a tier's own cache formats reach its command line, the K bias only with a q4_0 K", async () => {
+    // the 5090 in q8_0 K and V at two windows (three no longer fit in q8_0)
+    const toml = headToml.replace(
+      "ctx = 786432\n",
+      'ctx = 524288\ncache = { k = "q8_0", v = "q8_0" }\n',
+    );
+    const { p, head, uc } = await setup(undefined, toml);
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 });
+    const r = await uc.plan(head, { gpu: 1, cacheRam: 8192 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.cache).toEqual({ k: "q8_0", v: "q8_0", s: "f16" }); // the state the tier does not name: the head's
+    const i = r.value.argv.indexOf("--cache-type-k");
+    expect(r.value.argv.slice(i, i + 6)).toEqual([
+      "--cache-type-k",
+      "q8_0",
+      "--cache-type-v",
+      "q8_0",
+      "-cts",
+      "f16",
+    ]);
+    expect(r.value.argv).not.toContain("--kv-mean-center");
+    expect(serveLogLine(head, r.value)).toContain("K/V q8_0/q8_0 state f16");
+    const local = await uc.plan(head, { gpu: 0, cacheRam: 8192 }); // the 5080 names nothing: the head's q4_0 and its bias
+    expect(local.ok && local.value.argv).toContain("--kv-mean-center");
+  });
+  test("--ctx above the pool the tier was charged for is refused: the card was never checked for it", async () => {
+    const { p, head, uc } = await setup();
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 });
+    const over = await uc.plan(head, { gpu: 1, cacheRam: 8192, ctx: 786433 });
+    expect(!over.ok && over.message).toContain("REFUSING: --ctx 786433");
+    const at = await uc.plan(head, { gpu: 1, cacheRam: 8192, ctx: 786432 });
+    expect(at.ok).toBe(true);
+    const under = await uc.plan(head, { gpu: 1, cacheRam: 8192, ctx: 262144 });
+    expect(under.ok && under.value.ctx).toBe(262144);
+  });
+  test("a tier whose K/V the engine's CUDA flash attention does not run is refused, never served on the CPU", async () => {
+    const toml = headToml.replace(
+      "ctx = 786432\n",
+      'ctx = 786432\ncache = { k = "q5_1", v = "q5_1" }\n',
+    );
+    const { p, head, uc } = await setup(undefined, toml);
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 });
+    const r = await uc.plan(head, { gpu: 1, cacheRam: 8192 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.message).toContain("REFUSING on this card's tier (32607 MiB for the head)");
+    expect(r.message).toContain("no CUDA flash attention for K/V q5_1/q5_1");
+  });
+  test("a draft whose K/V the engine's flash attention does not run is refused on a tier that loads it, and only there", async () => {
+    const toml = headToml
+      .replace(
+        'cache = { k = "q4_0", v = "q4_0", kv_elements_per_token = 1024 }',
+        'cache = { k = "q8_0", v = "q4_0", kv_elements_per_token = 1024 }',
+      )
+      .replace("ctx = 786432\n", "ctx = 786432\nspeculative = false\n");
+    const { p, head, uc } = await setup(undefined, toml);
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 });
+    const r = await uc.plan(head, { gpu: 0, cacheRam: 8192 }); // the 5080 loads the draft
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("no CUDA flash attention for the draft's K/V q8_0/q4_0");
+    const off = await uc.plan(head, { gpu: 1, cacheRam: 8192 }); // the 5090's tier opts out of the draft here
+    expect(off.ok).toBe(true);
+    if (off.ok) expect(off.value.argv).not.toContain("-ctkd");
   });
   test("lens defaults off, can be omitted, and restores the whole bundle when enabled", async () => {
     const bundle = [
@@ -228,6 +294,18 @@ describe("geometry", () => {
 });
 
 describe("serve", () => {
+  test("a flag serve renders, after --, is refused before anything starts: it would win over the checked plan", async () => {
+    const { p, head, uc } = await setup();
+    const serve = serveHeadCommand(uc, async () => ({ ok: true, value: head }), p.log);
+    const code = await serve.run({
+      positionals: ["bonsai-2-27b", "-ctk", "q5_1", "--ctx_size", "1", "--temp", "0"],
+      flags: {},
+      dashed: [],
+    });
+    expect(code).toBe(ExitCode.Usage);
+    expect(p.log.lines.join("\n")).toContain("REFUSING: -ctk, --ctx_size after --");
+    expect(p.shell.spawned).toEqual([]);
+  });
   test("the log line names undrived when set, and stays silent about it otherwise", async () => {
     const { head } = await setup();
     const plan: ServePlan = {
@@ -240,6 +318,7 @@ describe("serve", () => {
       cacheRam: 8192,
       vramMiB: 16303,
       speculative: false,
+      cache: { k: "q4_0", v: "q4_0", s: "q8_0" },
     };
     expect(serveLogLine(head, plan)).not.toContain("UNDRIVED");
     const undrivedHead = { ...head, undrived: "the adapter is missing: serving the source pack" };
@@ -270,6 +349,25 @@ describe("verify", () => {
     p.hasher.pinned.set(head.servedPath, "0".repeat(64));
     r = await uc.verify(head, 0);
     expect(!r.ok && r.message).toContain("sha256 differs");
+  });
+  test("the K bias is checked wherever head.toml puts it, not only under assets/", async () => {
+    const toml = headToml.replace(
+      'mean_center = "assets/kv-mean-center-PQ2_0.gguf"',
+      'mean_center = "bias/k.gguf"',
+    );
+    const { p, head, engine, uc } = await setup("/v", toml);
+    const bin = `/v/engine-builds/${engine.sha7}-sm120`;
+    p.fs.put(`${bin}/llama-server`, "x");
+    p.fs.put(`${bin}/BUILD`, "fork=… cap=sm_120");
+    p.fs.put(head.servedPath, "pack");
+    p.hasher.pinned.set(head.servedPath, head.served.sha256);
+    for (const a of ["assets/chat-template.jinja", "assets/mtp-draft-vocab-98304.i32"])
+      p.fs.put(head.path(a), "x");
+    let r = await uc.verify(head, 0);
+    expect(!r.ok && r.message).toContain("the K bias bias/k.gguf is missing");
+    p.fs.put(head.path("bias/k.gguf"), "b");
+    r = await uc.verify(head, 0);
+    expect(r.ok).toBe(true);
   });
   test("verify checks the assets every list on the command line names, the enabled lens bundle included", async () => {
     const lensToml = headToml

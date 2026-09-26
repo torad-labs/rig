@@ -134,12 +134,38 @@
 # 5080 tier, its first token after 3.2 s and the same answer in both legs.
 # Evidence in local/research/highidx-2026-09-26, evening-2026-09-26, engine8-2026-09-25 and
 # prebuilt-engine9-2026-09-26 (2026-09-26).
+# 4283c36 (fork train/engine-10 #70, 27 commits past c1518d4) is what moved it past c1518d4: the recurrent state runs
+# in f16 and bf16 (1fd214cc6, 48ebd2167: build_rs zeroed a state row with GGML_OP_SCALE, which CUDA and the CPU run on f32 only,
+# so -cts f16 aborted on its first decode), and the head's state moves to f16. The server writes each sequence's state
+# back in its format after every call, so a q8_0 state is requantized once a verified round and its error accumulates:
+# over 8,192 tokens decoded three a call after 131,072 the served K/V with a q8_0 state read 0.002488 mean KLD against
+# f16 K/V and an f32 state, with an f16 one 0.001724 (the difference 0.000764 +/- 0.000070, batch-means), and an f16
+# state is f32's within noise; it costs 6.31 % a round on a 5080 at 245K (95 % CI 6.22 to 6.39). Alongside: drafted
+# tokens carry their probabilities (a8d22901a); {} below a JSON schema's root accepts any value, so a free-form tool
+# argument parses under the lazy grammar (737eba9f5, c206d74c0); a slot requested by id loads its prompt from the cache
+# (07e92c710) and a resumed task keeps its own checkpoint (ab8f91a23); 64-bit offsets for a transposed V's save and
+# restore (9123de649); and, each behind its own off switch, the mask-prefix hint (6c0dc9bb5), the attention rotations
+# set once (b0dd41ce2) and the backend top-k prefilter (6c0e372e9), whose chain is made at every launch with its k in the
+# graph: 83e3c0909 drops the graph built with a sampler that leaves, since graph reuse compared samplers by address and a
+# new chain at a freed one's address took the previous request's k, silently; 4283c36bc refuses draft-MTP options
+# without --spec-type draft-mtp (rig renders them only with it). The engine-10 gate on 48ebd21's prebuilt against c1518d4's
+# (RTX 5090, one slot at 262,144, the 245,752-token prompt's four questions greedy with top-5 log-probabilities): with
+# the three switches at legacy bit-exact, plain and drafted (1,536 tokens, log-probabilities and draft counts); as served
+# three first differences, each at a tie (<= 0.111 nats), |dlogprob| p99 0.078 and max 0.181 over 961 agreeing tokens;
+# its draft against its plain four ties (<= 0.244), p99 0.096, max 0.174, every drafted token with its probabilities;
+# the prefilter's tokens and drafting exact; a 245K conversation swapped out and back at the 5080 tier, its first token
+# in 0.93 s and the unswapped answer token for token; a free-form tool parameter kept under the grammar. 4283c36's
+# prebuilt against 48ebd21's on a 5080, the head's argv at one slot, the same four questions plain, drafted and each
+# without n_probs: the same 1,536 tokens on every leg, the same log-probabilities and top-5 at every token of the two
+# legs that ask for them and the same draft counts on both drafted legs, so the gate holds for it (exact-local.sh, each
+# leg held to its role by the gate's own check). The kit and its 57 cases are local/research/engine10-gate-2026-09-26
+# (2026-09-26).
 # ORDER: publish the build (rig build) BEFORE merging a pin move. The unit's ExecStartPre verify refuses
 # to start a head whose pin has no complete build, so a restart in the gap is an outage: 2026-09-21
 # 00:38, four refused starts, 90 s down, while 60493a5-sm120 was still compiling.
 [fork]
 repo = "https://github.com/torad-labs/llama.cpp.git"
-sha = "c1518d4cd04217e63a31fbdd3791e07c92b2a45b"
+sha = "4283c36bc8b0ab557b23b83dc56200af2c597c05"
 base = "prism-b10685-7dffb15"   # PrismML's llama.cpp (ggml-org b10685 + the ternary kernels) this branch sits on
 
 # Compute capabilities with a measured run behind them — anything else is refused by prepare and
@@ -152,6 +178,16 @@ evidence = "Bonsai-demo runs/2026-09-19/decode-profile-5070ti and runs/2026-09-2
 cap = "90"
 cards = "H100 SXM / NVL, H200"
 evidence = "Bonsai-demo runs/2026-09-19/vast-h100-sxm: M=1/2/4 aggregate 50/83/131 tok/s, needle OK"
+
+# The cache formats this build runs on a CUDA card: serve and the gates refuse a tier that names any other.
+[caches]
+# the K/V cache type pairs its flash attention runs (FA_ALL_QUANTS off: fattn.cu's same-type cases at the pin, and f32
+# through the f16 case, held to the source by a test where it is on the box); any other pair runs attention on the CPU
+fa_kv = ["f16/f16", "q4_0/q4_0", "q8_0/q8_0", "bf16/bf16", "f32/f32"]
+# the recurrent state types (-cts) it runs: every type the engine parses since 1fd214cc6 (an f16 or bf16 state zeroes
+# a fresh row on the host; before it build_rs zeroed it with GGML_OP_SCALE, which CUDA runs on f32 only, and the server
+# aborted on its first decode)
+state = ["f32", "q8_0", "f16", "bf16"]
 
 # Compilers that build the pin's kernels wrong for a card, each with its evidence: a compile for that card with one
 # of them is refused, by prepare before anything is downloaded (nvcc on PATH) and by build after configure (the
@@ -188,6 +224,6 @@ libs = ["libcublas.so.13", "libcublasLt.so.13"]
 # sha, so a rebuild of the same commit is a new release, engine-<sha7>-<n>.
 [[prebuilt]]
 cap = "120"
-url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-c1518d4/engine-sm120-c1518d4.tar.gz"
-sha256 = "c41ac41cf83f1b4a20ee0101afddefaf3d98ccd149f9c52e6a13cecd0fe86854"
+url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-4283c36/engine-sm120-4283c36.tar.gz"
+sha256 = "4848503632f4416b3a3a4aaa1139a5202d8040065b6c3220e9430d2464e3d883"
 glibc = "2.35"                 # scripts/prebuilt/Dockerfile's Ubuntu 22.04; its ELF files need GLIBC_2.34 at most

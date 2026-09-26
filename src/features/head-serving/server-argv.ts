@@ -7,6 +7,7 @@
 // (runtime.extra, runtime.lens.args) come last and could override the geometry before them;
 // headInvariants refuses the rendered flags inside them.
 
+import { type CacheFormats, cacheArgv } from "../../shared/head/cache-formats.ts";
 import { draftArgv } from "../../shared/head/draft-head.ts";
 import type { Head } from "../../shared/head/head.ts";
 
@@ -15,6 +16,8 @@ export interface ServeGeometry {
   ctx: number;
   cacheRam: number;
   speculative?: boolean | undefined;
+  /** the tier's cache formats (tierCache) */
+  cache: CacheFormats;
 }
 
 export function serverArgv(head: Head, binDir: string, g: ServeGeometry): string[] {
@@ -28,6 +31,7 @@ export function serverArgv(head: Head, binDir: string, g: ServeGeometry): string
     "--jinja",
     "-fa",
     "on",
+    ...cacheArgv(head, g.cache),
     ...head.runtime.args.map(resolve),
     ...draftArgv(head, { speculative: g.speculative }),
     "-c",

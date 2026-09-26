@@ -8,6 +8,7 @@ import type { Offer } from "../../shared/ports/index.ts";
 import { ok } from "../../shared/result.ts";
 import { type LiveGate, RentGpu } from "./gpu-rental.service.ts";
 import { loadVastConfig, offerQuery } from "./rental-config.ts";
+import { gpuRentalCommand, SUBCOMMAND_FLAGS } from "./vast.command.ts";
 
 const root = `${import.meta.dir}/../../..`;
 const headToml = await Bun.file(`${root}/heads/bonsai-2-27b/head.toml`).text();
@@ -66,12 +67,9 @@ async function setup(boxServes: "public" | "served" = "public") {
     model_path: `/workspace/rig/local/packs/bonsai-2-27b/${boxPack}`,
     total_slots: 16,
   });
-  const uc = new RentGpu(
-    { ...p, gate, self: ["/r/dist/rig"], home: "/home/u" },
-    layout,
-    engine.value,
-  );
-  return { p, head: head.value, uc, gateRuns, layout };
+  const deps = { ...p, gate, self: ["/r/dist/rig"], home: "/home/u" };
+  const uc = new RentGpu(deps, layout, engine);
+  return { p, head: head.value, uc, gateRuns, layout, deps };
 }
 
 describe("vast.toml", () => {
@@ -235,6 +233,26 @@ describe("vast up", () => {
     ).toBe(true);
     expect(p.ssh.pulled).toEqual([]);
   });
+  test("an offer whose tier the head cannot serve on is refused before anything is rented, dry run included", async () => {
+    const { p, head: served, uc } = await setup();
+    // the H100 tier in a K/V pair the pinned engine has no CUDA flash attention for
+    putHead(
+      p.fs,
+      "/r",
+      headToml.replace("ctx = 2883584\n", 'ctx = 2883584\ncache = { v = "q4_1" }\n'),
+    );
+    const loaded = await loadHead(p.fs, layoutAt("/r"), "bonsai-2-27b");
+    if (!loaded.ok) throw new Error(loaded.message);
+    for (const dryRun of [true, false]) {
+      const r = await uc.up(loaded.value, { gpu: "H100_SXM", dryRun });
+      expect(!r.ok && r.code).toBe(3);
+      expect(!r.ok && r.message).toContain("no CUDA flash attention for K/V q4_0/q4_1");
+    }
+    p.rental.offers = [{ ...h100, gpu: "RTX 3060", gpuRamMiB: 12288, computeCap: "90" }];
+    const small = await uc.up(served, { gpu: "RTX_3060", dryRun: true });
+    expect(!small.ok && small.message).toContain("REFUSING to rent RTX 3060: bonsai-2-27b");
+    expect(p.rental.ops.some((op) => op.startsWith("create"))).toBe(false);
+  });
   test("an unmeasured card is refused with exit 3 unless --allow-arch; a second box is refused; no funds is refused", async () => {
     const { p, head, uc } = await setup();
     p.rental.offers = [{ ...h100, gpu: "RTX 4090", computeCap: "89" }];
@@ -334,13 +352,61 @@ describe("vast down / status / idle", () => {
       "stop rig-vast-tunnel.service",
     ]);
   });
-  test("down refuses to believe a destroy the listing contradicts", async () => {
+  test("down refuses to believe a destroy the listing contradicts, and leaves the box's cost control running", async () => {
     const { p, head, uc } = await setup();
     await uc.up(head, { gpu: "H100_SXM" });
     p.rental.destroy = async () => {}; // vast says nothing, the box stays listed
+    const before = p.systemd.ops.length;
     const r = await uc.down();
     expect(!r.ok && r.message).toContain("STILL listed");
     expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(true);
+    expect(p.systemd.ops.slice(before)).toEqual([]);
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+  });
+  test("down: a destroy vast refuses (a 429, a 5xx) keeps the state and the idle timer; a box vast no longer lists is gone whatever the call answers", async () => {
+    const { p, head, uc } = await setup();
+    await uc.up(head, { gpu: "H100_SXM" });
+    p.rental.destroy = async () => {
+      throw new Error("vastai destroy instance 1000: 429 Too Many Requests");
+    };
+    const before = p.systemd.ops.length;
+    const refused = await uc.down();
+    expect(!refused.ok && refused.message).toContain(
+      "box 1000 is STILL listed after destroy (the destroy failed: vastai destroy instance 1000: 429 Too Many Requests) — it is billing, and its idle timer stays armed",
+    );
+    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(true);
+    expect(p.systemd.ops.slice(before)).toEqual([]);
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    // destroyed from vast's console meanwhile: the next down's call refuses the gone id
+    p.rental.instances.delete(1000);
+    const gone = await uc.down();
+    expect(gone.ok && gone.value.destroyed).toEqual([1000]);
+    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(false);
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(false);
+  });
+  test("an engine.toml this binary cannot read stops up and bench, never the cost control of a box that bills", async () => {
+    const { p, head, uc, deps, layout } = await setup();
+    await uc.up(head, { gpu: "H100_SXM" });
+    // the checkout moves on to a pin this binary cannot read (2026-09-25, 8:59-11:09 PM CT:
+    // fourteen idle checks exited 1 on `miscompilers: Invalid key` while box 52647843 billed)
+    p.fs.put("/r/engine/engine.toml", `${engineToml}\n[future]\nkey = 1\n`);
+    const unreadable = await loadEngine(p.fs, layout);
+    if (unreadable.ok) throw new Error("fixture: the unknown key loaded");
+    const stale = new RentGpu(deps, layout, unreadable);
+    expect(await stale.up(head, { gpu: "H100_SXM", dryRun: true })).toEqual(unreadable);
+    expect(await stale.bench(head)).toEqual(unreadable);
+    expect(await stale.status()).toMatchObject({ ok: true, value: { listed: true } });
+    p.http.on(/8100\/metrics$/, () => ({
+      status: 200,
+      text: "llamacpp:prompt_tokens_total 1\nllamacpp:tokens_predicted_total 1\nllamacpp:requests_processing 0\n",
+    }));
+    expect(await stale.idleCheck()).toEqual({ ok: true, value: { action: "changed" } });
+    p.clock.t += 45 * 60_000;
+    expect(await stale.idleCheck()).toEqual({
+      ok: true,
+      value: { action: "destroyed", idleMinutes: 45 },
+    });
+    expect(p.rental.instances.size).toBe(0);
   });
   test("idle-check: counters unchanged for idle_minutes destroy the box; traffic or a busy slot resets the clock", async () => {
     const { p, head, uc } = await setup();
@@ -414,6 +480,74 @@ describe("vast down / status / idle", () => {
     });
     expect(p.rental.instances.size).toBe(0);
   });
+  test("idle-check: neither the server nor the market readable counts nothing, fails the run, and never destroys", async () => {
+    const { p, head, uc } = await setup();
+    await uc.up(head, { gpu: "H100_SXM" });
+    // no /metrics route (the server stopped for `vast bench`'s gates) and vast answering 429s
+    const show = p.rental.show.bind(p.rental);
+    p.rental.show = async () => {
+      throw new Error("vastai show instance 1000: 429 Too Many Requests");
+    };
+    for (let check = 0; check < 80; check++) {
+      const r = await uc.idleCheck();
+      expect(!r.ok && r.message).toBe(
+        "neither the server nor vast answered: box 1000 not counted, its idle clock unchanged",
+      );
+      p.clock.t += 10 * 60_000;
+    }
+    expect(p.rental.instances.size).toBe(1);
+    expect(p.log.lines.join("\n")).toContain(
+      "warn vast could not be read: vastai show instance 1000: 429",
+    );
+    // the market back: the card's own reading decides again
+    p.rental.show = show;
+    const listed = p.rental.instances.get(1000)!;
+    p.rental.instances.set(1000, { ...listed, gpuUtil: 97 });
+    expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+  });
+  test("idle-check: a card the market did not read is no evidence it is idle, whatever the server says", async () => {
+    const { p, head, uc } = await setup();
+    await uc.up(head, { gpu: "H100_SXM" });
+    // vast lists the box running with no utilization sample (its gpu_util is number | null) and
+    // the server does not answer: the 2026-09-24 box, its card busy with other work
+    const { gpuUtil: _, ...unsampled } = p.rental.instances.get(1000)!;
+    p.rental.instances.set(1000, unsampled);
+    for (let check = 0; check < 80; check++) {
+      const r = await uc.idleCheck();
+      expect(!r.ok && r.message).toBe(
+        "the server did not answer and vast listed no GPU reading: box 1000 not counted, its idle clock unchanged",
+      );
+      p.clock.t += 10 * 60_000;
+    }
+    // the server answers, idle, but the card is still unread: not counted either
+    p.http.on(/8100\/metrics$/, () => ({
+      status: 200,
+      text: "llamacpp:prompt_tokens_total 1\nllamacpp:tokens_predicted_total 1\nllamacpp:requests_processing 0\n",
+    }));
+    expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "changed" } });
+    for (let check = 0; check < 80; check++) {
+      p.clock.t += 10 * 60_000;
+      const r = await uc.idleCheck();
+      expect(!r.ok && r.message).toBe(
+        "the server is idle but vast listed no GPU reading: box 1000 not counted, its idle clock unchanged",
+      );
+    }
+    // vast unreadable while the server is idle: the card unread the same way
+    const show = p.rental.show.bind(p.rental);
+    p.rental.show = async () => {
+      throw new Error("vastai show instance 1000: 429 Too Many Requests");
+    };
+    const r = await uc.idleCheck();
+    expect(!r.ok && r.message).toBe(
+      "the server is idle but vast could not be read: box 1000 not counted, its idle clock unchanged",
+    );
+    expect(p.rental.instances.size).toBe(1);
+    // the card read idle: the idle clock decides again, from the server's last change
+    p.rental.show = show;
+    p.rental.instances.set(1000, { ...unsampled, gpuUtil: 0 });
+    expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "destroyed" } });
+    expect(p.rental.instances.size).toBe(0);
+  });
   test("status reads the state, the market and the tunnel", async () => {
     const { p, head, uc } = await setup();
     expect(await uc.status()).toMatchObject({
@@ -448,6 +582,40 @@ describe("vast down / status / idle", () => {
       value: { listed: false, idleTimer: "inactive" },
     });
     expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(false);
+  });
+  test("status: a market that cannot be read is no evidence the box is gone, so a dead timer is re-armed", async () => {
+    const { p, head, uc } = await setup();
+    await uc.up(head, { gpu: "H100_SXM" });
+    p.systemd.active.delete("rig-vast-idle.timer");
+    p.rental.show = async () => {
+      throw new Error("vastai show instance 1000: 401 key expired");
+    };
+    expect(await uc.status()).toMatchObject({
+      ok: true,
+      value: { listed: "unread", idleTimer: "re-armed" },
+    });
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    expect(p.log.lines.join("\n")).toContain(
+      "box 1000 may be billing and rig-vast-idle.timer was not running: re-armed",
+    );
+  });
+  test("status reports an active timer whose last check failed: a check that exits 1 controls nothing", async () => {
+    const { p, head, uc } = await setup();
+    await uc.up(head, { gpu: "H100_SXM" });
+    expect(await uc.status()).toMatchObject({
+      ok: true,
+      value: { idleTimer: "active", idleCheck: "ok" },
+    });
+    p.systemd.results.set("rig-vast-idle.service", "exit-code");
+    expect(await uc.status()).toMatchObject({
+      ok: true,
+      value: { idleTimer: "active", idleCheck: "failed" },
+    });
+    expect(p.log.lines.join("\n")).toContain(
+      "rig-vast-idle.service's last run ended exit-code: the box's cost control is not running",
+    );
+    p.systemd.results.set("rig-vast-idle.service", null);
+    expect(await uc.status()).toMatchObject({ ok: true, value: { idleCheck: "unread" } });
   });
   test("a dry run prices the next box while one is still up", async () => {
     const { p, uc, head } = await setup();
@@ -511,5 +679,23 @@ describe("vast down / status / idle", () => {
     expect(gateRuns).toEqual([
       { live: "http://127.0.0.1:8100", only: ["sessions", "concurrency"] },
     ]);
+  });
+});
+
+describe("vast command", () => {
+  test("a subcommand refuses another subcommand's flag before it acts: down --dry-run destroys nothing", async () => {
+    const { p, head, uc } = await setup();
+    p.fs.put("/r/local/rented-box/instance.json", JSON.stringify({ instanceId: 7 })); // a box to destroy
+    const vast = gpuRentalCommand(uc, async () => ok(head), p.log);
+    const code = await vast.run({ positionals: ["down"], flags: { "dry-run": true }, dashed: [] });
+    expect(code).toBe(64);
+    expect(p.log.lines.join("\n")).toContain("vast down does not take --dry-run");
+    expect(p.rental.ops.some((op) => op.startsWith("destroy"))).toBe(false);
+  });
+  test("the subcommands' flags are exactly the ones the usage line names", async () => {
+    const source = await Bun.file(`${import.meta.dir}/vast.command.ts`).text();
+    const usage = /const USAGE =\s*"([^"]*)"/.exec(source)![1]!;
+    const named = new Set([...usage.matchAll(/--([a-z][a-z-]*)/g)].map((m) => m[1]!));
+    expect(new Set(Object.values(SUBCOMMAND_FLAGS).flat())).toEqual(named);
   });
 });

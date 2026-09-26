@@ -1,6 +1,7 @@
 // A probe is a measurement with a verdict: `pass` is true or false by a criterion gates.toml
 // states, `lines` are what a reader sees, `data` is what the run directory keeps. Probes on the
 // gate card take the GateLegs and start their own legs; probes on the live head take a client.
+import type { CacheFormats } from "../../../shared/head/cache-formats.ts";
 import type { Head } from "../../../shared/head/head.ts";
 import type { FileSystem, Log, Shell } from "../../../shared/ports/index.ts";
 import type { GateLegs } from "../gate-legs.ts";
@@ -25,6 +26,8 @@ export interface ProbeContext {
   gpu: number;
   /** the gate card's compute capability (120 for sm_120), "" when no probe runs on a card */
   cap: string;
+  /** the cache formats the gate card's tier serves (the head's own without a card) */
+  cache: CacheFormats;
   fs: FileSystem;
   shell: Shell;
   log: Log;

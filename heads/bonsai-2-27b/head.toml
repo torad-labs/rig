@@ -62,27 +62,40 @@ n_max = 3                      # each level is one more q8_0 state copy per slot
                                # e785bcc) stay available to a head that wants them
 weights_mib = 558              # the head's share of the model buffer: 6,970.08 - 6,539.67 MiB, plus the draft vocabulary's copy of 98,304 LM-head rows (127.5 MiB of PQ2_0)
 overhead_mib = 100             # the fixed part of the MTP draft context's compute buffer beyond its per-token growth (196 MiB at 131,072, 388 at 327,680)
-bytes_per_token = 1216         # per pooled token: the head's one full-attention layer's q4_0 K + V (1,152: 144 MiB at 131,072, 360 at 327,680) + its compute buffer (64, the
-                               # bit-packed mask under --attn-mask-bits below; 1,024 as f16: 64.00 → 4.00 MB in the draft graph at 65,536 cells × 512, CPU, 2026-09-21).
+bytes_per_token = 64           # per pooled token beyond its cache: its compute buffer, the bit-packed mask under --attn-mask-bits below (1,024 as f16:
+                               # 64.00 → 4.00 MB in the draft graph at 65,536 cells × 512, CPU, 2026-09-21)
+cache = { k = "q4_0", v = "q4_0", kv_elements_per_token = 1024 }   # the head's one full-attention layer × 4 KV heads × 256: 1,152 B a token in
+                               # q4_0 K + V (144 MiB at 131,072, 360 at 327,680); serve renders -ctkd/-ctvd from it
 # Prompt and generated rows both enter the MTP cache. Its allocation follows the target's shared
 # pool: 294,912 cells across four slots on the 5080, not per slot. Q4_0 K/V is unchanged; the
 # draft's KV plus per-token compute is charged above for the entire pool (342 MiB on the 5080).
 # The draft vocabulary (engine #44): a draft step scores 98,304 of the LM head's 248,320 rows (134 of 338 MB) and every other
 # token's draft logit is -inf; the verify is untouched, so a token outside it costs the draft that position, never the text.
 # +2.66 % tok/s at n_max 2 and +3.83 % at n_max 3 on the 48 held-out requests, acceptance within 0.0006 (evidence.md, "Draft vocabulary").
-args = ["-ctkd", "q4_0", "-ctvd", "q4_0", "--spec-draft-mtp-vocab", "assets/mtp-draft-vocab-98304.i32"]
+args = ["--spec-draft-mtp-vocab", "assets/mtp-draft-vocab-98304.i32"]
 
 [context]
 model = 262144                 # the trained window: n_ctx_slot on every card
 advertise = 245760             # what one conversation is told it may use (15/16 of the window)
 
+[cache]                        # the model's two caches: the formats every tier serves unless it names its own, and the element counts
+                               # their bytes follow from (src/shared/head/cache-formats.ts); serve renders --cache-type-k/-v and -cts from these
+k = "q4_0"                     # K and V in q4_0 through the engine's int8 Q·K tensor-core flash attention (fork 60feea0): 10.6–13.5x the
+v = "q4_0"                     # rounding floor of KL against f16 K/V at 8K–245K, all of the served loss but the state's (evidence.md, Cache formats)
+s = "f16"                      # the Gated DeltaNet state in f16 (engine 48ebd21): written back after every decode call, a q8_0 state drifts
+                               # (17x an f16 state's KL over 8,192 decoded tokens and climbing), and the served decode's loss falls 31 % with
+                               # f16, which is f32's within noise, for 34 MiB more a copy and 6.3 % a round (evidence.md, Cache formats).
+                               # The desktop tiers keep q8_0: f16's copies do not fit beside a desktop
+mean_center = "assets/kv-mean-center-PQ2_0.gguf"   # the K bias, passed with a q4_0 K only (evidence.md, Runtime args)
+kv_elements_per_token = 16384  # 16 attention layers × 4 KV heads × 256: 18,432 B a token in q4_0 K + V (7,488 MiB measured at 425,984)
+state_elements_per_copy = 37748736   # 48 Gated DeltaNet layers × 48 heads × 128 × 128: 38.25 MiB of one sequence's state in q8_0
+state_fixed_mib = 5.625        # its conv states, f32 whatever -cts (48 × 3 × 10,240 × 4 B): 43.875 MiB a copy in q8_0, as measured (526.5 MiB
+                               # at 4 slots × (1 + n_max 2) on the 5080, 2026-09-21), and 149.625 in f32 (1,795.5)
+
 [geometry]                     # constants every tier is checked against (see evidence.md)
-kv_bytes_per_token = 18432     # q4_0 K + V over the 16 attention layers: 7,488 MiB measured at 425,984
 compute_bytes_per_token = 64   # the compute buffer grows 64 B per pooled token: the attention mask at n_ubatch 512, one bit per cell under --attn-mask-bits
                                # (engine PR #6; 1 KiB as f16: 198 / 262 / 390 MiB at 64K / 128K / 256K). Measured 288.00 → 18.00 MB at 294,912 cells (CPU, 2026-09-21).
-weights_mib = 6900
-state_per_slot_mib = 44        # one Gated DeltaNet recurrent state in q8_0 (-cts, below): RS buffer 526.5 MiB at 4 slots × (1 + n_max 2) copies and 1,579.5 at
-                               # 4 × (1 + n_max 8) on the 5080, 2026-09-21 — 43.875 per copy, linear in n_max as tierNeedMiB charges it; 150 in f32 (1,795.5 MiB)
+weights_mib = 7212             # the model buffer (6,900) and the token embeddings runtime.args puts on the card (-ot token_embd=CUDA0: +312 MiB, e10g)
 compute_mib = 114              # the compute buffer's fixed part at no output rows, lens off, bit-packed mask: 167.22 MiB measured at 294,912 on the 5080 at 12 rows
                                # (2026-09-21) less 18 per-token and 12 × 3 rows; 330 was the same buffer with the lens graph and the f16 mask (618.28 less 288)
 compute_per_output_row_mib = 3 # the compute buffer grows 3.0 MiB per output row: n_outputs_max = slots × (1 + n_max), 167.22 MiB at 12 rows and 239.22 at 36
@@ -92,8 +105,9 @@ compute_per_output_row_mib = 3 # the compute buffer grows 3.0 MiB per output row
 # desktop's compositor and browsers), largest first; the first tier whose min_vram_mib fits is used.
 # The window one conversation may use is context.model on every card: a bigger card buys slots
 # sharing one --kv-unified pool, never a longer window. Every tier carries the MTP head: its
-# weights_mib, overhead_mib and bytes_per_token above, plus state_per_slot_mib × n_max of
-# rollback snapshots per slot (the numbers live in those fields, not here).
+# weights_mib, overhead_mib and bytes_per_token above, plus n_max rollback copies of the recurrent
+# state per slot in the tier's state format (the numbers live in those fields and [cache], not here).
+# A tier may name its own cache formats (cache = { k, v, s }), each one the engine's [caches] runs.
 [[geometry.tiers]]
 min_vram_mib = 90000           # RTX PRO 6000 (96 GiB): 13.5 windows + the draft head
 slots = 16
@@ -117,24 +131,27 @@ min_vram_mib = 14100           # a 16 GB card that also drives a desktop (up to 
                                # n_max 2 before the vocabulary); 4 × 294,912 OOMed beside 2,251 MiB (evidence.md, 2026-09-24 and 2026-09-25)
 slots = 4
 ctx = 262144
+cache = { s = "q8_0" }         # f16's 16 copies (+544 MiB) do not fit this floor
 [[geometry.tiers]]
 min_vram_mib = 13700           # the same card with a busier desktop (up to ~2.6 GB): one window shared by 2 slots; 13,006 MiB at peak in the same run
 slots = 2
 ctx = 262144
+cache = { s = "q8_0" }         # f16 (+272 MiB) would leave 110 MiB over the peak (13,318 with the embeddings), not the 360 a tier keeps
 [[geometry.tiers]]
 min_vram_mib = 13500           # a busier desktop still (up to ~2.8 GB): one window, one slot; 12,828 MiB at peak in the same run
 slots = 1
 ctx = 262144
+cache = { s = "q8_0" }         # f16 (+136 MiB) would leave 224 MiB over the peak (13,140), not the 360 a tier keeps
 
 [runtime]
 # how the pack is loaded, wherever it is loaded (the gates use the same list); "assets/…" paths
 # resolve against this head's directory
 args = [
-  "--cache-type-k", "q4_0", "--kv-mean-center", "assets/kv-mean-center-PQ2_0.gguf",
-  "--cache-type-v", "q4_0",
-  "-cts", "q8_0",              # the Gated DeltaNet state cache stored in q8_0 (engine e3a9015): 1,795.5 → 526.5 MiB at 4 slots; the update math stays f32 in the kernel
-  "--attn-mask-bits",          # the attention mask as one bit per KV cell instead of f16 (engine PR #6): the same tokens and logprobs, 16x less mask in the compute
+  "--attn-mask-bits",         # the attention mask as one bit per KV cell instead of f16 (engine PR #6): the same tokens and logprobs, 16x less mask in the compute
                                # buffers and per decode step across PCIe; 288 → 18 MiB in the target graph and 64 → 4 in the draft graph at this geometry
+  "-ot", "token_embd=CUDA0",   # the token embeddings on the card instead of the host (engine-10 run e10g, 5080, one slot at 245,760): a round 0.38 % faster,
+                               # a cold 245,755-token prompt 2.3 % faster, the same text 24/24; +312 MiB, charged in geometry.weights_mib. Off: drop these two
+                               # args (the charge may stay: it only over-counts). CUDA0 is the head's card: serve sets CUDA_VISIBLE_DEVICES to it
   "--chat-template-file", "assets/chat-template.jinja",
   "--reasoning-format", "deepseek",
   "--checkpoint-every", "16384",

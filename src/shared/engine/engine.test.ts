@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { fakePorts } from "../../../test/fakes/index.ts";
+import { pinnedSource } from "../../../test/fakes/pinned-source.ts";
 import { layoutAt } from "../layout.ts";
 import { engineSource, loadEngine, miscompiles, type Prebuilt, prebuiltSkip } from "./engine.ts";
 
@@ -12,6 +13,23 @@ async function engine() {
   const e = await loadEngine(p.fs, layoutAt("/r"));
   if (!e.ok) throw new Error(e.message);
   return e.value;
+}
+
+/** the vector kernel's type cases with FA_ALL_QUANTS off: fattn.cu's #else branch of the FATTN_VEC_CASES_ALL_D list,
+ *  and f32/f32 where FATTN_VEC_CASE takes an f32 K and V as the f16 case */
+function faPairs(fattn: string): string[] {
+  const branch =
+    /#ifdef GGML_CUDA_FA_ALL_QUANTS\n[\s\S]*?#else\n([\s\S]*?)#endif \/\/ GGML_CUDA_FA_ALL_QUANTS/.exec(
+      fattn,
+    )?.[1];
+  if (!branch) throw new Error("fattn.cu has no FA_ALL_QUANTS #else branch");
+  const pairs = [
+    ...branch.matchAll(/FATTN_VEC_CASES_ALL_D\(GGML_TYPE_(\w+),\s*GGML_TYPE_(\w+)\)/g),
+  ].map((m) => `${m[1]}/${m[2]}`.toLowerCase());
+  const f32AsF16 =
+    /K->type == GGML_TYPE_F32 && \(type_K\) == GGML_TYPE_F16/.test(fattn) &&
+    /V->type == GGML_TYPE_F32 && \(type_V\) == GGML_TYPE_F16/.test(fattn);
+  return f32AsF16 && pairs.includes("f16/f16") ? [...pairs, "f32/f32"] : pairs;
 }
 
 describe("engine source", () => {
@@ -49,6 +67,34 @@ describe("engine pin", () => {
     expect(e.supports("89")).toBe(false);
     expect(e.binDir("120")).toBe(`/r/local/engine-builds/${e.sha7}-sm120`);
   });
+  test("engine.toml lists the cache formats the build runs, and a regex reads the K/V pairs out of fattn.cu", async () => {
+    const e = await engine();
+    expect(e.caches.fa_kv).toEqual(["f16/f16", "q4_0/q4_0", "q8_0/q8_0", "bf16/bf16", "f32/f32"]);
+    expect(e.caches.state).toEqual(["f32", "q8_0", "f16", "bf16"]); // every type it parses since 1fd214cc6 (engine.toml)
+    const snippet = `#ifdef GGML_CUDA_FA_ALL_QUANTS
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_F16)
+#else
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
+#endif // GGML_CUDA_FA_ALL_QUANTS`;
+    expect(faPairs(snippet)).toEqual(["f16/f16", "q4_0/q4_0"]);
+    const f32 = `const bool type_K_okay = K->type == (type_K) || (K->type == GGML_TYPE_F32 && (type_K) == GGML_TYPE_F16);
+const bool type_V_okay = V->type == (type_V) || (V->type == GGML_TYPE_F32 && (type_V) == GGML_TYPE_F16);`;
+    expect(faPairs(`${f32}\n${snippet}`)).toEqual(["f16/f16", "q4_0/q4_0", "f32/f32"]); // f32 through the f16 case
+    expect(() => faPairs("no dispatch here")).toThrow("no FA_ALL_QUANTS #else branch");
+  });
+  // CI fetches no engine source: there the test is skipped (and says so), and the literal list above holds the pin's
+  // reading
+  const pin = (Bun.TOML.parse(engineToml) as { fork: { sha: string } }).fork.sha;
+  const source = pinnedSource(root, pin);
+  test.skipIf(source === null)(
+    "where the pinned source is on the box, fa_kv is fattn.cu's list with FA_ALL_QUANTS off",
+    async () => {
+      const e = await engine();
+      const fattn = await Bun.file(`${source}/ggml/src/ggml-cuda/fattn.cu`).text();
+      expect(e.caches.fa_kv).toEqual(faPairs(fattn));
+    },
+  );
   test("CUDA 13.2.1's nvcc is listed as miscompiling sm_120, with its evidence, and nothing else is", async () => {
     const e = await engine();
     expect(miscompiles(e, "13.2.78", "120")).toContain("torad-labs/llama.cpp#56");

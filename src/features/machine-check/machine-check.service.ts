@@ -12,8 +12,14 @@
 
 import { stagingPath } from "../../shared/artifact.ts";
 import { type Engine, isBuilt, miscompiles, prebuiltSkip } from "../../shared/engine/engine.ts";
+import { cacheRefusal, tierCache } from "../../shared/head/cache-formats.ts";
 import type { Head } from "../../shared/head/head.ts";
-import { deriveAsset, draftSidecar, type Tier } from "../../shared/head/head-config.ts";
+import {
+  deriveAsset,
+  draftSidecar,
+  type Tier,
+  tierSpeculates,
+} from "../../shared/head/head-config.ts";
 import { headVramMiB, pickTier } from "../../shared/head/tier.ts";
 import type { FileSystem, Gpu, GpuInfo, Host, Log, Shell } from "../../shared/ports/index.ts";
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
@@ -146,6 +152,14 @@ export class CheckMachine {
       const message = `${card.name} at index ${options.gpu} cannot serve ${head.name}${others}: ${tier.message}`;
       return fail(tier.code, message);
     }
+    // the formats serve would refuse on this tier, refused before the download rather than at the first start
+    const draft = tierSpeculates(head, tier.value) ? head.speculative?.cache : undefined;
+    const refusal = cacheRefusal(this.engine, tierCache(head, tier.value), draft);
+    if (refusal)
+      return fail(
+        ExitCode.Unsupported,
+        `${card.name} at index ${options.gpu} cannot serve ${head.name} on its tier: ${refusal}`,
+      );
     const needs = await this.needs(head, card.computeCap);
     const total = needs.reduce((sum, need) => sum + need.bytes, 0);
     const free = await this.deps.fs.freeBytes(head.packsDir);
@@ -187,6 +201,12 @@ export class CheckMachine {
     if (head.derive) {
       const { file, bytes } = head.served;
       files.push({ what: file, path: head.servedPath, bytes, staged: "deriving" });
+      // splices of the same type and the ablation write in place; a pack whose size is not the
+      // source's was re-laid out (a retyped draft head), a whole second copy beside the staged one
+      if (bytes !== head.source.bytes) {
+        const relayout = { what: `${file}, re-laid out`, path: head.servedPath, bytes };
+        files.push({ ...relayout, staged: "deriving.relayout" });
+      }
     }
     const needs: Need[] = [];
     for (const file of files) {

@@ -1,5 +1,5 @@
 {
-  "engine": "c1518d4cd04217e63a31fbdd3791e07c92b2a45b",
+  "engine": "4283c36bc8b0ab557b23b83dc56200af2c597c05",
   "aliases": {
     "-m": ["--model", "-m"],
     "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],
@@ -18,6 +18,12 @@
     "--spec-draft-p-min": ["--draft-p-min", "--spec-draft-p-min"],
     "--spec-draft-chain-p-min": ["--spec-draft-chain-p-min"],
     "-md": ["--model-draft", "--spec-draft-model", "-md"],
-    "-ngld": ["--gpu-layers-draft", "--n-gpu-layers-draft", "--spec-draft-ngl", "-ngld"]
+    "-ngld": ["--gpu-layers-draft", "--n-gpu-layers-draft", "--spec-draft-ngl", "-ngld"],
+    "--cache-type-k": ["--cache-type-k", "-ctk"],
+    "--cache-type-v": ["--cache-type-v", "-ctv"],
+    "-cts": ["--cache-type-s", "-cts"],
+    "--kv-mean-center": ["--kv-mean-center"],
+    "-ctkd": ["--cache-type-k-draft", "--spec-draft-type-k", "-ctkd"],
+    "-ctvd": ["--cache-type-v-draft", "--spec-draft-type-v", "-ctvd"]
   }
 }

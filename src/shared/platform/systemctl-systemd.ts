@@ -40,6 +40,19 @@ export class SystemctlSystemd implements Systemd {
       (await this.shell.run(["systemctl", "--user", "is-active", unit])).stdout.trim() === "active"
     );
   }
+  async lastResult(unit: string) {
+    const shown = await this.shell.run([
+      "systemctl",
+      "--user",
+      "show",
+      "-p",
+      "Result",
+      "--value",
+      unit,
+    ]);
+    const value = shown.stdout.trim();
+    return shown.code === 0 && value !== "" ? value : null;
+  }
   async mainPid(unit: string) {
     const pid = Number(
       (

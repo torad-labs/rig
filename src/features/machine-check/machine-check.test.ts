@@ -19,6 +19,8 @@ const engine = {
   ],
   supports: (c: string) => c === "120" || c === "90",
   prebuiltFor: () => undefined,
+  sha7: "abc1234",
+  caches: { fa_kv: ["f16/f16", "q4_0/q4_0", "q8_0/q8_0"], state: ["f32", "q8_0", "f16", "bf16"] },
 } as unknown as Engine;
 
 /** the same engine with a prebuilt published for sm_120 on the CUDA 13.3 runtime */
@@ -222,6 +224,21 @@ async function bonsai(p: FakePorts, assets = false) {
 }
 
 describe("room, before the first byte is fetched", () => {
+  test("a tier whose cache formats the engine does not run is refused before anything is fetched, as serve would", async () => {
+    const p = ready();
+    p.fs.free = Number.MAX_SAFE_INTEGER;
+    p.fs.put(
+      "/r/heads/bonsai-2-27b/head.toml",
+      headToml.replace("ctx = 294912\n", 'ctx = 294912\ncache = { k = "q4_1", v = "q4_1" }\n'), // a K/V pair this engine has no CUDA kernel for
+    );
+    const loaded = await loadHead(p.fs, layoutAt("/r"), "bonsai-2-27b");
+    if (!loaded.ok) throw new Error(loaded.message);
+    const r = await new CheckMachine(p, building).room(loaded.value, { gpu: 0 });
+    expect(!r.ok && r.code).toBe(ExitCode.Unsupported);
+    expect(!r.ok && r.message).toContain("has no CUDA flash attention for K/V q4_1/q4_1");
+    const ok = await new CheckMachine(p, building).room(await bonsai(p), { gpu: 0 });
+    expect(ok.ok).toBe(true);
+  });
   test("a card below the head's smallest tier is refused with exit 3, naming the card and the tier", async () => {
     const p = ready();
     p.gpu.card(0, { name: "NVIDIA GeForce RTX 5070", memoryMiB: 12227 });
@@ -273,6 +290,25 @@ describe("room, before the first byte is fetched", () => {
     expect(!full.ok && full.message).toBe(
       "not enough disk under /r/local/packs/bonsai-2-27b: bonsai-2-27b still needs 17.4 GB (Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf 7.7 GB, bonsai-2-27b-mtp-r2.gguf 0.5 GB, Ternary-Bonsai-2-27B-PQ2_0-MTP-r2.gguf 7.7 GB, the engine 1.6 GB) and 5.0 GB is free",
     );
+  });
+  test("a pack its derive re-lays out (a retyped draft head: the served size is not the source's) is charged the relayout's second copy", async () => {
+    const p = ready();
+    const SERVED = PACK - 32;
+    putHead(p.fs, "/r", headToml.replace(/(\[served\][\s\S]*?\nbytes = )\d+/, `$1${SERVED}`));
+    p.fs.put("/r/local/engine-builds/c008fe8-sm120/BUILD", "c008fe8");
+    p.fs.put("/r/local/engine-builds/c008fe8-sm120/llama-server", "elf");
+    const head = await loadHead(p.fs, layoutAt("/r"), "bonsai-2-27b");
+    if (!head.ok) throw new Error(head.message);
+    p.fs.free = PACK + 2 * SERVED;
+    const r = await new CheckMachine(p, building).room(head.value, { gpu: 0 });
+    const served = "Ternary-Bonsai-2-27B-PQ2_0-MTP-ablated-rc010-draft-r2.gguf";
+    expect(r.ok && r.value.needs).toEqual([
+      { what: "Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf", bytes: PACK },
+      { what: served, bytes: SERVED },
+      { what: `${served}, re-laid out`, bytes: SERVED },
+    ]);
+    p.fs.free -= 1;
+    expect((await new CheckMachine(p, building).room(head.value, { gpu: 0 })).ok).toBe(false);
   });
   test("what is there is not counted, and a resumed download or a restarted bake counts only what it still lacks", async () => {
     const p = ready();

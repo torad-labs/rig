@@ -3,6 +3,7 @@
 // verdict is the conjunction of the probes' verdicts; a "measured" probe records and judges
 // nothing.
 import { join } from "node:path";
+import type { CacheFormats, DraftCache } from "../../shared/head/cache-formats.ts";
 import type { Clock, FileSystem } from "../../shared/ports/index.ts";
 import { compactStamp } from "../../shared/stamp.ts";
 import type { SkippedProbe } from "./probe-selection.ts";
@@ -23,9 +24,19 @@ export interface RunGatesReport {
 
 export interface RunProvenance {
   head: string;
-  engine: string;
-  served: string;
+  /** the pin and the pack the card legs ran; null for a run with no card legs, which measured only the live head */
+  engine: string | null;
+  served: string | null;
+  /** the live head's URL when live probes ran: its engine and pack are its own, not this checkout's */
+  live: string | null;
   gpu: number | null;
+  /** the formats the card's server legs ran and the tier they came from (null: below every tier, the head's own); both
+   *  null for a run with no card legs. A llama-bench leg runs no -cts and no K bias, so it records its own in its
+   *  probe's json (benchCache) */
+  cache: CacheFormats | null;
+  tier: number | null;
+  /** the draft head's own K/V (-ctkd/-ctvd) in the card's drafted legs: null without card legs or a draft head */
+  draft_cache: Pick<DraftCache, "k" | "v"> | null;
 }
 
 export class GateRun {
@@ -77,6 +88,10 @@ export class GateRun {
       head: provenance.head,
       engine: provenance.engine,
       served: provenance.served,
+      live: provenance.live,
+      cache: provenance.cache,
+      tier: provenance.tier,
+      draft_cache: provenance.draft_cache,
       ...report,
     };
     await this.fs.writeText(join(this.dir, "summary.json"), toJson(summary));

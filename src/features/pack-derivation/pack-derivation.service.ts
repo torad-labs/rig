@@ -89,17 +89,23 @@ export class DerivePack {
     this.deps.log.info(
       `deriving ${basename(served.path)} from ${basename(head.sourcePath)} (${kinds})`,
     );
-    await this.deps.fs.copy(head.sourcePath, staged);
     const stats: EditStats = {};
-    for (const step of head.derive) {
-      const done = await this.apply(head, step, staged);
-      if (!done.ok) {
-        await this.deps.fs.remove(staged);
-        return done;
+    try {
+      await this.deps.fs.copy(head.sourcePath, staged);
+      for (const step of head.derive) {
+        const done = await this.apply(head, step, staged);
+        if (!done.ok) {
+          await this.deps.fs.remove(staged);
+          return done;
+        }
+        for (const [key, count] of Object.entries(done.value) as [keyof EditStats, number][]) {
+          stats[key] = (stats[key] ?? 0) + count;
+        }
       }
-      for (const [key, count] of Object.entries(done.value) as [keyof EditStats, number][]) {
-        stats[key] = (stats[key] ?? 0) + count;
-      }
+    } catch (error) {
+      // a step that throws (the disk full mid-write) leaves no pack-sized staged copy behind
+      await this.deps.fs.remove(staged);
+      throw error;
     }
 
     const state = await publishArtifact(this.deps.fs, this.deps.hasher, staged, served);

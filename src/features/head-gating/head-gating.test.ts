@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { putHead } from "../../../test/fakes/head-fixtures.ts";
 import { connectionRefused, type FakePorts, fakePorts } from "../../../test/fakes/index.ts";
 import { loadEngine } from "../../shared/engine/engine.ts";
+import { tierCache } from "../../shared/head/cache-formats.ts";
 import { loadHead } from "../../shared/head/head.ts";
 import { layoutAt } from "../../shared/layout.ts";
+import { claimGateCard } from "./gate-card.ts";
 import { loadGates } from "./gates-config.ts";
-import { RunGates } from "./head-gating.service.ts";
+import { RunGates, runProvenance } from "./head-gating.service.ts";
 import { allProbes } from "./probes/index.ts";
 import type { Probe } from "./probes/probe.ts";
 
@@ -118,6 +120,21 @@ async function setup() {
 }
 
 describe("gates.toml", () => {
+  test("the gate card carries the cache formats of the tier serve would give it, and one the engine cannot run is refused", async () => {
+    const { p, head, engine } = await setup();
+    const card = await claimGateCard(p, engine, head, 1); // 16,303 MiB: the 5080 tier
+    expect(card.ok && card.value.cache).toEqual({ k: "q4_0", v: "q4_0", s: "f16" });
+    putHead(
+      p.fs,
+      "/r",
+      headToml.replace("ctx = 294912\n", 'ctx = 294912\ncache = { k = "q4_1", v = "q4_1" }\n'),
+    );
+    const q41 = await loadHead(p.fs, layoutAt("/r"), "bonsai-2-27b");
+    if (!q41.ok) throw new Error(q41.message);
+    const refused = await claimGateCard(p, engine, q41.value, 1);
+    expect(!refused.ok && refused.message).toContain("REFUSING on GPU 1's tier");
+    expect(!refused.ok && refused.message).toContain("no CUDA flash attention for K/V q4_1/q4_1");
+  });
   test("the head's gates parse, and the gate card is not the serving card", async () => {
     const { p, head } = await setup();
     const g = await loadGates(p.fs, head);
@@ -243,6 +260,68 @@ describe("gate", () => {
     expect(!r.ok && r.message).toContain("not the pinned bytes (sha256 differs)");
     expect(p.shell.spawned).toEqual([]);
   });
+  test("the legs run the cache formats of the gate card's tier, not the head's", async () => {
+    const { p, engine, layout } = await setup();
+    // the 5090 tier in q8_0 K and V at two windows (three no longer fit in q8_0), on a 5090 gate card
+    putHead(
+      p.fs,
+      "/r",
+      headToml.replace("ctx = 786432\n", 'ctx = 524288\ncache = { k = "q8_0", v = "q8_0" }\n'),
+    );
+    const loaded = await loadHead(p.fs, layout, "bonsai-2-27b");
+    if (!loaded.ok) throw new Error(loaded.message);
+    const head = loaded.value;
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 });
+    fakeServers(p);
+    p.shell.on(/llama-bench/, {
+      code: 0,
+      stdout: "| model | test | t/s |\n| x | pp512 | 1382 |\n",
+      stderr: "",
+    });
+    const r = await new RunGates(p, layout, engine, allProbes).run(head, {
+      only: ["decode", "depth"],
+    });
+    expect(r.ok).toBe(true);
+    const server = p.shell.spawned[0]!.cmd;
+    const k = server.indexOf("--cache-type-k");
+    expect(server.slice(k, k + 6)).toEqual([
+      "--cache-type-k",
+      "q8_0",
+      "--cache-type-v",
+      "q8_0",
+      "-cts",
+      "f16",
+    ]);
+    expect(server).not.toContain("--kv-mean-center"); // the bias rides a q4_0 K only
+    const bench = p.shell.calls.find((c) => c[0]!.endsWith("llama-bench"))!;
+    const b = bench.indexOf("-ctk");
+    expect(bench.slice(b, b + 4)).toEqual(["-ctk", "q8_0", "-ctv", "q8_0"]);
+    if (!r.ok) return;
+    // the record names what the legs ran and the tier it came from
+    const summary = JSON.parse(p.fs.text(`${r.value.dir}/summary.json`)!);
+    expect(summary).toMatchObject({ cache: { k: "q8_0", v: "q8_0", s: "f16" }, tier: 30000 });
+    expect(p.log.lines).toContain(
+      "info GPU 1: the 30000 MiB tier's cache formats, K/V q8_0/q8_0, state f16",
+    );
+  });
+  test("a gate card below every tier runs the head's own formats, says so, and records no tier", async () => {
+    const { p, head, engine, layout } = await setup();
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 4070", memoryMiB: 12282 });
+    fakeServers(p);
+    p.shell.on(/llama-bench/, {
+      code: 0,
+      stdout: "| model | test | t/s |\n| x | pp512 | 1382 |\n",
+      stderr: "",
+    });
+    const r = await new RunGates(p, layout, engine, allProbes).run(head, { only: ["depth"] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(
+      p.log.lines.some((l) => l.startsWith("warn GPU 1 is below every tier of bonsai-2-27b")),
+    ).toBe(true);
+    const summary = JSON.parse(p.fs.text(`${r.value.dir}/summary.json`)!);
+    expect(summary).toMatchObject({ cache: { k: "q4_0", v: "q4_0", s: "f16" }, tier: null });
+  });
   test("depth runs llama-bench on the card with the head's cache types and is measured, never judged", async () => {
     const { p, head, uc } = await setup();
     fakeServers(p);
@@ -284,6 +363,34 @@ describe("gate", () => {
       "md",
     ]);
     expect(p.fs.text(`${r.ok ? r.value.dir : ""}/gate.log`)).toContain("MEASURED depth");
+    // llama-bench runs the tier's K and V and nothing else of it: its json says the state was f32 and K unbiased
+    expect(JSON.parse(p.fs.text(`${r.ok ? r.value.dir : ""}/depth.json`) ?? "null").cache).toEqual({
+      k: "q4_0",
+      v: "q4_0",
+      s: "f32",
+      k_bias: false,
+    });
+  });
+  test("a run records this checkout's pin and pack only where card legs ran them; a live-only run names the URL instead", async () => {
+    const { head, engine } = await setup();
+    const card = { gpu: 1, binDir: "/b", cap: "120", cache: tierCache(head, {}), tier: 16000 };
+    expect(runProvenance(head, engine, card, null)).toMatchObject({
+      engine: engine.sha7,
+      served: head.served.sha256,
+      live: null,
+      tier: 16000,
+      draft_cache: { k: "q4_0", v: "q4_0" },
+    });
+    expect(runProvenance(head, engine, null, "http://box:8099")).toEqual({
+      head: "bonsai-2-27b",
+      engine: null,
+      served: null,
+      live: "http://box:8099",
+      gpu: null,
+      cache: null,
+      tier: null,
+      draft_cache: null,
+    });
   });
   test("live probes need --live and a healthy head; --live alone adds them to the server probes", async () => {
     const { p, head, uc } = await setup();

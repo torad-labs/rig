@@ -2,25 +2,15 @@
 // decode (tg64) at each context depth, three repeats, the table llama-bench prints. A measurement
 // the evidence cites, not a verdict: the numbers are what a card does, and there is no threshold
 // that means anything across cards.
+import { benchCache } from "../../../shared/head/cache-formats.ts";
 import type { Probe } from "./probe.ts";
-
-/** the head's --cache-type-k/-v as llama-bench spells them (-ctk/-ctv) */
-export function cacheTypeArgs(runtimeArgs: readonly string[]): string[] {
-  const out: string[] = [];
-  runtimeArgs.forEach((arg, index) => {
-    const value = runtimeArgs[index + 1];
-    if (value === undefined) return;
-    if (arg === "--cache-type-k") out.push("-ctk", value);
-    if (arg === "--cache-type-v") out.push("-ctv", value);
-  });
-  return out;
-}
 
 export const depthProbe: Probe = {
   name: "depth",
   needs: "card",
   async run(ctx) {
     const cfg = ctx.gates.depth;
+    const cache = benchCache(ctx.cache);
     const argv = [
       `${ctx.binDir}/llama-bench`,
       "-m",
@@ -29,7 +19,7 @@ export const depthProbe: Probe = {
       "99",
       "-fa",
       "1",
-      ...cacheTypeArgs(ctx.head.runtime.args),
+      ...cache.args,
       "-p",
       String(cfg.prompt),
       "-n",
@@ -55,7 +45,7 @@ export const depthProbe: Probe = {
         pass: false,
         summary: `llama-bench exited ${bench.code}`,
         lines: bench.stderr.trim().split("\n").slice(-5),
-        data: { cmd: argv, stderr: bench.stderr },
+        data: { cmd: argv, cache: cache.ran, stderr: bench.stderr },
       };
     }
     return {
@@ -63,7 +53,7 @@ export const depthProbe: Probe = {
       pass: "measured",
       summary: `${cfg.depths.length} depths x pp${cfg.prompt}/tg${cfg.gen}, ${cfg.repeats} repeats`,
       lines: bench.stdout.trim().split("\n"),
-      data: { cmd: argv, table: bench.stdout },
+      data: { cmd: argv, cache: cache.ran, table: bench.stdout },
     };
   },
 };

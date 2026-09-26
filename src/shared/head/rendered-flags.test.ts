@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { pinnedSource } from "../../../test/fakes/pinned-source.ts";
 import { argAliases } from "../engine/arg-aliases.ts";
 import { RENDERED, RENDERED_FLAGS } from "./head-config.ts";
 import aliases from "./rendered-flag-aliases.json";
@@ -53,15 +54,13 @@ describe("rendered flags", () => {
     ])
       expect(RENDERED_FLAGS).toContain(s);
   });
-  test("where the pinned source is on the box, the manifest equals its arg table", async () => {
-    const sub = `${root}/engine/llama.cpp`;
-    const head = Bun.spawnSync(["git", "-C", sub, "rev-parse", "HEAD"]).stdout.toString().trim();
-    const clean =
-      Bun.spawnSync(["git", "-C", sub, "status", "--porcelain", "--untracked-files=no"])
-        .stdout.toString()
-        .trim() === "";
-    if (head !== pin || !clean) return; // CI does not fetch the submodule; the pin check above still holds
-    const table = await Bun.file(`${sub}/common/arg.cpp`).text();
-    expect(argAliases(table, RENDERED)).toEqual(aliases.aliases);
-  });
+  // CI fetches no engine source: there the test is skipped (and says so), and the pin check above still holds
+  const source = pinnedSource(root, pin);
+  test.skipIf(source === null)(
+    "where the pinned source is on the box, the manifest equals its arg table",
+    async () => {
+      const table = await Bun.file(`${source}/common/arg.cpp`).text();
+      expect(argAliases(table, RENDERED)).toEqual(aliases.aliases);
+    },
+  );
 });

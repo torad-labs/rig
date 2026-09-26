@@ -5,6 +5,7 @@
 // A failed probe fails the run with exit 1 and its lines say what moved.
 import { type Engine, engineSource } from "../../shared/engine/engine.ts";
 import { engineCorpus } from "../../shared/engine/engine-corpus.ts";
+import { tierCache } from "../../shared/head/cache-formats.ts";
 import type { Head } from "../../shared/head/head.ts";
 import type { Layout } from "../../shared/layout.ts";
 import type {
@@ -20,7 +21,7 @@ import type {
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 import { claimGateCard, type GateCard } from "./gate-card.ts";
 import type { GateLegs, LegOptions } from "./gate-legs.ts";
-import { GateRun, type RunGatesReport } from "./gate-run.ts";
+import { GateRun, type RunGatesReport, type RunProvenance } from "./gate-run.ts";
 import { GateServer } from "./gate-server.ts";
 import { loadGates } from "./gates-config.ts";
 import type { HeadClient } from "./head-client.ts";
@@ -74,6 +75,15 @@ export class RunGates {
     const onCard = probes.some((probe) => probe.needs !== "live");
     const card = onCard ? await claimGateCard(this.deps, this.engine, head, gpu) : ok(null);
     if (!card.ok) return card;
+    if (card.value) {
+      const { cache, tier } = card.value;
+      const formats = `K/V ${cache.k}/${cache.v}, state ${cache.s}`;
+      if (tier === null)
+        this.deps.log.warn(
+          `GPU ${gpu} is below every tier of ${head.name}: its legs run the head's own cache formats (${formats}), which serve would never run on it`,
+        );
+      else this.deps.log.info(`GPU ${gpu}: the ${tier} MiB tier's cache formats, ${formats}`);
+    }
 
     const live = liveUrl ? await this.liveHead(liveUrl) : ok(null);
     if (!live.ok) return live;
@@ -92,6 +102,7 @@ export class RunGates {
       binDir: card.value?.binDir ?? "",
       gpu,
       cap: card.value?.cap ?? "",
+      cache: card.value?.cache ?? tierCache(head, {}),
       fs: this.deps.fs,
       shell: this.deps.shell,
       log: this.deps.log,
@@ -107,12 +118,7 @@ export class RunGates {
     }
 
     const report = await run.close(
-      {
-        head: head.name,
-        engine: this.engine.sha7,
-        served: head.served.sha256,
-        gpu: card.value?.gpu ?? null,
-      },
+      runProvenance(head, this.engine, card.value, liveUrl),
       selection.value.skipped,
     );
     if (!report.pass) {
@@ -129,7 +135,7 @@ export class RunGates {
 
   private legsOn(card: GateCard | null, head: Head, port: number, runDir: string): GateLegs {
     if (card === null) return noGateLegs;
-    return new GateServer(this.deps, head, card.binDir, card.gpu, port, runDir);
+    return new GateServer(this.deps, head, card.binDir, card.gpu, port, runDir, card.cache);
   }
 
   /** the probes' long text, from the engine tree the build used: the submodule at the pin, or
@@ -142,6 +148,27 @@ export class RunGates {
 }
 
 /** --live alone means the head's own port; a URL names a head elsewhere; absent, no live probe */
+/** what a run measured: this checkout's pin and pack only where card legs ran them. A live-only run measured the head
+ *  at its URL, whose engine and pack are whatever that machine serves (a rented box serves its public pack) */
+export function runProvenance(
+  head: Pick<Head, "name" | "served" | "speculative">,
+  engine: Pick<Engine, "sha7">,
+  card: GateCard | null,
+  live: string | null,
+): RunProvenance {
+  const draft = card && head.speculative ? head.speculative.cache : null;
+  return {
+    head: head.name,
+    engine: card ? engine.sha7 : null,
+    served: card ? head.served.sha256 : null,
+    live,
+    gpu: card?.gpu ?? null,
+    cache: card?.cache ?? null,
+    tier: card?.tier ?? null,
+    draft_cache: draft ? { k: draft.k, v: draft.v } : null,
+  };
+}
+
 function liveUrlOf(head: Head, live: string | boolean | undefined): string | null {
   if (live === true) return `http://127.0.0.1:${head.port}`;
   return live || null;

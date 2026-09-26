@@ -61,7 +61,7 @@ previous binary. The llama-bench depth matrix from the same rig run (RTX 5070 Ti
 
 ## Geometry
 
-`kv_bytes_per_token = 18432` (q4_0 K and V, head size 256, the model's KV layout);
+The K/V and recurrent state bytes follow from `[cache]` (Cache formats, below): 18,432 B a pooled token in q4_0 K and V;
 `compute_bytes_per_token = 64` — the compute buffer grows 64 B per pooled token: the attention
 mask at n_ubatch 512, one bit per cell under `--attn-mask-bits` (engine PR #6; 288.00 → 18.00 MB
 in the target graph and 64.00 → 4.00 MB in the draft graph at 294,912 cells, 2026-09-21; as f16
@@ -73,7 +73,8 @@ mask, 618.28 less 288; 134 / 157 were the undrafted 5070 Ti / 5080) plus
 `n_outputs_max = slots × (1 + n_max)` (n_max 0 on a tier that does not draft;
 `common_speculative_get_output_limits`): 167.22 MiB at 12 rows, 239.22 at 36, 3.0 per row, all of
 them charged (the first row per slot was left out until 2026-09-23: 12 MiB short on the 5080,
-156 charged against the 167.22 measured); `weights_mib = 6900`; `state_per_slot_mib = 44` — one Gated DeltaNet recurrent state in q8_0 (`-cts q8_0`, engine
+156 charged against the 167.22 measured); `weights_mib = 7212` — the model buffer's 6,900 and the 312 MiB of token
+embeddings `-ot token_embd=CUDA0` puts on the card (Runtime args, below); 44 MiB a copy of one Gated DeltaNet recurrent state in q8_0 (`-cts q8_0`, engine
 e3a9015): RS buffer 526.5 MiB at 4 slots × (1 + n_max 2) copies and 1,579.5 MiB at 4 × (1 + 8),
 43.875 per copy, linear in n_max (`n_rs_seq`, the copies the engine rolls a rejected draft back
 with); 150 in f32 (1,795.5 MiB at n_max 2). Every tier is checked against those constants by
@@ -82,13 +83,24 @@ re-derives each tier's total from the same constants:
 
 | card | VRAM | -np | -c | draft head | needs by the constants (n_max 3 / 8) |
 |---|---|---|---|---|---|
-| RTX 5080 | 16,303 MiB | 4 | 294,912 (1.125 windows) | MTP | 13,968 / 14,908 (14,012 MiB at peak, 2026-09-25) |
-| 16 GB card driving a desktop | ≥ 14,100 MiB for the head | 4 | 262,144 (1 window) | MTP | 13,352 / 14,292 (13,410 MiB at peak, 2026-09-25) |
-| 16 GB card, busier desktop | ≥ 13,700 MiB for the head | 2 | 262,144 (1 window) | MTP | 12,976 / 13,446 (13,006 MiB at peak, 2026-09-25) |
-| 16 GB card, busier desktop still | ≥ 13,500 MiB for the head | 1 | 262,144 (1 window) | MTP | 12,788 / 13,023 (12,828 MiB at peak, 2026-09-25) |
-| RTX 5090 | 32,607 MiB | 8 | 786,432 (3 windows) | MTP | 23,960 / 25,840 |
-| H100 80 GB | 81,559 MiB | 16 | 2,883,584 (11 windows) | MTP | 64,888 / 68,648 |
-| RTX PRO 6000 / H200 | ≥ 90,000 MiB | 16 | 3,538,944 (13.5 windows) | MTP | 77,208 / 80,968 |
+| RTX 5080 | 16,303 MiB | 4 | 294,912 (1.125 windows) | MTP | 14,824 / 16,444 (14,012 MiB at peak with a q8_0 state, 2026-09-25) |
+| 16 GB card driving a desktop | ≥ 14,100 MiB for the head | 4 | 262,144 (1 window) | MTP | 13,664 / 14,604 (13,410 MiB at peak, 2026-09-25) |
+| 16 GB card, busier desktop | ≥ 13,700 MiB for the head | 2 | 262,144 (1 window) | MTP | 13,288 / 13,758 (13,006 MiB at peak, 2026-09-25) |
+| 16 GB card, busier desktop still | ≥ 13,500 MiB for the head | 1 | 262,144 (1 window) | MTP | 13,100 / 13,335 (12,828 MiB at peak, 2026-09-25) |
+| RTX 5090 | 32,607 MiB | 8 | 786,432 (3 windows) | MTP | 25,360 / 28,600 |
+| H100 80 GB | 81,559 MiB | 16 | 2,883,584 (11 windows) | MTP | 67,376 / 73,856 |
+| RTX PRO 6000 / H200 | ≥ 90,000 MiB | 16 | 3,538,944 (13.5 windows) | MTP | 79,696 / 86,176 |
+
+The peaks were measured before the token embeddings moved to the card; each needs 312 MiB more now, and every tier
+keeps at least 360 MiB between that and its floor (the tightest, one slot beside a busier desktop: 12,828 + 312 =
+13,140 of 13,500). The state is f16 on the first four tiers (Cache formats: 34 MiB more a copy, slots × (1 + n_max)
+copies) and q8_0 on the three desktop tiers, where f16 would leave 110 and 224 MiB over the peak or not fit at all.
+
+The driver holds more than the buffers these constants charge, and how much follows the card, not the geometry: on a
+rented RTX 5090 (engine 48ebd21, q8_0 state, the embeddings on the card; the engine-10 gate, sampled every 250 ms) one
+slot of 262,144 with the draft peaked at 13,511–13,525 MiB against a charge of 13,100, and 4 × 294,912 with the draft at
+14,685–14,695 against 14,280: 405–425 over at both geometries, where the 5070 Ti's peaks above sat 30–58 over theirs.
+Every tier's floor still clears it on its own card (the 5090 tier's charge and 425 are 25,785 of its 30,000); a charge for it is open.
 
 A tier is picked by the VRAM the head can have: the card's total less what every other process
 holds (`headVramMiB`). A card that also drives a desktop keeps its compositor's, browsers' and
@@ -297,6 +309,126 @@ the table's 1,224, `cpy_scalar` 64 → 0 alone (`gates.toml`), and the new table
 driver-only e2e on Ubuntu 22.04 (RTX 5090, driver 610.57.04): installed, the runtime resolved from the build directory,
 tg128 161.1 tok/s.
 
+## Cache formats (2026-09-26)
+
+`[cache]` names the formats every tier serves and the element counts their bytes follow from; a tier may name its own
+(`cache = { k, v, s }`). serve and the gates render the flags of the tier a card gets and the tier check charges exactly
+those bytes (`src/shared/head/cache-formats.ts`). engine.toml's `[caches]` lists what the pin runs on a CUDA card, and a
+tier that names anything else is refused before a server starts: a K/V pair with no CUDA flash-attention kernel runs
+attention on the CPU, and a state type the graph cannot run aborts the server on its first decode.
+
+- The counts, from the pack's GGUF header: 16 full-attention layers (3, 7, …, 63: `full_attention_interval` 4) × 4 KV
+  heads × 256 (`key_length`) = 16,384 values of K a pooled token and as many of V; 48 Gated DeltaNet layers × 48 value
+  heads × 128 × 128 = 37,748,736 values of recurrent state a copy, plus 5.625 MiB of convolution state (48 × 3 × 10,240
+  × 4 B) that `-cts` leaves f32. The bytes are ggml's blocks: q4_0 18 per 32 values, q5_1 24, q8_0 34, f16 and bf16 2
+  a value, f32 4. That is 18,432 B a token in q4_0 K + V and 43.875 MiB a state copy in q8_0 (charged 44), the
+  constants the tier check held before.
+- What the pin runs. Flash attention with `GGML_CUDA_FA_ALL_QUANTS` off has same-type kernels only (`fattn.cu`'s `#else`
+  cases: f16, q4_0, q8_0, bf16, and f32 through the f16 case; it returns no kernel for K ≠ V, `fattn.cu:526`), held to the source by
+  `engine.test.ts`. The state runs in f32, q8_0, f16 and bf16 since engine 48ebd21. Before it `-cts f16` and `-cts bf16`
+  aborted on the first decode at `scale.cu:63` (`GGML_ASSERT(src0->type == GGML_TYPE_F32)`), because `build_rs`
+  (`llama-graph.cpp:3650` and `:3742`) zeroed a state row with `ggml_scale` for every unquantized type while CUDA's scale
+  kernel takes f32 and its `supports_op` claims every type (RTX 5090, 2026-09-26). The host-side zeroing q8_0 already
+  took (`llama_memory_recurrent::zero_rs_z`) now serves every type but f32, and the f32 and q8_0 paths are unchanged to
+  the digit (the f32 base's perplexity and the q8_0 leg below reproduce).
+
+### What each format costs, by depth
+
+`llama-tap` (`local/research/depth-precision-2026-09-26/tap`): the source pack (ProCreations' PQ2_0 + MTP at
+`efffdea6`, sha256 `3cb3f005…`) teacher-forced over the engine corpus, 4,096 scored tokens after a prefill of the given
+depth, 512 a call (the server's ubatch), and the full-vocabulary KL of each configuration's next-token distribution
+against P (f16 K and V, f32 state) from the same binary on the same card. P against itself is 0 exactly at every depth;
+P at `-ub 256` (the same math in another order) is the floor any change of rounding reaches. Engine 737eba9f5 (c1518d4
+and engine-10's fixes; `bin-x` adds `FA_ALL_QUANTS` and a per-layer K/V switch, and on the same card reproduces `bin`'s
+served number to the digit), on a rented RTX 5090 with the CUDA 13.3 runtime. Mean KLD:
+
+| depth | floor (`-ub 256`) | served (q4_0 K/V + bias, q8_0 state) | served with f16 K/V | served with an f32 state | served / floor |
+|---|---|---|---|---|---|
+| 8,192 | 0.000150 | 0.001586 | 0.000156 | 0.001714 | 10.6× |
+| 65,536 | 0.000267 | 0.003393 | 0.000601 | 0.002889 | 12.7× |
+| 131,072 | 0.000126 | 0.001580 | 0.000215 | 0.001548 | 12.5× |
+| 245,760 | 0.000148 | 0.002001 | 0.000296 | 0.001726 | 13.5× |
+
+At this width the loss is the K/V cache's: the q8_0 state alone sits at 1–2× the floor. The K bias saves 8 % at 8,192
+and nothing deeper (served without it: 0.001715 / 0.003197 / 0.001585 / 0.001995); the int8 Q·K kernel costs nothing
+against the f16 flash attention it replaced (0.001610 / 0.003223 / 0.001604 / 0.001867); the reference Gated DeltaNet
+normalisation against the engine's is at the floor (0.000145 / 0.000224 / 0.000083 / 0.000073). The kernels are right;
+the formats are the loss.
+
+K and V apart, with an f32 state (65,536 on the head's card, whose image loads the CUDA 13.0.3 runtime and cuBLAS, and
+131,072 on the 13.3 card above, each against its own P: a column compares formats, and the two columns are not one
+measurement; the rows are one per format, bytes a K + V value pair against q4_0's 36/32):
+
+| K / V | bytes | 65,536 | 131,072 |
+|---|---|---|---|
+| q4_0 / q4_0, no bias | 1.00× | 0.002919 | 0.001410 |
+| q4_0 / f16 | 2.28× | 0.002509 | 0.000986 |
+| f16 / q4_0 | 2.28× | 0.001149 | 0.000518 |
+| q5_0 / q4_0 | 1.11× | 0.001551 | 0.000788 |
+| q5_1 / q4_0 | 1.17× | 0.001352 | 0.000737 |
+| q8_0 / q4_0 | 1.44× | 0.001403 | 0.000525 |
+| q5_1 / q5_1 | 1.33× | 0.001026 | 0.000369 |
+| q5_1 / q8_0 | 1.61× | 0.000640 | 0.000304 |
+| q8_0 / q5_1 | 1.61× | 0.000674 | 0.000191 |
+| q8_0 / q8_0 | 1.89× | 0.000312 | 0.000107 |
+| f16 in the q4_0 rotation | 3.56× | 0.000273 | 0.000100 |
+
+The rotation alone is at the floor, so all of it is the quantization, and K carries about two thirds. The efficient
+formats are q5_1 / q5_1 (2.9× and 4.3× less loss than served at the two depths, for a third more bytes), q8_0 K / q5_1 V
+and q8_0 / q8_0 (at the floor). Mixing by layer is dominated: q4_0 in one layer alone costs 0.000116–0.000592 at 65,536
+against f16 in the rotation (layers 3–31 about twice layers 35–63) and 0.000096–0.000227 at 131,072 (no half worse), and
+q4_0 in the earlier or the later eight with the rest in f16 gave 0.001723 / 0.001370 at 65,536 and 0.000457 / 0.001054
+at 131,072: the order flips with depth, for more bytes than q8_0 / q8_0.
+
+The windows each tier's pool holds by its own charge, per K/V format (q8_0 state; `tierNeedMiB` at `min_vram_mib`):
+
+| tier | served now | q4_0 / q4_0 | q5_1 / q5_1 | q8_0 / q5_1 | q8_0 / q8_0 |
+|---|---|---|---|---|---|
+| ≥ 90,000 MiB, 16 slots | 13.5 | 16.03 | 12.22 | 10.19 | 8.75 |
+| ≥ 76,000, 16 slots | 11 | 13.19 | 10.05 | 8.39 | 7.20 |
+| ≥ 30,000 (RTX 5090), 8 slots | 3 | 4.16 | 3.17 | 2.64 | 2.27 |
+| ≥ 16,000 (RTX 5080), 4 slots | 1.125 | 1.47 | 1.11 | 0.94 | 0.80 |
+| the desktop tiers | 1 | 1.08 | 0.81–0.83 | 0.69 | 0.58–0.59 |
+
+q5_1 / q5_1 keeps the 5090's three windows and leaves the 5080 1.11 against 1.125; neither it nor a mixed pair has a CUDA
+kernel at the pin (`[caches]`), so every tier stays q4_0 until the engine carries them.
+
+### The recurrent state over a long decode
+
+At prefill width the q8_0 state is nearly free, but the server decodes one call at a time and writes each sequence's
+state back in its format after every call, so a long decode requantizes it thousands of times: once a token undrafted,
+once a verified round (3.31 tokens on the head's agent sessions) drafted. Scored over 8,192 decoded tokens after a
+prefill of 131,072, one and three tokens a call, each against P (f16 K/V, f32 state) at the same step, with the
+engine-10 build and the state fix below (`bin-s`; its P and its q8_0 leg reproduce `bin-x`'s to the byte). Mean KLD, ±
+a batch-means error (the window in 64 contiguous batches: neighbouring positions are correlated, and an error that treats
+them as independent comes out at 0.28 to 0.62 of this):
+
+| K / V | state | 1 a call | first 1,024 → last 1,024 | 3 a call (drafted) |
+|---|---|---|---|---|
+| f16 | q8_0 | 0.001839 ± 0.000133 | 0.000729 → 0.003895 | 0.000978 ± 0.000073 |
+| f16 | bf16 | 0.000292 ± 0.000022 | 0.000139 → 0.000517 | |
+| f16 | f16 | 0.000108 ± 0.000006 | 0.000107 → 0.000165 | 0.000096 ± 0.000005 |
+| q4_0 + bias (served) | q8_0 (served) | 0.003300 ± 0.000211 | 0.002075 → 0.006756 | 0.002488 ± 0.000152 |
+| q4_0 + bias | bf16 | 0.001887 ± 0.000106 | 0.001689 → 0.003537 | |
+| q4_0 + bias | f16 | 0.001768 ± 0.000103 | 0.001476 → 0.003374 | 0.001724 ± 0.000106 |
+| q4_0 + bias | f32 | 0.001771 ± 0.000102 | 0.001573 → 0.003198 | 0.001727 ± 0.000102 |
+
+The q8_0 state's error accumulates. Position by position, the served leg less the f16-state leg (the same text, so its
+own difficulty cancels) is 0.001532 ± 0.000129 one token a call and climbs from 0.000599 to 0.003382 across the window,
++0.000302 ± 0.000046 per 1,000 tokens (6.5σ, batch-means errors: `trend.py --paired`); three a call it is 0.000764 ±
+0.000070 and climbs from 0.000257 to 0.001522, +0.000145 ± 0.000023 (6.3σ). An f16 state is the f32 one within noise at
+both steps (differences −0.000003 ± 0.000033 and −0.000004 ± 0.000027) for 34 MiB more a copy than q8_0, and bf16
+drifts at a seventh of q8_0's rate. With
+the served K/V an f16 state takes the drafted decode's loss from 0.002488 to 0.001724 (−31 %) and the undrafted one's
+from 0.003300 to 0.001768 (−46 %); what remains is the q4_0 K/V's.
+
+Why f16 aborted: `build_rs` and `build_rs_cache_view` (`llama-graph.cpp`) zeroed a state row in the graph with
+`ggml_scale` for every unquantized type, and GGML_OP_SCALE takes f32 only on CUDA (`scale.cu:63`) and on the CPU
+(`ops.cpp:4683`); the host-side zeroing (`zero_rs_z`) served block types only. Engine 48ebd21 carries the fix (fork
+1fd214cc6: the graph zeroes an f32 state and the host every other type's row, and 48ebd2167 keeps an f16 or bf16 state
+off qwen35's f32-only rows mode on the CPU and Metal), and the head serves an f16 state on every tier but the desktop
+ones (Geometry).
+
 ## Draft head retrained (MTP r2, 2026-09-24)
 
 The first `[[derive]]` step writes our retrained head over the pack's `blk.64`. It has the same
@@ -359,6 +491,39 @@ under verify-batch numerics, as in the tie check above.
 - rig's splice of the head into the ablated pack gives 389b6d3c…, the box's own export of r2.
 - rig's derive from source (splice, then ablation) gives the same 389b6d3c….
 - The splice alone gives the public pack, 0e5524be….
+
+## Speculation levers measured and not taken (2026-09-23/24)
+
+Measured on a rented RTX PRO 6000 (vast 52390478) with ProCreations' head, each against the same
+engine build without it.
+
+**An n-gram drafter ahead of the head** (`--spec-type ngram-mod,draft-mtp`). A round whose last
+`n_match` tokens recur in the conversation is drafted from that history, and every other round
+falls through to the head. On the 48 held-out greedy requests, n_max 2 read +0.83 % tok/s,
+against run-to-run noise of −0.07 %; n_max 16 lost 4.9 %. The head serves long-context agentic
+work, so the deciding measure was 12 held-out SWE-rebench sessions cut at 64K (6) and 128K (6).
+Each got 3 fixed-seed generations under the served sampler, all legs in one quiet window:
+
+| against the same build without it | tok/s aggregate | median per request | tokens / round | ms / round |
+|---|---|---|---|---|
+| all | −1.1 % | −2.0 % | 2.431 → 2.350 | 15.55 → 15.20 |
+| 64K | +0.8 % | −1.4 % | 2.344 → 2.301 | 14.96 → 14.57 |
+| 128K | −2.9 % | −2.3 % | 2.525 → 2.402 | 16.19 → 15.87 |
+
+The same config run twice over that set moved −0.6 % (per request 0.981–1.008). An n-gram
+draft costs less than an MTP draft step, but its rounds carry fewer tokens. rig's
+`[speculative.ngram]` block (PR #55) was closed with this table, since no head would have used
+it.
+
+**Tree verification** (two chains: the head's top 2 at step 1, each continued one step).
+`treeeval.py` (`local/research/mtp-retrain-2026-09-23/pipeline/`) scores it offline on the
+teacher-labelled rows. The row's actual next token decides which branch survives step 1, and
+step 2 is accepted with the served sampler's probability. With ProCreations' head the two
+chains carry 2.584 tokens a round against the chain's 2.422 (+6.7 %); with a first retrained
+head, +5.7 %. The two chains verify 5 rows where the chain verifies 3. The two extra verify
+rows cost 2.2–3.4 ms of a 15.3 ms round at 127K (+14–22 %) for 6–7 % more tokens. Gated
+DeltaNet would also need per-branch recurrent state to verify a tree, which the engine does
+not keep. Not built. Those rows went to depth instead ("Draft depth", above).
 
 ## Draft head (MTP, 2026-09-20 evening)
 
@@ -561,6 +726,15 @@ draft ran, the drafted leg not slower (the result files are banked under `eviden
 - The engine's q4_0-native tensor-core flash attention with int8 Q·K (fork commit 60feea0):
   RTX 5080 prefill at 131K 930 → 1,382 tok/s, decode at 131K 44.5 → 73.3 tok/s;
   `GGML_CUDA_FATTN_Q4_0_LEGACY=1` is the off switch.
+- `-ot token_embd=CUDA0`: the token embeddings on the head's card (CUDA0: `serve` sets
+  `CUDA_VISIBLE_DEVICES` to that card) instead of the host, where every lookup dequantized PQ2_0
+  rows on the server thread (the engine-10 host profile: 62 of 1,272 non-wait samples, 54 of them
+  `dequantize_row_pq2_0`). Engine-10 run e10g (RTX 5080, one slot at 245,760, engine 6c0e372e9,
+  legs A B B A): a draft round 20.341 → 20.265 ms (+0.38 %, 95 % CI +0.28 to +0.47), a cold
+  245,755-token prompt 198.8 / 197.8 → 193.8 / 193.8 s (−2.3 %), the text 24/24 in every pair,
+  acceptance 0.5690 in all four, VRAM 12,784 → 13,096 MiB (+312, charged in `weights_mib`;
+  local/research/engine8-2026-09-25/box-52663093/e10g). The pinned engine c1518d4 carries the same
+  CUDA `GET_ROWS` for PQ2_0 (`getrows.cu:323`), so the lookup runs on the card there too.
 - `--checkpoint-every 16384` (fork commit aa8ef36): a pinned context checkpoint every 16K prompt
   tokens and one at the exact token a prompt forked, so a compaction or a new session resumes
   from a checkpoint instead of re-prefilling from zero.

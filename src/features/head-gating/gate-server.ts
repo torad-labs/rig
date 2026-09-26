@@ -1,6 +1,7 @@
 // A llama-server for one gate leg: the head's runtime args on the gate card and port, one pack,
 // a context and slot count the probe chooses, stdout/stderr to the run directory. Stopped with
 // SIGINT and waited for, so the next leg starts on a free card.
+import { type CacheFormats, cacheArgv } from "../../shared/head/cache-formats.ts";
 import { draftArgv } from "../../shared/head/draft-head.ts";
 import type { Head } from "../../shared/head/head.ts";
 import type { Clock, FileSystem, Http, Log, Process, Shell } from "../../shared/ports/index.ts";
@@ -29,6 +30,7 @@ export class GateServer implements GateLegs {
     private readonly gpu: number,
     private readonly port: number,
     private readonly runDir: string,
+    private readonly cache: CacheFormats, // the gate card's tier's (gate-card.ts)
   ) {}
 
   get client() {
@@ -47,6 +49,7 @@ export class GateServer implements GateLegs {
       "--jinja",
       "-fa",
       "on",
+      ...cacheArgv(this.head, this.cache),
       ...this.head.runtime.args.map(asset),
       ...draft,
       "-c",
@@ -82,10 +85,22 @@ export class GateServer implements GateLegs {
       stderrPath: log,
     });
     this.proc = proc;
+    // a server that dies at load (the engine refusing an argument or an asset) is named at once,
+    // not after the whole startup budget as one that never came up
+    let exitCode: number | undefined;
+    void proc.exited.then((code) => {
+      exitCode = code;
+    });
     await this.volunteerForOom(proc, options.label);
 
     const deadline = this.deps.clock.now() + STARTUP_TIMEOUT_MS;
     while (!(await this.client.healthy())) {
+      if (exitCode !== undefined) {
+        this.proc = null;
+        throw new Error(
+          `gate server ${options.label} exited with code ${exitCode} before it answered — ${log}`,
+        );
+      }
       if (this.deps.clock.now() >= deadline) {
         await this.stop();
         throw new Error(`gate server ${options.label} did not come up in 300 s — ${log}`);

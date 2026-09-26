@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { putHead, withSidecarDraft } from "../../../test/fakes/head-fixtures.ts";
 import { fakePorts } from "../../../test/fakes/index.ts";
 import { layoutAt } from "../layout.ts";
+import {
+  draftKvBytesPerToken,
+  kvBytesPerToken,
+  stateMiBPerCopy,
+  tierCache,
+} from "./cache-formats.ts";
 import { loadHead, parseHeadToml } from "./head.ts";
 import { type Tier, tierNeedMiB, tierSpeculates } from "./head-config.ts";
 
@@ -17,8 +23,15 @@ describe("head.toml", () => {
     if (!r.ok) return;
     for (const t of r.value.geometry.tiers)
       expect(tierNeedMiB(r.value, t)).toBeLessThanOrEqual(t.min_vram_mib);
-    // the local 5080 tier reproduces the measured KV: 7,488 MiB at 425,984 tokens
-    expect(Math.ceil((425984 * r.value.geometry.kv_bytes_per_token) / 1048576)).toBe(7488);
+    // the [cache] element counts reproduce what was measured: 7,488 MiB of q4_0 K/V at 425,984 tokens on the 5080
+    // and 43.875 MiB a q8_0 state copy (526.5 MiB at 4 slots x (1 + n_max 2)), charged 44; the head's f16 state is
+    // 72 MiB a copy and the f32 conv states, charged 78
+    const cache = tierCache(r.value, {});
+    expect(kvBytesPerToken(r.value, cache)).toBe(18432);
+    expect(Math.ceil((425984 * kvBytesPerToken(r.value, cache)) / 1048576)).toBe(7488);
+    expect(stateMiBPerCopy(r.value, { ...cache, s: "q8_0" })).toBe(44);
+    expect(stateMiBPerCopy(r.value, cache)).toBe(78);
+    expect(stateMiBPerCopy(r.value, { ...cache, s: "f32" })).toBe(150); // 149.625: 1,795.5 MiB at 12 copies
   });
   test("lens is optional and accepts only explicit booleans and string arguments", () => {
     const absent = parseHeadToml(real.replace(/\[runtime\.lens\][\s\S]*?(?=\[client\])/, ""));
@@ -65,6 +78,7 @@ describe("head.toml", () => {
       ["speculative", "args", '["-ctkd", "q4_0", "--spec-draft-chain-p-min", "0.2"]'],
       ["runtime", "extra", '["-lv", "4", "--parallel", "1"]'], // the alias: 1 slot served, 4 charged
       ["runtime", "extra", '["-lv", "4", "--ctx_size", "8192"]'], // the engine reads it as --ctx-size
+      ["runtime", "sampling", '["--temp", "1.0", "-ctkd", "f16"]'], // after the draft's own: it would win
       ["runtime.lens", "args", '["--lens-layers", "63", "--cache-ram", "0"]'],
     ]) {
       const r = parseHeadToml(
@@ -201,14 +215,14 @@ describe("head.toml", () => {
     expect(tierNeedMiB(h, r5090) - tierNeedMiB(h, { ...r5090, speculative: false })).toBe(
       s.weights_mib +
         s.overhead_mib +
-        Math.ceil((r5090.ctx * s.bytes_per_token) / 1048576) +
+        Math.ceil((r5090.ctx * (draftKvBytesPerToken(s.cache) + s.bytes_per_token)) / 1048576) +
         r5090.slots * h.geometry.compute_per_output_row_mib * s.n_max +
-        r5090.slots * h.geometry.state_per_slot_mib * s.n_max,
+        r5090.slots * stateMiBPerCopy(h, tierCache(h, r5090)) * s.n_max,
     );
-    expect(tierNeedMiB(h, r5090)).toBe(23960); // 8 slots × (44 MiB of rollback state + 3 MiB of verify row) × n_max 3, and each slot's own row
-    // the 5080: full-pool MTP KV and bit-packed attention masks, 4 × (44 + 3) × 3 of rollback state and verify rows,
-    // the draft vocabulary's 127.5 MiB of LM-head rows in weights_mib
-    expect(tierNeedMiB(h, r5080)).toBe(13968);
+    expect(tierNeedMiB(h, r5090)).toBe(25360); // 8 slots × (78 MiB of f16 rollback state + 3 MiB of verify row) × n_max 3, and each slot's own row
+    // the 5080: full-pool MTP KV and bit-packed attention masks, 4 × (78 + 3) × 3 of rollback state and verify rows,
+    // the draft vocabulary's 127.5 MiB of LM-head rows in weights_mib, and the 312 MiB of token embeddings on the card
+    expect(tierNeedMiB(h, r5080)).toBe(14824);
     // the compute buffer as the 5080 measured it (167.22 MiB at 294,912 and 12 = 4 × (1 + 2) rows) is
     // charged in full: the fixed part, the per-token mask and every output row, the first per slot too
     const row = h.geometry.compute_per_output_row_mib;
@@ -219,7 +233,7 @@ describe("head.toml", () => {
     // each slot costs its recurrent state and its own output row, drafting or not
     const undrafted = { ...r5080, speculative: false };
     expect(tierNeedMiB(h, undrafted) - tierNeedMiB(h, { ...undrafted, slots: 0 })).toBe(
-      4 * (h.geometry.state_per_slot_mib + row),
+      4 * (stateMiBPerCopy(h, tierCache(h, r5080)) + row),
     );
     // the 1.625 undrafted windows no longer fit beside it
     expect(tierNeedMiB(h, { ...r5080, ctx: 425984 })).toBeGreaterThan(r5080.min_vram_mib);
@@ -236,9 +250,9 @@ describe("head.toml", () => {
     expect(tierNeedMiB(h, r5090) - tierNeedMiB(h, { ...r5090, speculative: false })).toBe(
       100 +
         50 +
-        Math.ceil((r5090.ctx * 64) / 1048576) +
+        Math.ceil((r5090.ctx * (4096 + 64)) / 1048576) + // f16 K + V over 1,024 elements, and its compute
         8 * h.geometry.compute_per_output_row_mib * 3 +
-        8 * h.geometry.state_per_slot_mib * 3,
+        8 * stateMiBPerCopy(h, tierCache(h, r5090)) * 3,
     );
   });
   test("a tier that asks for a draft head the head does not declare is rejected by name", () => {
@@ -255,8 +269,53 @@ describe("head.toml", () => {
     expect(r.ok).toBe(false);
     if (!r.ok)
       expect(r.message).toContain(
-        "cannot hold slots=4 ctx=425984: needs 16432 MiB (KV + weights + compute + slot state + draft weights, overhead, compute and rollback snapshots)",
+        "cannot hold slots=4 ctx=425984: needs 17288 MiB (KV + weights + compute + slot state + draft weights, overhead, compute and rollback snapshots)",
       );
+  });
+  test("a tier's own cache formats are charged at their bytes, the state on every copy it keeps", () => {
+    const at = (text: string) => {
+      const r = parseHeadToml(text);
+      if (!r.ok) throw new Error(r.message);
+      return r.value.geometry.tiers;
+    };
+    // the 5090 in q5_1 K and V: 786,432 cells × 6,144 more bytes = 4,608 MiB over its q4_0 need
+    const q51 = at(
+      real.replace("ctx = 786432\n", 'ctx = 786432\ncache = { k = "q5_1", v = "q5_1" }\n'),
+    );
+    const h = parseHeadToml(real);
+    if (!h.ok) throw new Error(h.message);
+    expect(tierNeedMiB(h.value, q51[2]!)).toBe(25360 + 4608);
+    // the 5080 with a q8_0 state: 34 MiB less a copy (44 against the head's f16 78), 4 slots × (1 + n_max 3) copies
+    const q8 = at(real.replace("ctx = 294912\n", 'ctx = 294912\ncache = { s = "q8_0" }\n'));
+    expect(tierNeedMiB(h.value, q8[3]!)).toBe(14824 - 16 * 34);
+    expect(tierNeedMiB(h.value, q8[2]!)).toBe(25360); // the tiers that name nothing keep the head's formats
+  });
+  test("the cache flags are refused in runtime.args under every spelling: serve renders them from [cache]", () => {
+    for (const flag of [
+      "--cache-type-k",
+      "-ctk",
+      "--cache-type-v",
+      "-ctv",
+      "-cts",
+      "--cache-type-s",
+      "--kv-mean-center",
+    ]) {
+      const r = parseHeadToml(
+        real.replace(
+          'args = [\n  "--attn-mask-bits"',
+          `args = [\n  "${flag}", "x",\n  "--attn-mask-bits"`,
+        ),
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toContain(`runtime.args carries ${flag}`);
+    }
+  });
+  test("a K bias no tier passes is refused as a dead element", () => {
+    // every tier in q8_0 K: the bias rides a q4_0 K only, so it would never reach the engine
+    const r = parseHeadToml(real.replace('\nk = "q4_0"', '\nk = "q8_0"')); // [cache]'s, not the draft's
+    expect(r.ok).toBe(false);
+    if (!r.ok)
+      expect(r.message).toContain("cache.mean_center is declared but no tier serves a q4_0 K");
   });
 });
 
