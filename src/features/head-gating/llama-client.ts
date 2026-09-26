@@ -59,7 +59,7 @@ export class LlamaClient implements HeadClient {
       "/v1/chat/completions",
       body,
       options.timeoutMs ?? GENERATION_TIMEOUT_MS,
-      options.greedy ?? true,
+      (options.greedy ?? true) && !options.cachePrompt,
     );
     const parsed = JSON.parse(reply.text) as ChatBody;
     const choice = parsed.choices?.[0];
@@ -116,7 +116,9 @@ export class LlamaClient implements HeadClient {
   /** a POST, sent once more when its connection closed before any response while the server still
    *  answers /health and the request is `repeatable` (greedy with the prompt cache off, so the
    *  repeat yields the same tokens). A gate lost its humaneval leg to one reset keep-alive socket
-   *  with the server healthy and mid-batch (2026-09-24); a server that is down still fails. */
+   *  with the server healthy and mid-batch (2026-09-24); a server that is down still fails. A
+   *  request that resumes from the slot's cache is not repeatable: its repeat resumes from what the
+   *  first attempt left there, and its timings are the cache's (longctx's prefill). */
   private async post(
     path: string,
     body: unknown,

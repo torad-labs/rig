@@ -22,6 +22,7 @@ async function setup(toml = headToml) {
       1,
       8098,
       "/r/local/gate-runs/run",
+      { k: "q4_0", v: "q4_0", s: "q8_0" },
     ),
   };
 }
@@ -120,7 +121,7 @@ describe("gate server", () => {
       draft: true,
     });
     const i = argv.indexOf("--spec-type");
-    expect(argv.slice(i, i + 10)).toEqual([
+    expect(argv.slice(i, i + 14)).toEqual([
       "--spec-type",
       "draft-dflash",
       "-md",
@@ -129,6 +130,10 @@ describe("gate server", () => {
       "3",
       "-ngld",
       "999",
+      "-ctkd",
+      "f16",
+      "-ctvd",
+      "f16",
       "-c",
       "8192",
     ]);
@@ -148,6 +153,7 @@ describe("gate server", () => {
   });
   test("start waits for health, logs to the run directory, and the leg stops the server whatever happens", async () => {
     const { p, server } = await setup();
+    p.shell.spawnExit = "on-kill"; // a live server, still loading its pack
     let polls = 0;
     p.http.on(/\/health$/, () => {
       if (polls++ < 3) throw connectionRefused();
@@ -188,6 +194,7 @@ describe("gate server", () => {
   });
   test("a server that never answers is given up on after 300 s, with the log named", async () => {
     const { p, server } = await setup();
+    p.shell.spawnExit = "on-kill"; // alive, hung before it listens
     p.http.on(/\/health$/, () => {
       throw connectionRefused();
     });
@@ -195,5 +202,22 @@ describe("gate server", () => {
       server.start({ label: "dead", pack: "/p.gguf", ctx: 8192, slots: 1 }),
     ).rejects.toThrow("did not come up in 300 s — /r/local/gate-runs/run/server-dead.log");
     expect(p.clock.slept.filter((ms) => ms === 1000).length).toBe(301); // 300 polls, then stop()'s wait
+  });
+  test("a server that exits before it answers fails at once, with its exit code and log named", async () => {
+    const { p, server } = await setup();
+    p.shell.spawnExit = 1; // the engine refusing its args at load: a missing draft vocabulary
+    p.http.on(/\/health$/, () => {
+      throw connectionRefused();
+    });
+    await expect(
+      server.start({ label: "dead", pack: "/p.gguf", ctx: 8192, slots: 1 }),
+    ).rejects.toThrow(
+      "gate server dead exited with code 1 before it answered — /r/local/gate-runs/run/server-dead.log",
+    );
+    expect(p.clock.slept.length).toBeLessThanOrEqual(1);
+    // nothing left to stop: the next leg starts a fresh server
+    p.shell.spawnExit = "on-kill";
+    p.http.json(/\/health$/, { status: "ok" });
+    await server.leg({ label: "next", pack: "/p.gguf", ctx: 8192, slots: 1 }, async () => 0);
   });
 });

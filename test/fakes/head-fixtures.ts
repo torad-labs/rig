@@ -15,6 +15,7 @@ n_max = 3
 weights_mib = 100
 overhead_mib = 50
 bytes_per_token = 64
+cache = { k = "f16", v = "f16", kv_elements_per_token = 1024 }
 `;
 
 /** A Torad machine's view of a head: head.toml plus every [derive] asset it pins — the private ones

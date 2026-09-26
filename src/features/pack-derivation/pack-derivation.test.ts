@@ -127,11 +127,16 @@ head_sha256 = "${o.splice}"`
 [context]
 model = 1024
 advertise = 1024
+[cache]
+k = "f16"
+v = "f16"
+s = "q8_0"
+kv_elements_per_token = 4
+state_elements_per_copy = 0
+state_fixed_mib = 0
 [geometry]
-kv_bytes_per_token = 16
 compute_bytes_per_token = 0
 weights_mib = 1
-state_per_slot_mib = 0
 compute_mib = 0
 compute_per_output_row_mib = 0
 tiers = [{ min_vram_mib = 100, slots = 1, ctx = 1024 }]
@@ -412,6 +417,14 @@ describe("derive: draft-head splice", () => {
       expect(!r.ok && r.message).toContain(message);
       expect(p.fs.files.has(`${head.servedPath}.deriving`)).toBe(false);
     }
+  });
+  test("a step that throws (the disk full mid-write) leaves no staged copy behind", async () => {
+    const { p, head, uc } = await setup({ splice: true });
+    p.fs.writeAt = async () => {
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    };
+    await expect(uc.run(head)).rejects.toThrow("ENOSPC");
+    expect([...p.fs.files.keys()].filter((path) => path.startsWith(head.servedPath))).toEqual([]);
   });
   test("a draft head that is not the pinned bytes is refused", async () => {
     const { head, uc } = await setup({ splice: true, draftHead: writeGguf(headTensors(0x33, 3)) });

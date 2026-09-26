@@ -86,13 +86,16 @@ export class VastAiRental implements Rental {
       ...(typeof raw.gpu_util === "number" ? { gpuUtil: raw.gpu_util } : {}),
     };
   }
+  /** a `show` that fails (a 429) falls back to the listing: its row, card reading included, when
+   *  it lists the instance, null only when it confirms the instance is gone, and a listing that
+   *  fails too (an expired key, no CLI) throws */
   async show(id: number) {
     try {
       return this.toInstance(
         await this.json<Record<string, unknown>>("show", "instance", String(id)),
       );
     } catch {
-      return null;
+      return (await this.list()).find((instance) => instance.id === id) ?? null;
     }
   }
   async list() {

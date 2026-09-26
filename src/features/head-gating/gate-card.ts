@@ -4,7 +4,9 @@
 // complete engine build for its sm; and both pinned packs intact, since the probes compare them.
 import { artifactProblem, checkArtifact } from "../../shared/artifact.ts";
 import { type Engine, isBuilt } from "../../shared/engine/engine.ts";
+import { type CacheFormats, cacheRefusal, tierCache } from "../../shared/head/cache-formats.ts";
 import type { Head } from "../../shared/head/head.ts";
+import { pickTier } from "../../shared/head/tier.ts";
 import type { FileSystem, Gpu, Hasher, Http } from "../../shared/ports/index.ts";
 import { ExitCode, fail, ok, type Result } from "../../shared/result.ts";
 import { LlamaClient } from "./llama-client.ts";
@@ -14,6 +16,11 @@ export interface GateCard {
   binDir: string;
   /** the card's compute capability, 120 for sm_120 */
   cap: string;
+  /** the cache formats of the tier serve would give this card (the head's own when it is below every tier): the
+   *  legs run what serve runs there */
+  cache: CacheFormats;
+  /** that tier's min_vram_mib, or null when the card is below every tier */
+  tier: number | null;
 }
 
 export interface GateCardDeps {
@@ -42,6 +49,12 @@ export async function claimGateCard(
   const card = await deps.gpu.query(gpu);
   if (!card) return fail(ExitCode.Failure, `no CUDA card at nvidia-smi index ${gpu}`);
 
+  const tier = pickTier(head, card.memoryMiB - card.usedMiB);
+  const cache = tierCache(head, tier.ok ? tier.value : {});
+  // the gate's drafted legs load the head's draft whatever the tier says
+  const refusal = cacheRefusal(engine, cache, head.speculative?.cache);
+  if (refusal) return fail(ExitCode.Unsupported, `REFUSING on GPU ${gpu}'s tier: ${refusal}`);
+
   const binDir = engine.binDir(card.computeCap);
   if (!(await isBuilt(deps.fs, binDir))) {
     const message = `no complete build at ${binDir} for sm_${card.computeCap} (run: rig build --gpu ${gpu})`;
@@ -60,5 +73,11 @@ export async function claimGateCard(
     }
   }
 
-  return ok({ gpu, binDir, cap: card.computeCap });
+  return ok({
+    gpu,
+    binDir,
+    cap: card.computeCap,
+    cache,
+    tier: tier.ok ? tier.value.min_vram_mib : null,
+  });
 }

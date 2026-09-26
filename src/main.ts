@@ -14,12 +14,14 @@ import { CheckMachine, checkMachineCommand } from "./features/machine-check/inde
 import { DerivePack, derivePackCommand } from "./features/pack-derivation/index.ts";
 import { DownloadPack, downloadPackCommand } from "./features/pack-download/index.ts";
 import { ManageUnit, manageUnitCommand } from "./features/systemd-unit/index.ts";
-import { parseArgs } from "./shared/cli/args.ts";
-import type { Command } from "./shared/cli/command.ts";
-import { loadEngine } from "./shared/engine/engine.ts";
+import { parseArgs, UsageError, unknownFlags } from "./shared/cli/args.ts";
+import type { Command, LoadHead } from "./shared/cli/command.ts";
+import { type Engine, loadEngine } from "./shared/engine/engine.ts";
 import { listHeads, loadHead } from "./shared/head/head.ts";
-import { layoutAt } from "./shared/layout.ts";
+import { type Layout, layoutAt } from "./shared/layout.ts";
 import { realPorts } from "./shared/platform/index.ts";
+import type { Ports } from "./shared/ports/index.ts";
+import { ExitCode, fail } from "./shared/result.ts";
 
 /** A compiled binary runs from /$bunfs; a checkout runs this file under bun. */
 const compiled = import.meta.dir.startsWith("/$bunfs");
@@ -33,39 +35,22 @@ const findRoot = () =>
 /** How to invoke this program again (ExecStartPre in a unit): the binary, or bun + this file. */
 const selfCommand = () => (compiled ? [process.execPath] : [process.execPath, import.meta.path]);
 
-async function main(argv: string[]): Promise<number> {
-  if (argv[0] === "--version" || argv[0] === "version") {
-    console.log(`rig ${version}`);
-    return 0;
-  }
-  const ports = realPorts();
-  const root = findRoot();
-  const layout = layoutAt(root);
-  const engine = await loadEngine(ports.fs, layout);
-  if (!engine.ok) {
-    ports.log.error(engine.message);
-    return engine.code;
-  }
-  const head = (name: string) => loadHead(ports.fs, layout, name);
-
-  const prepare = new CheckMachine(ports, engine.value);
-  const build = new BuildEngine(ports, layout, engine.value);
+/** every feature that reads the pin, wired: all the commands but `vast`, and the gates `vast
+ *  bench` runs */
+function wireEngine(
+  ports: Ports,
+  layout: Layout,
+  engine: Engine,
+  head: LoadHead,
+): { commands: Command[]; gate: RunGates } {
+  const prepare = new CheckMachine(ports, engine);
+  const build = new BuildEngine(ports, layout, engine);
   const fetch = new DownloadPack(ports);
   const derive = new DerivePack(ports);
-  const serve = new ServeHead(ports, engine.value);
+  const serve = new ServeHead(ports, engine);
   const unit = new ManageUnit({ ...ports, planner: serve, self: selfCommand() }, layout);
-  const describe = new DescribeHead({ ...ports, unit }, layout, engine.value);
-  const gate = new RunGates(ports, layout, engine.value, allProbes);
-  const vast = new RentGpu(
-    {
-      ...ports,
-      gate: { run: (head, options) => gate.run(head, options) },
-      self: selfCommand(),
-      home: process.env.HOME ?? "",
-    },
-    layout,
-    engine.value,
-  );
+  const describe = new DescribeHead({ ...ports, unit }, layout, engine);
+  const gate = new RunGates(ports, layout, engine, allProbes);
   const up = new BringUpHead({
     ...ports,
     steps: {
@@ -77,22 +62,59 @@ async function main(argv: string[]): Promise<number> {
       installUnit: (head, options) => unit.install(head, options),
     },
   });
+  return {
+    gate,
+    commands: [
+      checkMachineCommand(prepare, ports.log),
+      buildEngineCommand(build, ports.log),
+      downloadPackCommand(fetch, head, ports.log),
+      derivePackCommand(derive, head, ports.log),
+      verifyHeadCommand(serve, head, ports.log),
+      serveHeadCommand(serve, head, ports.log),
+      manageUnitCommand(unit, head, ports.log),
+      describeHeadCommand(describe, head, () => listHeads(ports.fs, layout), ports.log),
+      bringUpHeadCommand(up, head, ports.log),
+      runGatesCommand(gate, head, ports.log),
+    ],
+  };
+}
 
-  const commands: Command[] = [
-    checkMachineCommand(prepare, ports.log),
-    buildEngineCommand(build, ports.log),
-    downloadPackCommand(fetch, head, ports.log),
-    derivePackCommand(derive, head, ports.log),
-    verifyHeadCommand(serve, head, ports.log),
-    serveHeadCommand(serve, head, ports.log),
-    manageUnitCommand(unit, head, ports.log),
-    describeHeadCommand(describe, head, () => listHeads(ports.fs, layout), ports.log),
-    bringUpHeadCommand(up, head, ports.log),
-    runGatesCommand(gate, head, ports.log),
-    gpuRentalCommand(vast, head, ports.log),
-  ];
-
+async function main(argv: string[]): Promise<number> {
+  if (argv[0] === "--version" || argv[0] === "version") {
+    console.log(`rig ${version}`);
+    return 0;
+  }
+  const ports = realPorts();
+  const root = findRoot();
+  const layout = layoutAt(root);
+  const engine = await loadEngine(ports.fs, layout);
   const [name, ...rest] = argv;
+  // `vast` alone runs on an engine.toml this binary cannot read: its down, status and idle-check
+  // read no pin, and the idle timer runs idle-check from this checkout (RentGpu's constructor).
+  if (!engine.ok && name !== "vast") {
+    ports.log.error(engine.message);
+    return engine.code;
+  }
+  const head = (name: string) => loadHead(ports.fs, layout, name);
+
+  const wired = engine.ok ? wireEngine(ports, layout, engine.value, head) : null;
+  const vast = new RentGpu(
+    {
+      ...ports,
+      gate: {
+        run: (head, options) =>
+          wired
+            ? wired.gate.run(head, options)
+            : Promise.resolve(fail(ExitCode.Failure, "no engine to gate with")),
+      },
+      self: selfCommand(),
+      home: process.env.HOME ?? "",
+    },
+    layout,
+    engine,
+  );
+  const commands: Command[] = [...(wired?.commands ?? []), gpuRentalCommand(vast, head, ports.log)];
+
   const usage = () => {
     console.error(
       `rig — builds torad-labs/llama.cpp per GPU and brings model heads up (root ${root})\n\nusage: rig <command> [args]\n${commands.map((command) => `  ${command.usage}`).join("\n")}\n\nexit codes: 0 ok, 1 failure (named), 2 busy (a slot is processing), 3 unsupported card, 4 driver older than the toolkit or the prebuilt's CUDA runtime, 64 usage`,
@@ -108,12 +130,28 @@ async function main(argv: string[]): Promise<number> {
     usage();
     return 64;
   }
-  // every command acts on its flags, and an unknown one is ignored: `build --help` compiled
+  // --help before anything runs: `build --help` would otherwise compile
   if (rest.includes("--help") || rest.includes("-h")) {
     console.error(`usage: rig ${cmd.usage}`);
     return 0;
   }
-  return cmd.run(parseArgs(rest));
+  try {
+    const args = parseArgs(rest);
+    if (args.dashed.length > 0)
+      throw new UsageError(
+        `${cmd.name} does not take ${args.dashed.join(", ")}: rig's flags take two dashes (--gpu N), and llama-server's own go after --`,
+      );
+    const unknown = unknownFlags(args, cmd.usage);
+    if (unknown.length > 0)
+      throw new UsageError(
+        `${cmd.name} does not take ${unknown.map((flag) => `--${flag}`).join(", ")} (llama-server's own flags go after --)`,
+      );
+    return await cmd.run(args);
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    console.error(`rig: ${error.message}\nusage: rig ${cmd.usage}`);
+    return ExitCode.Usage;
+  }
 }
 
 process.exitCode = await main(process.argv.slice(2));

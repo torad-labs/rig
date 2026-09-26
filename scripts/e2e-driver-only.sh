@@ -89,6 +89,10 @@ cat "$dir/BUILD"
 echo "== the runtime resolves from the build directory"
 ldd "$dir/libggml-cuda.so" | grep -E "cudart|cublas|gomp|libcuda\.so"
 echo "== decode"
+# CUDA that fails to initialize (a driver older than the runtime) leaves zero devices, and llama-bench
+# then decodes on the CPU and exits 0: the card must be listed before a decode can pass
+"$dir/llama-bench" --list-devices | tee /tmp/devices.txt
+grep -q "^  CUDA0: " /tmp/devices.txt || { echo "decode: no CUDA device, so llama-bench would run on the CPU"; exit 1; }
 flock /gate.lock "$dir/llama-bench" -m /pack.gguf -ngl 99 -fa 1 -p 512 -n 128 -r 2
 if [ -n "$HEAD_NAME" ]; then
   echo "== $HEAD_NAME: the source pack adopted, then derived as a machine without private assets derives it"

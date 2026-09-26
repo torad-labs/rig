@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { FakeHttp } from "../../../../test/fakes/index.ts";
+import { FakeHttp, fakePorts } from "../../../../test/fakes/index.ts";
+import type { HeadClient } from "../head-client.ts";
 import { LlamaClient } from "../llama-client.ts";
 import { abaVerdict } from "./decode-probe.ts";
 import { countDoubled, countRepeats } from "./fluency-probe.ts";
-import { type HumanEvalResult, humanevalVerdict, signTestP } from "./human-eval-probe.ts";
+import { evaluate, type HumanEvalResult, humanevalVerdict, signTestP } from "./human-eval-probe.ts";
 import { type DepthLeg, depthVerdict } from "./longctx-probe.ts";
 import { grow, plant } from "./needle-probe.ts";
+import type { ProbeContext } from "./probe.ts";
 import { capabilityVerdicts, countRefusals, harmVerdict, parity } from "./refusal-probe.ts";
 import { firstDivergence, speculativeVerdict } from "./speculative-probe.ts";
 
@@ -119,6 +121,41 @@ describe("humaneval verdict", () => {
     const damaged = humanevalVerdict(base, leg(113, [0, 1, 2, 3, 4, 5, 6, 7, 8, 113, 114]), 0.05);
     expect([damaged.lost.length, damaged.gained.length, damaged.pass]).toEqual([9, 2, false]);
     expect(humanevalVerdict(base, base, 0.05)).toEqual({ lost: [], gained: [], p: 1, pass: true });
+  });
+  test("a base pack that passes nothing measured nothing: both legs at zero agree, and fail", () => {
+    expect(humanevalVerdict(leg(0), leg(0), 0.05)).toEqual({
+      lost: [],
+      gained: [],
+      p: 1,
+      pass: false,
+    });
+  });
+  test("a program python3 never ran is no measurement: the evaluation stops rather than count it failed", async () => {
+    const p = fakePorts(); // the fake shell answers 127 to a command it has no script for
+    const client = {
+      completion: async () => ({ text: "    return 1\n" }),
+    } as unknown as HeadClient;
+    const ctx = {
+      gates: { humaneval: { workers: 2, n_predict: 16, stop: [] } },
+      fs: p.fs,
+      shell: p.shell,
+      runDir: "/run",
+    } as unknown as ProbeContext;
+    const problems = [
+      {
+        task_id: "HumanEval/0",
+        prompt: "def f():\n",
+        test: "def check(c):\n    assert c() == 1\n",
+        entry_point: "f",
+      },
+    ];
+    await expect(evaluate(client, ctx, "base", problems)).rejects.toThrow(
+      "humaneval: python3 did not run /run/humaneval-base/HumanEval_0.py: fake shell: no script for python3",
+    );
+    p.shell.on(/^python3 /, { code: 1, stdout: "", stderr: "AssertionError" });
+    expect(await evaluate(client, ctx, "base", problems)).toMatchObject({ passed: 0, total: 1 });
+    p.shell.on(/^python3 /, { code: 0, stdout: "", stderr: "" });
+    expect(await evaluate(client, ctx, "base", problems)).toMatchObject({ passed: 1, total: 1 });
   });
 });
 
@@ -289,6 +326,13 @@ describe("longctx verdict", () => {
     expect(depthVerdict(plain, leg([58, 60, 59, 59], 900), 1.0).fast).toBe(false);
     expect(depthVerdict(plain, leg([120, 118, 125, 121]), 1.0).ran).toBe(false);
     expect(depthVerdict(plain, leg([120, 118, 125, 121], 900), 2.5).fast).toBe(false);
+  });
+  test("a plain leg that measured no decode is no baseline: the gate fails, never divides by 1", () => {
+    expect(depthVerdict(leg([0, 0, 0, 0]), leg([50, 52, 49, 51], 900), 1.0)).toEqual({
+      gain: 0,
+      ran: true,
+      fast: false,
+    });
   });
 });
 

@@ -8,6 +8,7 @@
 import { artifactProblem, checkArtifact } from "../../shared/artifact.ts";
 import type { Engine } from "../../shared/engine/engine.ts";
 import { isBuilt } from "../../shared/engine/engine.ts";
+import { type CacheFormats, cacheRefusal, tierCache } from "../../shared/head/cache-formats.ts";
 import type { Head } from "../../shared/head/head.ts";
 import { draftSidecar, type Speculative, tierSpeculates } from "../../shared/head/head-config.ts";
 import { headVramMiB, pickTier } from "../../shared/head/tier.ts";
@@ -38,6 +39,8 @@ export interface ServePlan {
   cacheRam: number;
   vramMiB: number;
   speculative: boolean;
+  /** the tier's cache formats, rendered into argv */
+  cache: CacheFormats;
 }
 export interface ServeHeadDeps {
   shell: Shell;
@@ -115,6 +118,12 @@ export class ServeHead {
         );
       }
     }
+    const bias = head.cache.mean_center;
+    if (bias && !(await this.deps.fs.exists(head.path(bias))))
+      return fail(
+        ExitCode.Failure,
+        `REFUSING to start: the K bias ${bias} is missing from ${head.dir}`,
+      );
     // every list that reaches the command line (server-argv.ts), not only runtime.args
     for (const arg of [
       ...head.runtime.args,
@@ -164,13 +173,36 @@ export class ServeHead {
         ExitCode.Failure,
         `REFUSING: ${slots} slots — this card's tier (${vramMiB} MiB for the head) holds 1 to ${tier.value.slots}`,
       );
-    // fewer slots than the tier's share its pool, never a longer window than the model's own for one conversation
+    // fewer slots than the tier's share its pool, never a longer window than the model's own for one conversation;
+    // a pool larger than the tier's is one the tier check never charged
+    if (options.ctx !== undefined && (options.ctx < 1 || options.ctx > tier.value.ctx))
+      return fail(
+        ExitCode.Failure,
+        `REFUSING: --ctx ${options.ctx} — this card's tier (${vramMiB} MiB for the head) holds a pool of 1 to ${tier.value.ctx} cells`,
+      );
     const ctx = options.ctx ?? Math.min(tier.value.ctx, slots * head.context.model);
     const cacheRam = options.cacheRam ?? defaultCacheRam(await this.deps.host.ramMiB());
     const binDir = this.engine.binDir(card.computeCap);
     const speculative = tierSpeculates(head, tier.value);
+    const cache = tierCache(head, tier.value);
+    const refusal = cacheRefusal(
+      this.engine,
+      cache,
+      speculative ? head.speculative?.cache : undefined,
+    );
+    if (refusal)
+      return fail(
+        ExitCode.Unsupported,
+        `REFUSING on this card's tier (${vramMiB} MiB for the head): ${refusal}`,
+      );
     return ok({
-      argv: serverArgv(head, binDir, { slots, ctx, cacheRam, speculative: tier.value.speculative }),
+      argv: serverArgv(head, binDir, {
+        slots,
+        ctx,
+        cacheRam,
+        speculative: tier.value.speculative,
+        cache,
+      }),
       env: serverEnv(binDir, options.gpu),
       binDir,
       gpu: options.gpu,
@@ -179,6 +211,7 @@ export class ServeHead {
       cacheRam,
       vramMiB,
       speculative,
+      cache,
     });
   }
 
@@ -204,5 +237,6 @@ function draftLabel(s: Speculative): string {
 export function serveLogLine(head: Head, plan: ServePlan): string {
   const draft = plan.speculative ? ` + draft ${draftLabel(head.speculative!)}` : "";
   const undrived = head.undrived ? ` UNDRIVED: ${head.undrived}` : "";
-  return `serve ${head.name}: gpu ${plan.gpu} ${plan.binDir.split("/").at(-1)} vram=${plan.vramMiB}MiB -> -np ${plan.slots} -c ${plan.ctx} --cache-ram ${plan.cacheRam}${draft}; pack sha verified${undrived}`;
+  const cache = `K/V ${plan.cache.k}/${plan.cache.v} state ${plan.cache.s}`;
+  return `serve ${head.name}: gpu ${plan.gpu} ${plan.binDir.split("/").at(-1)} vram=${plan.vramMiB}MiB -> -np ${plan.slots} -c ${plan.ctx} --cache-ram ${plan.cacheRam} ${cache}${draft}; pack sha verified${undrived}`;
 }

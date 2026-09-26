@@ -12,7 +12,7 @@
 // new table to the rig change that moves the pin, and this probe prints the step as that table.
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { cacheTypeArgs } from "./depth-probe.ts";
+import { benchCache } from "../../../shared/head/cache-formats.ts";
 import type { Probe, ProbeResult } from "./probe.ts";
 
 /** kernel short name -> launches */
@@ -117,6 +117,7 @@ export const censusProbe: Probe = {
       ]);
     }
     const capture = join(ctx.runDir, "census");
+    const cache = benchCache(ctx.cache);
     const bench = [
       `${ctx.binDir}/llama-bench`,
       "-m",
@@ -125,7 +126,7 @@ export const censusProbe: Probe = {
       "99",
       "-fa",
       "1",
-      ...cacheTypeArgs(ctx.head.runtime.args),
+      ...cache.args,
       "-p",
       "0",
       "-n",
@@ -145,7 +146,7 @@ export const censusProbe: Probe = {
     });
     if (profiled.code !== 0) {
       const tail = profiled.stderr.trim().split("\n").slice(-5);
-      return failed(`nsys profile exited ${profiled.code}`, tail, { cmd });
+      return failed(`nsys profile exited ${profiled.code}`, tail, { cmd, cache: cache.ran });
     }
     const exportCmd = ["nsys", "export", "-t", "sqlite", "-f", "true"];
     const exported = await ctx.shell.run(
@@ -154,10 +155,10 @@ export const censusProbe: Probe = {
     );
     if (exported.code !== 0) {
       const tail = exported.stderr.trim().split("\n").slice(-5);
-      return failed(`nsys export exited ${exported.code}`, tail, { cmd });
+      return failed(`nsys export exited ${exported.code}`, tail, { cmd, cache: cache.ran });
     }
     const census = censusOf(readCapture(`${capture}.sqlite`));
-    if (typeof census === "string") return failed(census, [], { cmd });
+    if (typeof census === "string") return failed(census, [], { cmd, cache: cache.ran });
 
     const diff = censusDiff(table, census.step);
     const others = census.others.map(
@@ -170,7 +171,14 @@ export const censusProbe: Probe = {
           .join(", ")}`,
     );
     const replays = `${census.steps} of ${census.launches} graph replays`;
-    const data = { cmd, step: census.step, steps: census.steps, launches: census.launches, diff };
+    const data = {
+      cmd,
+      cache: cache.ran,
+      step: census.step,
+      steps: census.steps,
+      launches: census.launches,
+      diff,
+    };
     if (diff.length > 0) {
       return failed(
         `${diff.length} kernels launch a different number of times per step: ${sum(census.step)} launches against ${sum(table)} (${replays})`,

@@ -47,6 +47,8 @@ mkdir "$staging/rig"
 tar -C "$staging/rig" -xzf "$staging/$asset" --strip-components=1
 [ -x "$staging/rig/dist/rig" ] || fail "the release holds no dist/rig"
 [ ! -e "$staging/rig/local" ] || fail "the release holds a local/, which is this machine's own"
+# run before anything installed is replaced: a binary this machine cannot run keeps the old install
+version=$("$staging/rig/dist/rig" --version) || fail "the release's dist/rig does not run here"
 
 # each entry the release holds replaces the installed one; anything else under $home stays
 for path in "$staging/rig"/*; do
@@ -56,7 +58,7 @@ for path in "$staging/rig"/*; do
 done
 ln -sfn "$home/dist/rig" "$bin_dir/rig"
 
-echo "rig install: $("$bin_dir/rig" --version) in $home, linked as $bin_dir/rig"
+echo "rig install: $version in $home, linked as $bin_dir/rig"
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *) echo "rig install: $bin_dir is not on PATH; add it in your shell's rc file" ;;

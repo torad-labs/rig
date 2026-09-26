@@ -9,9 +9,11 @@
 // live in rented-box.ts; the tunnel's http in head-endpoint.ts.
 import { basename, join } from "node:path";
 import type { Engine } from "../../shared/engine/engine.ts";
+import { cacheRefusal, tierCache } from "../../shared/head/cache-formats.ts";
 import type { Head } from "../../shared/head/head.ts";
-import { deriveAsset } from "../../shared/head/head-config.ts";
+import { deriveAsset, tierSpeculates } from "../../shared/head/head-config.ts";
 import { HeadEndpoint, type Serving } from "../../shared/head/head-endpoint.ts";
+import { pickTier } from "../../shared/head/tier.ts";
 import type { Layout } from "../../shared/layout.ts";
 import type {
   Clock,
@@ -106,14 +108,17 @@ export interface DownReport {
 
 export interface StatusReport {
   box: BoxState | null;
-  listed: boolean;
+  /** "unread" when the market could not be read: no evidence the box is gone */
+  listed: boolean | "unread";
   status?: string;
   hours?: number;
   cost?: number;
   tunnelActive: boolean;
   healthy: boolean;
-  /** whether the cost control runs; a listed box found without it has it re-armed by status */
+  /** whether the cost control runs; a box listed (or unread) without it has it re-armed by status */
   idleTimer: "active" | "inactive" | "re-armed" | "none";
+  /** how the timer's last check ended: an active timer whose checks fail controls nothing */
+  idleCheck?: "ok" | "failed" | "unread";
 }
 
 export interface IdleReport {
@@ -151,15 +156,26 @@ const GPU_BUSY_PCT = 10;
 export class RentGpu {
   private readonly state: RentalState;
 
+  /** [loaded] is engine.toml as this binary read it, failed or not: down, status and idle-check
+   *  never read the pin, so a checkout whose engine.toml this binary cannot read stops only up and
+   *  bench, never the cost control of a box that bills (2026-09-25, 8:59-11:09 PM CT: fourteen
+   *  idle checks exited 1 on `miscompilers: Invalid key` while box 52647843 billed) */
   constructor(
     private readonly deps: RentGpuDeps,
     private readonly layout: Layout,
-    private readonly engine: Engine,
+    private readonly loaded: Result<Engine>,
   ) {
     this.state = new RentalState(deps.fs, layout);
   }
 
+  /** the pin; up and bench return the load failure before anything reads it */
+  private get engine(): Engine {
+    if (!this.loaded.ok) throw new Error(this.loaded.message);
+    return this.loaded.value;
+  }
+
   async up(head: Head, options: RentOptions): Promise<Result<RentReport | DryRunReport>> {
+    if (!this.loaded.ok) return this.loaded;
     const config = await loadVastConfig(this.deps.fs, this.layout);
     if (!config.ok) return config;
 
@@ -168,6 +184,8 @@ export class RentGpu {
 
     const pick = await this.pickOffer(config.value, options);
     if (!pick.ok) return pick;
+    const fits = this.servesOn(head, pick.value.offer);
+    if (!fits.ok) return fits;
     if (options.dryRun) {
       this.deps.log.info("dry run: no box created");
       return ok({ kind: "dry-run", pick: pick.value.offer, query: pick.value.query });
@@ -237,8 +255,10 @@ export class RentGpu {
   async down(options: { all?: boolean } = {}): Promise<Result<DownReport>> {
     const config = await loadVastConfig(this.deps.fs, this.layout);
     if (!config.ok) return config;
-    await this.stopLocalUnits();
 
+    // The timer and the tunnel stop only once the box is confirmed gone: a destroy that fails
+    // (vast 5xx or 429, the box still listed) leaves a box billing, and its idle check must run
+    // again rather than have been disabled by the attempt.
     const destroyed: number[] = [];
     let billed: { hours: number; cost: number } | undefined;
     const box = await this.state.box();
@@ -250,6 +270,7 @@ export class RentGpu {
     } else {
       this.deps.log.info(`no box in ${this.state.dir}`);
     }
+    await this.stopLocalUnits();
 
     if (options.all) {
       for (const instance of await this.forgottenBoxes(config.value, destroyed)) {
@@ -269,30 +290,54 @@ export class RentGpu {
     const healthy = await this.endpoint(config.value).healthy();
     if (!box) return ok({ box: null, listed: false, tunnelActive, healthy, idleTimer: "none" });
 
-    const listing = await this.deps.rental.show(box.instanceId);
+    const listing = await this.listing(box);
     const hours = billedHours(box, this.deps.clock.now());
     // A box billing with its cost control dead is the one state status must not only report:
     // 2026-09-24 the timer went inactive at 09:08 with no stop in the journal, and box 52390478
-    // billed idle until a person noticed (8.3 h, ~$11.63).
+    // billed idle until a person noticed (8.3 h, ~$11.63). A market that cannot be read is no
+    // evidence the box is gone, so the timer is re-armed then too.
     const timerActive = await this.deps.systemd.isActive(IDLE_TIMER);
     let idleTimer: StatusReport["idleTimer"] = timerActive ? "active" : "inactive";
-    if (listing && !timerActive) {
+    if (listing !== null && !timerActive) {
       await this.armIdleTimer();
+      const billing = listing === "unread" ? "may be billing" : "is billing";
       this.deps.log.warn(
-        `box ${box.instanceId} is billing and ${IDLE_TIMER} was not running: re-armed it (idle budget ${idleBudget(config.value, box)} min)`,
+        `box ${box.instanceId} ${billing} and ${IDLE_TIMER} was not running: re-armed it (idle budget ${idleBudget(config.value, box)} min)`,
       );
       idleTimer = "re-armed";
     }
+    // An active timer whose checks fail is as dead as a stopped one (2026-09-25: fourteen checks
+    // exited 1 while the timer read active), so the last check's result is part of the answer.
+    const lastCheck = await this.deps.systemd.lastResult(IDLE_SERVICE);
+    const idleCheck: StatusReport["idleCheck"] =
+      lastCheck === null ? "unread" : lastCheck === "success" ? "ok" : "failed";
+    if (idleCheck === "failed") {
+      this.deps.log.warn(
+        `${IDLE_SERVICE}'s last run ended ${lastCheck}: the box's cost control is not running; see journalctl --user -u ${IDLE_SERVICE}`,
+      );
+    }
     return ok({
       box,
-      listed: listing !== null,
-      ...(listing ? { status: listing.status } : {}),
+      listed: listing === "unread" ? "unread" : listing !== null,
+      ...(listing !== null && listing !== "unread" ? { status: listing.status } : {}),
       hours,
       cost: billedCost(hours, box.dph),
       tunnelActive,
       healthy,
       idleTimer,
+      idleCheck,
     });
+  }
+
+  /** the market's listing of the box: null when it lists no such box, "unread" when the market
+   *  could not be read (a 429, an expired key, no CLI), which is no evidence either way */
+  private async listing(box: BoxState): Promise<Instance | null | "unread"> {
+    try {
+      return await this.deps.rental.show(box.instanceId);
+    } catch (error) {
+      this.deps.log.warn(`vast could not be read: ${(error as Error).message}`);
+      return "unread";
+    }
   }
 
   /** the timer's check: the server's token counters through the tunnel, unchanged for
@@ -308,18 +353,46 @@ export class RentGpu {
 
     const now = this.deps.clock.now();
     const activity = await this.endpoint(config.value).activity();
-    const gpuUtil = (await this.deps.rental.show(box.instanceId))?.gpuUtil;
+    const listing = await this.listing(box);
+    const gpuUtil = listing === "unread" ? undefined : listing?.gpuUtil;
+    // The card's reading is the other half of the evidence: vast unreadable, or listing the box
+    // running with no sample (its gpu_util is number | null), leaves a busy card looking like an
+    // idle one. Only a box it lists as not running, or no longer lists, needs no reading.
+    const cardUnread =
+      listing === "unread"
+        ? "vast could not be read"
+        : listing?.status === "running" && gpuUtil === undefined
+          ? "vast listed no GPU reading"
+          : undefined;
+    // Neither the server nor the card readable is no evidence at all: `vast bench` stops the
+    // server for its gates, and a market outage over the whole budget would destroy the box
+    // mid-gate. The check counts nothing, the clock keeps its last change, and the run fails, so
+    // the unit's last result (what `vast status` reads) shows a cost control that saw nothing.
+    if (cardUnread && activity.key === "unreachable") {
+      const message =
+        listing === "unread"
+          ? `neither the server nor vast answered: box ${box.instanceId} not counted, its idle clock unchanged`
+          : `the server did not answer and ${cardUnread}: box ${box.instanceId} not counted, its idle clock unchanged`;
+      return fail(ExitCode.Failure, message);
+    }
     const gpuBusy = gpuUtil !== undefined && gpuUtil >= GPU_BUSY_PCT;
     const last = await this.state.idle();
     if (activity.busy > 0 || gpuBusy || activity.key !== last?.key) {
       await this.state.saveIdle({ key: activity.key, ts: now });
       return ok({ action: activity.busy > 0 || gpuBusy ? "active" : "changed" });
     }
+    // an idle server beside an unread card counts nothing either: a busy card is never idle,
+    // whatever the server says
+    if (cardUnread) {
+      const message = `the server is idle but ${cardUnread}: box ${box.instanceId} not counted, its idle clock unchanged`;
+      return fail(ExitCode.Failure, message);
+    }
 
     const idleMinutes = Math.floor((now - last.ts) / 60_000);
     if (idleMinutes < idleBudget(config.value, box)) return ok({ action: "idle", idleMinutes });
+    const card = gpuUtil === undefined ? "no GPU reading" : `GPU ${gpuUtil} %`;
     this.deps.log.info(
-      `idle for ${idleMinutes} min (${activity.key}, GPU ${gpuUtil ?? "unread"} %) — destroying the box`,
+      `idle for ${idleMinutes} min (${activity.key}, ${card}) — destroying the box`,
     );
     const down = await this.down();
     if (!down.ok) return down;
@@ -329,6 +402,7 @@ export class RentGpu {
   /** the head's gates on the box (its one card, the server stopped meanwhile), the run pulled
    *  back, then the live probes through the tunnel */
   async bench(head: Head): Promise<Result<BenchReport>> {
+    if (!this.loaded.ok) return this.loaded;
     const config = await loadVastConfig(this.deps.fs, this.layout);
     if (!config.ok) return config;
     const box = await this.state.box();
@@ -391,6 +465,22 @@ export class RentGpu {
       await this.deps.rental.registerSshKey(pubkey);
       this.deps.log.info(`registered ${pubkeyPath} with vast`);
     }
+    return ok(undefined);
+  }
+
+  /** the tier serve would give the offered card and the cache formats it would run there, refused before the rental:
+   *  on the box they are refused only by serve, after the fetch, the build and the derive, on a card paid by the hour */
+  private servesOn(head: Head, offer: Offer): Result<void> {
+    const tier = pickTier(head, offer.gpuRamMiB);
+    if (!tier.ok)
+      return fail(tier.code, `REFUSING to rent ${offer.gpu}: ${head.name} ${tier.message}`);
+    const draft = tierSpeculates(head, tier.value) ? head.speculative?.cache : undefined;
+    const refusal = cacheRefusal(this.engine, tierCache(head, tier.value), draft);
+    if (refusal)
+      return fail(
+        ExitCode.Unsupported,
+        `REFUSING to rent ${offer.gpu}: on its tier (${tier.value.min_vram_mib} MiB) ${refusal}`,
+      );
     return ok(undefined);
   }
 
@@ -682,13 +772,20 @@ export class RentGpu {
     await this.deps.systemd.restart(IDLE_TIMER);
   }
 
-  /** destroyed and confirmed gone from the listing: a box still listed is still billing */
+  /** destroyed and confirmed gone from the listing, whatever the destroy call answered: a box
+   *  still listed is still billing, and one the market no longer lists (destroyed from vast's
+   *  console, or reclaimed by its host) is gone even when the call refuses it */
   private async destroy(box: BoxState): Promise<Result<{ hours: number; cost: number }>> {
-    await this.deps.rental.destroy(box.instanceId);
+    let refused = "";
+    try {
+      await this.deps.rental.destroy(box.instanceId);
+    } catch (error) {
+      refused = ` (the destroy failed: ${(error as Error).message})`;
+    }
     await this.deps.clock.sleep(5000);
     const stillListed = (await this.deps.rental.list()).some((i) => i.id === box.instanceId);
     if (stillListed) {
-      const message = `box ${box.instanceId} is STILL listed after destroy — it is billing; run: vastai destroy instance ${box.instanceId} -y`;
+      const message = `box ${box.instanceId} is STILL listed after destroy${refused} — it is billing, and its idle timer stays armed; run: vastai destroy instance ${box.instanceId} -y`;
       return fail(ExitCode.Failure, message);
     }
     const hours = billedHours(box, this.deps.clock.now());

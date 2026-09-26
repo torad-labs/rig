@@ -7,6 +7,9 @@ export interface Systemd {
   restart(unit: string): Promise<void>;
   stop(unit: string): Promise<void>;
   isActive(unit: string): Promise<boolean>;
+  /** how the unit's last run ended (systemd's Result: success, exit-code, timeout…); null when
+   *  unreadable */
+  lastResult(unit: string): Promise<string | null>;
   mainPid(unit: string): Promise<number | null>;
   /** whether this user's manager outlives their last session (logind's Linger); null when unreadable */
   linger(): Promise<boolean | null>;

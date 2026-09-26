@@ -63,6 +63,13 @@ describe("LlamaClient: a connection closed before a response", () => {
     expect((await client.chat("2 + 2?", { maxTokens: 8 })).text).toBe("four");
     expect(posts()).toBe(2);
   });
+  test("a chat that resumes from the slot's cache is not repeated: the repeat would resume from the first attempt's cache", async () => {
+    const { client, posts } = server([connectionClosed()]);
+    await expect(client.chat("2 + 2?", { maxTokens: 8, cachePrompt: true })).rejects.toThrow(
+      "connection closed",
+    );
+    expect(posts()).toBe(1);
+  });
   test("any other failure (a timeout) is not repeated", async () => {
     const timeout = new Error("The operation timed out.");
     timeout.name = "TimeoutError";

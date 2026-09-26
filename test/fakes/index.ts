@@ -178,9 +178,19 @@ export class FakeShell implements Shell {
     for (const [re, s] of this.scripts) if (re.test(line)) return s(cmd, opts);
     return { code: 127, stdout: "", stderr: `fake shell: no script for ${line}` };
   }
+  /** how a spawned process ends: at once with this code (a command run to completion, a server
+   *  that dies at load), or only when it is killed (a server that runs until it is stopped) */
+  spawnExit: number | "on-kill" = 0;
   spawn(cmd: readonly string[], opts?: SpawnOptions): Process {
     this.spawned.push({ cmd: [...cmd], ...(opts ? { opts } : {}) });
-    return { pid: 4242 + this.spawned.length, kill: () => {}, exited: Promise.resolve(0) };
+    const pid = 4242 + this.spawned.length;
+    if (this.spawnExit !== "on-kill")
+      return { pid, kill: () => {}, exited: Promise.resolve(this.spawnExit) };
+    let exit: (code: number) => void = () => {};
+    const exited = new Promise<number>((resolve) => {
+      exit = resolve;
+    });
+    return { pid, kill: () => exit(0), exited };
   }
   async which(name: string) {
     return this.tools.has(name) ? `/usr/bin/${name}` : null;
@@ -277,6 +287,11 @@ export class FakeSystemd implements Systemd {
   }
   async isActive(u: string) {
     return this.active.has(u);
+  }
+  /** a unit's last Result; absent reads as success, what systemd reports for a unit that never failed */
+  results = new Map<string, string | null>();
+  async lastResult(u: string) {
+    return this.results.has(u) ? this.results.get(u)! : "success";
   }
   async mainPid(u: string) {
     return this.pids.get(u) ?? null;
@@ -388,6 +403,7 @@ export class FakeRental implements Rental {
       dph: offer?.dph ?? 0,
       sshHost: "ssh5.vast.ai",
       sshPort: 12345,
+      gpuUtil: 0, // vast samples a running box's card; a test drops it to model a box with none
     });
     this.ops.push(`create ${offerId} ${o.image} ${o.diskGb}`);
     return id;

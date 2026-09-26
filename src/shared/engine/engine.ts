@@ -25,6 +25,22 @@ export const EngineSchema = v.strictObject({
     v.array(v.strictObject({ cap, cards: v.string(), evidence: v.string() })),
     v.minLength(1),
   ),
+  // the cache formats the build runs on a CUDA card; serve and the gates refuse a tier that names another.
+  // fa_kv: the K/V type pairs its flash attention runs (with GGML_CUDA_FA_ALL_QUANTS off, cmake-invocation.ts,
+  // the same-type cases of ggml/src/ggml-cuda/fattn.cu at the pin; any other pair runs attention on the CPU).
+  // state: the recurrent state types (-cts) its graph runs, as measured on the pin.
+  caches: v.strictObject({
+    fa_kv: v.pipe(
+      v.array(
+        v.pipe(v.string(), v.regex(/^[a-z0-9_]+\/[a-z0-9_]+$/, "a K/V type pair like q4_0/q4_0")),
+      ),
+      v.minLength(1),
+    ),
+    state: v.pipe(
+      v.array(v.pipe(v.string(), v.regex(/^[a-z0-9_]+$/, "a state type like q8_0"))),
+      v.minLength(1),
+    ),
+  }),
   // nvcc builds that compile the pin's kernels wrong for the listed cards, each with its evidence
   miscompilers: v.optional(
     v.array(
