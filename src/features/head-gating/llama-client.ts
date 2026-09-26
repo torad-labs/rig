@@ -1,5 +1,6 @@
 // The llama-server API a probe speaks, over the Http port: greedy by default (temperature 0,
-// top_k 1, seed 1, prompt cache off) so the same weights give the same tokens.
+// top_k 1, seed 1, prompt cache off unless a probe asks for it) so the same weights give the same
+// tokens.
 import type { Http, HttpResponse } from "../../shared/ports/index.ts";
 import type {
   ChatOptions,
@@ -51,6 +52,7 @@ export class LlamaClient implements HeadClient {
       max_tokens: options.maxTokens,
       chat_template_kwargs: { enable_thinking: options.thinking ?? false },
       ...((options.greedy ?? true) ? GREEDY : {}),
+      ...(options.cachePrompt ? { cache_prompt: true } : {}),
       ...(options.topLogprobs ? { logprobs: true, top_logprobs: options.topLogprobs } : {}),
     };
     const reply = await this.post(

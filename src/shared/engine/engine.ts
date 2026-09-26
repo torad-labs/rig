@@ -25,6 +25,19 @@ export const EngineSchema = v.strictObject({
     v.array(v.strictObject({ cap, cards: v.string(), evidence: v.string() })),
     v.minLength(1),
   ),
+  // nvcc builds that compile the pin's kernels wrong for the listed cards, each with its evidence
+  miscompilers: v.optional(
+    v.array(
+      v.strictObject({
+        nvcc: v.pipe(
+          v.string(),
+          v.regex(/^\d+\.\d+\.\d+$/, "an nvcc version as --version prints it, like 13.2.78"),
+        ),
+        caps: v.pipe(v.array(cap), v.minLength(1)),
+        why: v.pipe(v.string(), v.minLength(1)),
+      }),
+    ),
+  ),
   // The CUDA runtime every build links, as NVIDIA publishes it for redistribution: a prebuilt
   // engine carries its own copy of these libraries, so a machine needs only the driver.
   cuda: v.optional(
@@ -86,6 +99,17 @@ export function prebuiltSkip(entry: Prebuilt, glibc: string | null): string | un
   const [floorMajor = 0, floorMinor = 0] = entry.glibc.split(".").map(Number);
   const below = major < floorMajor || (major === floorMajor && minor < floorMinor);
   return below ? `glibc ${glibc} on this machine; ${floor}` : undefined;
+}
+
+/** why `nvcc` (its version as --version prints it, 13.2.78) must not compile the engine for the
+ *  card `cap`, from engine.toml's [[miscompilers]]; undefined when nothing is known against it */
+export function miscompiles(
+  engine: Pick<EngineConfig, "miscompilers">,
+  nvcc: string | null,
+  cap: string,
+): string | undefined {
+  const entry = engine.miscompilers?.find((m) => m.nvcc === nvcc && m.caps.includes(cap));
+  return entry && `nvcc ${entry.nvcc} compiles this engine wrong for sm_${cap}: ${entry.why}`;
 }
 
 /** the name a packed build of this commit for this card carries, cached or published */

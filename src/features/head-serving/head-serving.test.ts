@@ -48,6 +48,26 @@ describe("argv", () => {
       LD_LIBRARY_PATH: `${root}/local/engine-builds/${engine.sha7}-sm120`,
     });
   });
+  test("--slots 1 on the 5080 tier is one slot with the model's window, not the tier's shared pool", async () => {
+    const { head, uc } = await setup();
+    const r = await uc.plan(head, { gpu: 0, cacheRam: 8192, slots: 1 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toMatchObject({ slots: 1, ctx: head.context.model });
+    const c = r.value.argv.indexOf("-c");
+    expect(r.value.argv.slice(c, c + 4)).toEqual(["-c", String(head.context.model), "-np", "1"]);
+  });
+  test("--slots below the tier's shares the tier's pool; a count the tier cannot hold is refused", async () => {
+    const { head, uc } = await setup();
+    const two = await uc.plan(head, { gpu: 0, cacheRam: 8192, slots: 2 });
+    expect(two.ok && two.value).toMatchObject({ slots: 2, ctx: 294912 });
+    for (const slots of [0, 5]) {
+      const r = await uc.plan(head, { gpu: 0, cacheRam: 8192, slots });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.message).toContain(`REFUSING: ${slots} slots`);
+    }
+  });
   test("the in-pack MTP head's flags sit after the runtime args and before the geometry, on every tier", async () => {
     const { p, head, uc } = await setup();
     p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 });

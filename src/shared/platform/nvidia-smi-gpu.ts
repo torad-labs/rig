@@ -42,11 +42,17 @@ export class NvidiaSmiGpu implements Gpu {
     const result = await this.shell.run(["nvidia-smi", "-q"], { timeoutMs: 15_000 });
     return result.stdout.match(/^CUDA Version\s*:\s*([\d.]+)/m)?.[1] ?? null;
   }
-  /** The toolkit release, asked of the compiler with --version: a version query, never a compile. */
-  async toolkitCuda(): Promise<string | null> {
-    const compiler = "nv" + "cc";
-    if (!(await this.shell.which(compiler))) return null;
-    const result = await this.shell.run([compiler, "--version"], { timeoutMs: 15_000 });
-    return result.stdout.match(/release ([\d.]+)/)?.[1] ?? null;
+  /** The compiler's version, asked with --version: a version query, never a compile. Its build
+   *  number tells CUDA 13.2.1's compiler (V13.2.78) from 13.2.2's (V13.2.86); "release 13.2" does not. */
+  async toolkitCuda(compiler?: string): Promise<string | null> {
+    const nvcc = compiler ?? "nv" + "cc";
+    if (!compiler && !(await this.shell.which(nvcc))) return null;
+    const result = await this.shell.run([nvcc, "--version"], { timeoutMs: 15_000 });
+    if (result.code !== 0) return null;
+    return (
+      result.stdout.match(/, V(\d+\.\d+\.\d+)/)?.[1] ??
+      result.stdout.match(/release (\d+\.\d+)/)?.[1] ??
+      null
+    );
   }
 }

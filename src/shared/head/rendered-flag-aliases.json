@@ -1,5 +1,5 @@
 {
-  "engine": "3c7e643262468316e0ba04b70293c7b1a912c4f5",
+  "engine": "c1518d4cd04217e63a31fbdd3791e07c92b2a45b",
   "aliases": {
     "-m": ["--model", "-m"],
     "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],

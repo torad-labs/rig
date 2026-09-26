@@ -1,9 +1,27 @@
-import { promises as fsp } from "node:fs";
+import { readdirSync, readlinkSync } from "node:fs";
 import os from "node:os";
 import type { Host, Shell } from "../ports/index.ts";
 
 /** a LISTEN row in /proc/net/tcp{,6}: `sl local_address rem_address st … inode`, the port in hex */
 const LISTEN = "0A";
+
+/** a process's fds; none once it has exited or where it is another user's */
+function fdsOf(pid: string) {
+  try {
+    return readdirSync(`/proc/${pid}/fd`);
+  } catch {
+    return [];
+  }
+}
+
+/** where an fd links; "" once it has closed */
+function linkOf(path: string) {
+  try {
+    return readlinkSync(path);
+  } catch {
+    return "";
+  }
+}
 
 export class BunHost implements Host {
   constructor(private readonly shell: Shell) {}
@@ -24,11 +42,12 @@ export class BunHost implements Host {
       }
     }
     if (inodes.size === 0) return null;
-    for (const pid of await fsp.readdir("/proc")) {
+    // a direct syscall per fd, not an await: beside a VM's file daemon (virtiofsd holds an fd per
+    // inode it shares, 403,029 here) the awaited walk took 3.3 s a call and this one 0.9 s
+    for (const pid of readdirSync("/proc")) {
       if (!/^\d+$/.test(pid)) continue;
-      const fds = await fsp.readdir(`/proc/${pid}/fd`).catch(() => [] as string[]);
-      for (const fd of fds) {
-        const target = await fsp.readlink(`/proc/${pid}/fd/${fd}`).catch(() => "");
+      for (const fd of fdsOf(pid)) {
+        const target = linkOf(`/proc/${pid}/fd/${fd}`);
         if (inodes.has(/^socket:\[(\d+)\]$/.exec(target)?.[1] ?? "")) return Number(pid);
       }
     }

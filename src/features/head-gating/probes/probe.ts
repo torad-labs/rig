@@ -23,6 +23,8 @@ export interface ProbeContext {
   live: HeadClient | null;
   binDir: string;
   gpu: number;
+  /** the gate card's compute capability (120 for sm_120), "" when no probe runs on a card */
+  cap: string;
   fs: FileSystem;
   shell: Shell;
   log: Log;

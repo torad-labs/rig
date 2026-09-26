@@ -97,16 +97,66 @@ repeats = 3
 chars = 3145728
 
 # 7. Needle at depth on the served pack with the head's KV settings: the cache type is the one
-#    knob that trades memory for accuracy silently, and this measures the thing it endangers.
+#    knob that trades memory for accuracy silently, and this measures the thing it endangers. At
+#    the depth the head is used: one slot's window is the model's 262,144, and a coding agent
+#    fills it past 245,760 (splice's limit); 120,000 in 131,072 until 2026-09-25.
 [needle]
-tokens = 120000
-ctx = 131072
+tokens = 245000
+ctx = 262144
 needles = [
   { depth = 0.08, secret = "PLUM-4417-KESTREL", question = "the emergency rollback code" },
   { depth = 0.55, secret = "AMBER-9032-HERON", question = "the staging failover code" },
 ]
 
-# 8. Against the LIVE head (`rig gate <head> --live`): four concurrent long-context sessions in
+# 8. Decode at that depth: the served pack with its draft and without, one slot each, the corpus
+#    grown to `tokens` and each question asked of it, greedy with thinking on (the first pays the
+#    prefill, the others resume from the slot's checkpoint). There a step reads ~4.5 GB of KV
+#    beside ~6.8 GB of weights and each draft step reads the draft head's own KV, so the draft
+#    must pay off where the head is used, not only on the short prompts of [speculative].
+[longctx]
+tokens = 245760
+ctx = 262144
+max_tokens = 512
+questions = [
+  "Explain how one decode step flows through the code above, from the server's request handler to the kernels, naming each function on the path.",
+  "Find the three places in the code above most likely to limit decode speed at a very long context, and explain why for each one.",
+  "Which parts of the code above store the KV cache, and how is one sequence's history written and read back?",
+  "Write a test plan for the speculative decoding path in the code above: what to check, where its invariants live, and which inputs would break them.",
+]
+min_gain = 1.0    # drafted tok/s over plain at this depth
+
+# 9. The kernels one decode step launches (census-probe.ts), run first: llama-bench on the served
+#    pack at 1 row, depth 0, `gen` tokens, under nsys with each CUDA graph node traced; the step's
+#    launches by kernel must equal the card's table exactly, a kernel only one side has included.
+#    A fold that silently stops firing moves a count where a throughput A/B sees nothing: fork #51
+#    left the conv-state fold on 1 of 48 Gated DeltaNet layers and no gate failed. The table is the
+#    pin's, and moves with it. sm120: the pin c1518d4, RTX 5090, 6 of 7 replays (the 7th, another
+#    graph, adds 96 scale_f32_vec4); 1,160 launches per step, 257 of them quantize_q8_1 before as
+#    many PQ2_0 matmuls (2026-09-26). Against fork 7a46d1860 with #58 on a 5070 Ti (2026-09-25) only
+#    cpy_scalar moved, 64 -> 0: engine-9 reads the attention gate and the Gated DeltaNet output in
+#    place (31164d6c9, 55d977423). The other 17 counts are the same on the two cards.
+[census]
+gen = 8
+[census.kernels.sm120]
+quantize_q8_1 = 257
+mmvq_pq2_mma = 193
+fwht_cuda_block = 131
+rms_norm_fwht_cuda = 127
+fwht_cuda = 64
+mmvq_pq2_mma_group = 64
+gated_delta_net_cuda = 48
+mul_mat_vec_f = 48
+rms_norm_mul_gate_f32 = 48
+ssm_conv_state_update_f32 = 48
+rms_norm_f32 = 34
+k_set_rows_quant = 32
+rope_multi = 32
+flash_attn_ext_vec = 16
+unary_gated_op_kernel = 16
+k_bin_bcast = 1
+k_get_rows_float = 1
+
+# 10. Against the LIVE head (`rig gate <head> --live`): four concurrent long-context sessions in
 #    the shared KV pool, each must return its own marker and no other; and aggregate throughput
 #    at M = 1, 2, 4 — a server that gains nothing at M=4 is not batching.
 [sessions]

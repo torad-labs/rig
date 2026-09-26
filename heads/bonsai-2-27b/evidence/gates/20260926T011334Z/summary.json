@@ -1,0 +1,17 @@
+{
+  "head": "bonsai-2-27b",
+  "engine": "3c7e643",
+  "served": "0e5524befc7cf0c446a2d003bc5c71c39bd4816fdbb49dc38c248eab0e08d4d1",
+  "run": "20260926T011334Z",
+  "dir": "/root/.local/share/rig/local/gate-runs/bonsai-2-27b/20260926T011334Z",
+  "gpu": 0,
+  "probes": [
+    {
+      "name": "needle",
+      "pass": true,
+      "summary": "2/2 needles at 249,655 tokens"
+    }
+  ],
+  "skipped": [],
+  "pass": true
+}

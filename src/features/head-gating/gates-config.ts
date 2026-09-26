@@ -60,6 +60,13 @@ export const GatesSchema = v.strictObject({
       v.minLength(1),
     ),
   }),
+  longctx: v.strictObject({
+    tokens: posInt,
+    ctx: posInt,
+    max_tokens: posInt,
+    questions: prompts,
+    min_gain: v.pipe(v.number(), v.minValue(0)),
+  }),
   sessions: v.strictObject({
     tokens_each: posInt,
     sessions: v.pipe(
@@ -67,6 +74,14 @@ export const GatesSchema = v.strictObject({
         v.strictObject({ name: v.string(), marker: v.string(), depth, question: v.string() }),
       ),
       v.minLength(1),
+    ),
+  }),
+  census: v.strictObject({
+    gen: posInt,
+    // per card: sm120 -> kernel short name -> launches per decode step
+    kernels: v.record(
+      v.pipe(v.string(), v.regex(/^sm\d{2,3}$/, "a card as sm<cap>, like sm120")),
+      v.record(v.string(), posInt),
     ),
   }),
   concurrency: v.strictObject({

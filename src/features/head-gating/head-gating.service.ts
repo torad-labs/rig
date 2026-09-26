@@ -91,6 +91,7 @@ export class RunGates {
       live: live.value,
       binDir: card.value?.binDir ?? "",
       gpu,
+      cap: card.value?.cap ?? "",
       fs: this.deps.fs,
       shell: this.deps.shell,
       log: this.deps.log,

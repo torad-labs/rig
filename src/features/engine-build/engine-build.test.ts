@@ -302,6 +302,42 @@ describe("build", () => {
   });
 });
 
+describe("build, a compiler engine.toml lists as miscompiling", () => {
+  /** configure writes the cache naming the CUDA compiler it found, as cmake does */
+  function configuresWith(p: Awaited<ReturnType<typeof setup>>["p"], nvcc: string) {
+    const tree = `/r/local/engine-build-trees/${engine.sha7}-sm120`;
+    p.shell.on(/^cmake -S/, () => {
+      p.fs.put(
+        `${tree}/CMakeCache.txt`,
+        `CMAKE_HOME_DIRECTORY:INTERNAL=/r/engine/llama.cpp\nCMAKE_CACHEFILE_DIR:INTERNAL=${tree}\nCMAKE_CUDA_COMPILER:FILEPATH=${nvcc}\n`,
+      );
+      return { code: 0, stdout: "configured", stderr: "" };
+    });
+  }
+
+  test("CUDA 13.2.1's nvcc is refused for sm_120 after configure, before anything compiles; the compiler asked is cmake's", async () => {
+    const { p, uc } = await setup();
+    configuresWith(p, "/usr/local/cuda-13.2/bin/nvcc");
+    p.gpu.toolkit = "13.2.78";
+    const r = await uc.run({ gpu: 0 });
+    expect(!r.ok && r.message).toContain("nvcc 13.2.78 compiles this engine wrong for sm_120");
+    expect(!r.ok && r.message).toContain("(the compiler cmake configured)");
+    expect(p.gpu.toolkitAsked).toEqual(["/usr/local/cuda-13.2/bin/nvcc"]);
+    expect(p.shell.calls.some((c) => c.includes("--build"))).toBe(false);
+    expect(await p.fs.exists(`/r/local/engine-builds/${engine.sha7}-sm120`)).toBe(false);
+  });
+  test("13.2.2's nvcc builds for sm_120, and 13.2.1's builds for a card it is not known to miscompile", async () => {
+    const fixed = await setup();
+    configuresWith(fixed.p, "/usr/local/cuda-13.2/bin/nvcc");
+    fixed.p.gpu.toolkit = "13.2.86";
+    expect((await fixed.uc.run({ gpu: 0 })).ok).toBe(true);
+    const h100 = await setup();
+    h100.p.gpu.card(0, { computeCap: "90" });
+    h100.p.gpu.toolkit = "13.2.78";
+    expect((await h100.uc.run({ gpu: 0 })).ok).toBe(true);
+  });
+});
+
 describe("build, a card with a published prebuilt", () => {
   const sha = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
   const tarballName = `engine-sm120-${engine.sha7}.tar.gz`;

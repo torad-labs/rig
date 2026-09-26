@@ -1,7 +1,8 @@
 // The questions a machine must answer before anything is downloaded or built, each with its own
 // exit code so a caller can say the right thing: a tool is missing (1); the card is not one the
 // engine's kernels are measured on (3); the driver cannot run the toolkit that would build them
-// (4) — SASS is embedded for the card, so a too-old driver fails at load, after a 15-minute build.
+// (4) — SASS is embedded for the card, so a too-old driver fails at load, after a 15-minute build;
+// the compiler is one engine.toml's [[miscompilers]] knows to build the kernels wrong for the card (1).
 // The card check lives here and not only in build so an unsupported card is refused before the
 // 7.2 GB fetch. On a root box with apt (a rented instance) the tools are installed first; on a
 // workstation they are only checked — a setup that apt-installs uninvited is the wrong kind of helpful.
@@ -10,7 +11,7 @@
 // on a machine whose glibc is older than the build's floor the card compiles, and says why.
 
 import { stagingPath } from "../../shared/artifact.ts";
-import { type Engine, isBuilt, prebuiltSkip } from "../../shared/engine/engine.ts";
+import { type Engine, isBuilt, miscompiles, prebuiltSkip } from "../../shared/engine/engine.ts";
 import type { Head } from "../../shared/head/head.ts";
 import { deriveAsset, draftSidecar, type Tier } from "../../shared/head/head-config.ts";
 import { headVramMiB, pickTier } from "../../shared/head/tier.ts";
@@ -118,6 +119,10 @@ export class CheckMachine {
         : `the driver supports CUDA ${driverCuda} but the toolkit is ${runtimeCuda}: a build would load-fail on this driver; upgrade the driver or install a ${major(driverCuda)}.x toolkit`;
       return fail(ExitCode.Driver, message);
     }
+    const miscompiled = prebuilt
+      ? undefined
+      : miscompiles(this.engine, toolkitCuda, card.computeCap);
+    if (miscompiled) return fail(ExitCode.Failure, miscompiled);
     const skipped = noPrebuilt ? { noPrebuilt } : {};
     return ok({ card, supported, toolkitCuda, driverCuda, installed, prebuilt, ...skipped });
   }

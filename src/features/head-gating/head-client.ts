@@ -3,6 +3,7 @@
 export interface Timings {
   predicted_per_second?: number;
   prompt_per_second?: number;
+  prompt_ms?: number;
   draft_n?: number;
   draft_n_accepted?: number;
 }
@@ -35,6 +36,8 @@ export interface ChatOptions {
   timeoutMs?: number | false;
   /** ask for this many ranked alternatives per generated token */
   topLogprobs?: number;
+  /** resume from the slot's cache: several questions of one long document pay its prefill once */
+  cachePrompt?: boolean;
 }
 export interface CompletionOptions {
   nPredict: number;

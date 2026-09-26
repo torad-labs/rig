@@ -4,7 +4,7 @@ import { loadHead } from "../../shared/head/head.ts";
 import { layoutAt } from "../../shared/layout.ts";
 import { ok } from "../../shared/result.ts";
 import { ManageUnit, type Planner } from "./systemd-unit.service.ts";
-import { cacheRamOf, renderUnit } from "./unit-file.ts";
+import { cacheRamOf, renderUnit, slotsOf } from "./unit-file.ts";
 
 const headToml = await Bun.file(`${import.meta.dir}/../../../heads/bonsai-2-27b/head.toml`).text();
 
@@ -14,16 +14,20 @@ async function setup() {
   p.fs.put("/r/heads/bonsai-2-27b/head.toml", headToml);
   const head = await loadHead(p.fs, layout, "bonsai-2-27b");
   if (!head.ok) throw new Error(head.message);
-  const plans: Array<{ gpu: number; cacheRam?: number | undefined }> = [];
+  const plans: Array<{ gpu: number; cacheRam?: number | undefined; slots?: number | undefined }> =
+    [];
   const planner: Planner = {
     plan: async (_h, o) => {
       plans.push(o);
       const cacheRam = o.cacheRam ?? 15704;
+      const slots = o.slots ?? 4; // the tier's, in this fake
       return ok({
         argv: [
           "/r/local/engine-builds/60feea0-sm120/llama-server",
           "-m",
           "/r/local/packs/x.gguf",
+          "-np",
+          String(slots),
           "--cache-ram",
           String(cacheRam),
           "--chat-template-file",
@@ -34,6 +38,7 @@ async function setup() {
           LD_LIBRARY_PATH: "/r/local/engine-builds/60feea0-sm120",
         },
         cacheRam,
+        slots,
       });
     },
   };
@@ -51,7 +56,7 @@ describe("unit", () => {
       "ExecStartPre=/r/dist/rig verify bonsai-2-27b --gpu 1 --pack /r/local/packs/x.gguf\n",
     );
     expect(r.value.text).toContain(
-      'ExecStart=/r/local/engine-builds/60feea0-sm120/llama-server -m /r/local/packs/x.gguf --cache-ram 8192 --chat-template-file "/r/a b.jinja"\n',
+      'ExecStart=/r/local/engine-builds/60feea0-sm120/llama-server -m /r/local/packs/x.gguf -np 4 --cache-ram 8192 --chat-template-file "/r/a b.jinja"\n',
     );
     expect(r.value.text).toContain(
       "Environment=CUDA_VISIBLE_DEVICES=1\nEnvironment=LD_LIBRARY_PATH=/r/local/engine-builds/60feea0-sm120\n",
@@ -91,6 +96,29 @@ describe("unit", () => {
     await uc.install(head, { gpu: 0 });
     expect(plans.at(-1)).toEqual({ gpu: 0, cacheRam: 8192 }); // kept from the unit on disk
     expect(p.log.lines.some((l) => l.startsWith("warn"))).toBe(false);
+  });
+  test("an operator's --slots is recorded and kept by re-renders; without one the tier decides every time", async () => {
+    const { p, head, uc, plans } = await setup();
+    const path = "/home/u/.config/systemd/user/rig-bonsai-2-27b.service";
+    await uc.install(head, { gpu: 0 });
+    expect(plans.at(-1)?.slots).toBeUndefined(); // the tier's (4 in this fake), not recorded
+    await uc.install(head, { gpu: 0, cacheRam: 8192 });
+    expect(plans.at(-1)?.slots).toBeUndefined(); // a derived -np is never frozen into a choice
+    const r = await uc.install(head, { gpu: 0, cacheRam: 8192, slots: 1 });
+    expect(r.ok && r.value).toMatchObject({ state: "updated", slots: 1 });
+    expect(p.fs.text(path)).toContain(" -np 1 ");
+    await uc.install(head, { gpu: 0 });
+    expect(plans.at(-1)).toEqual({ gpu: 0, cacheRam: 8192, slots: 1 }); // kept from the unit on disk
+    expect(slotsOf(p.fs.text(path) ?? "")).toBe(1);
+    await uc.install(head, { gpu: 0, slots: 0 });
+    expect(plans.at(-1)?.slots).toBeUndefined(); // --slots 0: the tier's again
+    expect(slotsOf(p.fs.text(path) ?? "")).toBeUndefined();
+  });
+  test("slotsOf reads the recorded choice, never a -np the tier put in ExecStart", () => {
+    expect(slotsOf("# --slots 1: the operator's choice\n[Service]\nExecStart=/b/s -np 1\n")).toBe(
+      1,
+    );
+    expect(slotsOf("[Service]\nExecStart=/b/llama-server -m /p.gguf -np 8\n")).toBeUndefined();
   });
   test("an installed unit without --cache-ram falls to the box rule out loud, never silently", async () => {
     const { p, head, uc } = await setup();

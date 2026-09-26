@@ -1,6 +1,6 @@
 {
   "name": "rig",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Builds torad-labs/llama.cpp per GPU and brings model heads up, gated and measured — the local runtime behind splice's OpenAI-compatible provider rows",
   "private": true,
   "type": "module",

@@ -191,7 +191,8 @@ tok/s per request with the leg order cancelled (`local/research/mtp-draft-vocab-
 
 `rig gate bonsai-2-27b` on the RTX 5070 Ti that drives this box's display, engine 3c7e643, n_max 3 with the draft
 vocabulary (runs in `local/gate-runs/bonsai-2-27b/`: refusal and fluency `20260925T181142Z`, humaneval
-`20260925T182225Z` and `20260925T182716Z`, decode and speculative `20260925T183214Z`, needle `20260925T183748Z`):
+`20260925T182225Z` and `20260925T182716Z`, decode and speculative `20260925T183214Z`, needle `20260925T183748Z`,
+depth `20260925T184041Z`):
 - refusal: base 6/6 → served 0/6, capability 5/5 byte-identical;
 - fluency: doubled 2 → 2, repeats 2 → 2 over 1,800 tokens;
 - HumanEval pass@1: base 113 → served 112 (six lost, five gained, sign test p 0.500), and on a second run of the same
@@ -200,7 +201,9 @@ vocabulary (runs in `local/gate-runs/bonsai-2-27b/`: refusal and fluency `202609
 - speculative: plain 71.2 → drafted 153.9 tok/s (×2.16), 58 % of 836 drafted tokens accepted; the three answers
   diverge from the plain leg at near-ties of 0.069, 0.043 and 0.029 nats (tie ≤ 0.15). At n_max 2 without the
   vocabulary on engine 514c53c the same probe read 75.9 → 103.4 tok/s (×1.36);
-- needle: 2/2 retrieved (depth 8 % and 55 %) in a 128,641-token haystack at `-c 131072`, 113.4 s.
+- needle: 2/2 retrieved (depth 8 % and 55 %) in a 128,641-token haystack at `-c 131072`, 113.4 s;
+- depth matrix (llama-bench, fa on, q4_0 K/V, 3 repeats): pp512 1,447 / 1,151 / 1,297 / 886 / 558 and tg64 76.6 /
+  74.9 / 65.1 / 58.3 / 46.8 tok/s at 0 / 16K / 64K / 128K / 256K.
 
 HumanEval's rule was served ≥ base until this run. On one build the first run failed it and the second passed it: the
 leg runs on four slots, how requests share a batch changes the numerics, and 16 of the 164 base programs differed
@@ -213,6 +216,86 @@ the host's memory defense stopped the gate's build scope, once earlyoom took the
 engine's default 8 GiB host prompt cache, which no gate request reads (they send `cache_prompt: false`), and held
 5.2 GB of host memory after 48 requests; with `--cache-ram 0`, which gate servers now pass, it held 0.9 GB at the
 same point and 985 MiB at its peak.
+
+The depth matrix reads under 514c53c's (tg64 78.2 / 76.1 / 69.3 / 61.3 / 51.0 on 2026-09-21), by 2 % at depth 0 and 8 %
+at 256K. That is not the engine. Run on this card in one session, each engine forward and then in reverse
+(`local/research/engine-timeline-2026-09-25/`), 514c53c built from a clean tree with rig's flags reads tg64 68.0 / 58.8 /
+54.0 tok/s at 0 / 64K / 128K, c008fe8 (rig 0.1.1 to 0.1.6) 70.4 / 61.6 / 55.0 and 3c7e643 78.1 / 68.2 / 59.1: +14.9 %,
++16.0 % and +9.4 % over 514c53c. The fork's merges between those two (#5, #7, #8, #9, #10, #13, #24) read 67.8 to 70.2 at
+depth 0 in that session. The 2026-09-21 figures are no reference: today the same code and weights (the 851 tensors
+outside blk.64 are byte-identical in that run's pack and this one) under the same caps (power-budget's 4.6 GHz CPU and
+250 W on this card, reached in both runs) read 12 to 15 % under them, and that run's binary is gone, built before rig
+refused a dirty engine source (7cca429). Across sessions on this card one binary moves by up to 8 %: #10's build read
+75.2 at depth 0 in its 2026-09-23 gate and 69.5 today. On the same card, interleaved against rig 0.1.6's engine c008fe8
+at a load falling from 29 to 9 (`local/research/depth-ab-2026-09-25/`), 3c7e643 is the faster at every depth:
+- llama-bench, legs A B C C B A, C being 3c7e643 with #33's 16-cell mask scan switched back
+  (`LLAMA_KQ_MASK_SCAN_LEGACY=1`), 6 samples a state: tg64 69.2 → 75.7 tok/s at 0 (+9.3 %), 59.3 → 64.8 at 64K
+  (+9.4 %), 55.4 → 57.4 at 128K (+3.6 %); pp16384 1,720 → 1,748 (+1.7 %). The switch reads within noise of the
+  shipped build at the same host load.
+- served, llama-server with rig 0.1.7's argv and no draft (the bit-packed mask, which llama-bench does not run), one
+  greedy request of 128 tokens after 65,536 and one after 131,072 prompt tokens per leg, legs A B B A: decode 58.9 →
+  63.7 tok/s at 64K (+8.1 %) and 52.7 → 58.0 at 128K (+10.2 %); prompt 1,430 → 1,401 tok/s at 64K (−2.1 %) and
+  1,162 → 1,171 at 128K (+0.8 %).
+
+### The needle at the depth the head is used (2026-09-26)
+
+No gate had looked past 129,326 tokens, while a coding agent fills one slot's 262,144-token window past 245,760.
+`rig gate bonsai-2-27b --only needle` with `[needle]` at 245,000 tokens in 262,144 (`gates.toml`), on a rented RTX
+5080 with rig 0.1.7's published engine (3c7e643, the sm_120 tarball) and the public r2 pack (`0e5524be…`), one slot at
+`-c 262144`: 2/2 retrieved (depth 8 % and 55 %) in a 249,655-token haystack, 195.6 s
+(`evidence/gates/20260926T011334Z/`).
+
+## The pool's far end (engine c1518d4, 2026-09-26)
+
+On the evening of 2026-09-25 the operator's head on an RTX 5090 (rig 0.1.7: eight slots over one unified pool of
+786,432 cells, n_max 3 with the draft vocabulary, idle slots kept in the pool) slowed as the day's conversations filled
+the pool. The same argv on a rented RTX 5090 (`local/research/evening-2026-09-26/ev1-5090`): three conversations of
+178,000 tokens go first, then a 245,760-token prompt asks four questions (512 tokens each, temperature 1.0, seeded), and
+conversation 1 returns; each leg is a fresh server. A is the prompt alone, in the pool's first cells; K is the evening
+with idle slots kept as rig serves them (`--no-cache-idle-slots --cache-ram 0`), which puts the prompt in the last cells:
+
+| engine | leg | cold prefill | per draft round | decode | the three conversations' prefill |
+|---|---|---|---|---|---|
+| 3c7e643 (rig 0.1.7) | A | 117.3 s | 14.75 ms | 159.1 tok/s | |
+| 3c7e643 (rig 0.1.7) | K | 364.7 s | 22.31 ms | 99.6 tok/s | 72.8 / 132.4 / 192.3 s |
+| c1518d4 | A | 115.2 s | 13.15 ms | 162.9 tok/s | |
+| c1518d4 | K | 116.8 s | 13.32 ms | 165.2 tok/s | 71.7 / 71.9 / 72.1 s |
+
+At 3c7e643 flash attention's stream-k divided the pool's whole span among its blocks (`ntiles_KV` over `K->ne[1]` in
+`fattn-common.cuh`) while the fork's range pre-pass (#30) held each Q tile to its own cells, so for a sequence in the
+pool's last third about 31 % of the blocks had work, and prefill ran no pre-pass. The fork's #63 (engine-8, with
+engine-9's fixup) splits only the KV steps each Q tile sees. c008fe8 (rig 0.1.6) pays the same at the far end, one slot
+plain (`local/research/highidx-2026-09-26`): 360.3 s and 53.7 tok/s against 113.1 s and 86.5 tok/s in the first cells.
+The evening's slowdown was the pool filling, not that day's deploy.
+
+The pool's last cells also move the greedy text, on both engines at the same positions (tokens 59, 61, 35 and 112 of
+four 384-token answers, one slot, plain): 3c7e643's first differences are 4 at a tie (≤ 0.15 nats) and none beyond,
+c008fe8's 2 at a tie and 2 beyond (0.184 and 0.188 nats); over the agreeing tokens |Δ logprob| p99 is 0.120 and 0.126.
+That is attention over a longer, differently placed span, not a defect of either engine.
+
+Caching idle slots in host memory instead (`--cache-idle-slots --cache-ram 30899`, the engine's default) also keeps the
+pool compact: on 3c7e643 the prompt took 117.2 s at 14.75 ms a round and the three conversations 72.7 s each. A
+conversation then returns through host memory (`ev2-5090`). Named by its slot (id_slot 1) it was processed again from
+its start on both engines, 76.4 s on 3c7e643 and 74.1 s on c1518d4 to the first token, against 1.1 and 0.4 s with the
+slots kept: the engine never loaded a cleared slot a request named (the fork's fix is 07e92c710 on train/engine-10).
+With no slot named it was loaded: the first token after 5.33 s on 3c7e643 and 3.50 s on c1518d4, then 124.7 and 198.2
+tok/s. rig
+keeps `--no-cache-idle-slots`: the pool holds a returning conversation, and on c1518d4 a full pool costs 1.3 % a round.
+
+`--backend-sampling` (the target sampled on the GPU) read +0.3 % a round at temperature 1.0 with the same acceptance,
+and +0.44 % greedy on a 5080: rig does not pass it.
+
+Gates on the prebuilt rig installs (`local/research/prebuilt-engine9-2026-09-26`). On a rented RTX 5080 the release
+tarball ran against rig 0.1.7's (engine-3c7e643's release asset), each with NVIDIA's pinned runtime, on the public r2
+pack. One slot at 262,144, the 245,760-token prompt's four questions greedy with top-5 log-probabilities: every first
+difference is at a tie (0.011 to 0.137 nats), and |Δ logprob| over the agreeing tokens has p99 0.085 (3c7e643 against
+c008fe8: 0.070). Plain decode there ran 58.6 against 47.3–48.0 tok/s, prefill 186.3 against 189.9 s. The served draft
+against plain on c1518d4: three first differences, each at a tie, and one answer identical for all 384 tokens. A
+conversation swapped out of slot 0 and back at the 5080 tier (4 × 294,912, `--cache-ram 16384`): its first token after
+3.21 and 3.17 s, the same answer in both legs. `rig gate --only census` on an RTX 5090: 1,160 launches a step against
+the table's 1,224, `cpy_scalar` 64 → 0 alone (`gates.toml`), and the new table passes on the same capture. The
+driver-only e2e on Ubuntu 22.04 (RTX 5090, driver 610.57.04): installed, the runtime resolved from the build directory,
+tg128 161.1 tok/s.
 
 ## Draft head retrained (MTP r2, 2026-09-24)
 
@@ -508,3 +591,27 @@ the stack carries five layers instead of six. Mechanism check on a small Qwen3.5
 409 capture lines, 0 mismatches, worst probability delta 0.0; the 95ec4f3 build passes that small
 check too, because the drift only appears in verify batches (the stacked column count crosses the
 kernel boundary there), which is why the head's own captures are the check that can fail.
+
+## Tensor parallelism over PCIe (2026-09-21)
+
+Measured on a rented 4× RTX 5090 box (vast 51849679, Jiangsu, PCIe gen4 x16, no NVLink, `nvidia-smi
+topo -p2p r` "chipset not supported" for every pair, 0.98 h, $1.73). The fork carries upstream's
+real tensor-parallel path (`--split-mode tensor`, meta device + NCCL, PR #19378; the box build links
+NCCL 2.28.3); `-sm row` is the older path and is refused for this pack ("device CUDA0 does not support
+split buffers", src/llama-model.cpp:1095). One card decodes 141.7 tok/s tg128 with f16 KV
+(llama-bench b6f4667); two cards in tensor mode abort at ggml-backend-meta.cpp:1086
+(`split_state.ne[j] % div == 0`) on the reshape of `final_output` [6144,T] → [128,16,3,T]. That
+reshape is `build_lora_mm` (src/llama-graph.cpp:1637): for every Hadamard-folded weight it permutes
+the activation from tiled to grouped head order (`prism.hadamard.gdn_v_grouped`) and applies the
+pack's rotation, which is block-diagonal at `prism.hadamard.block_size` = 1024 on the input axis. A
+split therefore has to land on 1024-feature boundaries, and the FFN down input is 17 blocks, which no
+even 2- or 4-way split respects. Making it work means a block-aware uneven split policy per rotated
+weight plus meta-backend support for the fork's reshape/permute/Hadamard nodes, with a logits-parity
+gate against one card, for a gain the interconnect does not allow: decode is ~7 ms/token for 7.2 GB
+of weights, and tensor mode adds ~2 host-staged all-reduces per layer × 64 layers at 15–30 µs each
+while keeping the launch floor. Upstream's own 2× RTX 4090 numbers (PR #19378) say the same for
+models that fit one card: llama 8B Q4_0 tg128 175 layer vs 102 tensor, gemma4 26B A4B 197 vs 139.
+The community's gains come from models that do not fit one card, from aggregate throughput, or from
+the P2P driver patch, which a rented container cannot install. Decision: more GPUs buy slots and
+windows for this pack, never single-stream speed; the box was replaced by one RTX PRO 6000 (96 GiB,
+the 90000 MiB tier). Brain #720 (2026-05-08) and #1190 carry the research.

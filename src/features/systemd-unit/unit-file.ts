@@ -14,6 +14,9 @@ export interface UnitInputs {
   gpu: number;
   /** how to invoke rig itself, as argv (the compiled binary, or bun + main.ts in a checkout) */
   self: readonly string[];
+  /** the slots the operator chose (`--slots N`), recorded so re-renders keep them; without a
+   *  choice the card's tier decides at every render, as it always has */
+  slots?: number | undefined;
 }
 
 export const unitName = (head: string) => `rig-${head}.service`;
@@ -43,7 +46,7 @@ export function renderUnit(inputs: UnitInputs): string {
   if (pack !== undefined) verify.push("--pack", pack);
   return `# ${inputs.head.title} on llama-server :${inputs.head.port} — rendered by \`rig unit install ${inputs.head.name}\` from
 # heads/${inputs.head.name}/head.toml and this machine (card, RAM). Edit the head or re-run install; never this copy.
-[Unit]
+${inputs.slots === undefined ? "" : `# --slots ${inputs.slots}: the operator's choice, kept by re-renders (--slots 0 gives the choice back to the card's tier)\n`}[Unit]
 Description=${inputs.head.title} llama-server, GPU ${inputs.gpu} (rig head ${inputs.head.name} :${inputs.head.port})
 StartLimitIntervalSec=0
 
@@ -76,6 +79,12 @@ function packPathOf(argv: readonly string[]): string | undefined {
 function quote(text: string): string {
   const needsQuotes = /[\s"'\\]/.test(text);
   return needsQuotes ? `"${text.replace(/[\\"]/g, (char) => `\\${char}`)}"` : text;
+}
+
+/** the slots a rendered unit records as the operator's choice, so a re-render keeps them */
+export function slotsOf(unitText: string): number | undefined {
+  const match = /^# --slots (\d+): /m.exec(unitText);
+  return match ? Number(match[1]) : undefined;
 }
 
 /** the --cache-ram a rendered unit carries, so a re-render on a shared host keeps the host's bound */

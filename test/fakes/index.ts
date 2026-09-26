@@ -241,7 +241,10 @@ export class FakeGpu implements Gpu {
   async driverCuda() {
     return this.driver;
   }
-  async toolkitCuda() {
+  /** the compilers asked for their version, undefined for nvcc on PATH */
+  toolkitAsked: (string | undefined)[] = [];
+  async toolkitCuda(compiler?: string) {
+    this.toolkitAsked.push(compiler);
     return this.toolkit;
   }
 }

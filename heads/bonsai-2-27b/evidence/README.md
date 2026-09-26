@@ -7,6 +7,7 @@ a gitignored `local/` or another machine.
 gates/<run>/         a `rig gate` run's per-probe results and summary.json (local/gate-runs/<head>/<run>/):
                      20260920T082930Z the six gate-card probes, 20260920T085039Z the two --live probes,
                      20260921T014813Z the MTP pack (speculative FAILED byte-identity), 20260921T021949Z the near-tie probe
+                     20260926T011334Z the needle at 249,655 tokens (one slot at -c 262144, a rented 5080)
 spec-bench-local/    the draft-head decode measurements on the 5070 Ti (results.jsonl)
 spec-bench-4x5090/   the same on a rented 4×5090 box (results*.jsonl)
 spec-bench-mtp-5070ti/ the in-pack MTP head against plain on the 5070 Ti (rows from scripts/bench-head.ts)
