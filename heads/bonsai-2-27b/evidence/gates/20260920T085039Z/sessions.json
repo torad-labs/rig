@@ -1,0 +1,33 @@
+{
+  "rows": [
+    {
+      "name": "alpha",
+      "own": true,
+      "foreign": [],
+      "usage": 49561,
+      "answer": "TOPAZ-1187-MARLIN"
+    },
+    {
+      "name": "bravo",
+      "own": true,
+      "foreign": [],
+      "usage": 49608,
+      "answer": "SLATE-6620-OSPREY"
+    },
+    {
+      "name": "charlie",
+      "own": true,
+      "foreign": [],
+      "usage": 50198,
+      "answer": "OCHRE-4903-BISON"
+    },
+    {
+      "name": "delta",
+      "own": true,
+      "foreign": [],
+      "usage": 50075,
+      "answer": "IVORY-2748-MARTEN"
+    }
+  ],
+  "secs": 320.094
+}

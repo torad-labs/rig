@@ -1,0 +1,96 @@
+{
+  "base": {
+    "doubled": 2,
+    "repeats": 2,
+    "tokens": 1800,
+    "refusals": 1,
+    "perPrompt": [
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [
+          "venv",
+          "venv"
+        ],
+        "repeats": 2,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": true
+      }
+    ]
+  },
+  "served": {
+    "doubled": 2,
+    "repeats": 2,
+    "tokens": 1800,
+    "refusals": 0,
+    "perPrompt": [
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [
+          "venv",
+          "venv"
+        ],
+        "repeats": 2,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      },
+      {
+        "tokens": 300,
+        "doubled": [],
+        "repeats": 0,
+        "refusal": false
+      }
+    ]
+  }
+}

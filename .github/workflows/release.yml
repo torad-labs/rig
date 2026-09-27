@@ -1,0 +1,55 @@
+# A release, on a v* tag: rig.yml's checks, then the binary, the engine pin and the heads packed as
+# rig-linux-x64.tar.gz with its sha256, and install.sh beside them (the one-line install fetches
+# releases/latest/download/install.sh). The tag must be package.json's version, which is what
+# `rig --version` prints and what an installer or a proxy compares against.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+          no-cache: true # a release is built from nothing a PR run could have cached
+      - name: the tag is package.json's version
+        run: test "$GITHUB_REF_NAME" = "v$(jq -r .version package.json)"
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun test
+      - run: bun test ./scripts/glm53-vast.test.ts ./scripts/glm53-admission.test.ts
+      - run: bun run build
+      - name: pack
+        run: |
+          mkdir -p stage/rig/engine
+          cp -r dist heads LICENSE README.md stage/rig/
+          cp engine/engine.toml stage/rig/engine/
+          test "$(stage/rig/dist/rig --version)" = "rig ${GITHUB_REF_NAME#v}"
+          tar -C stage --owner=0 --group=0 --numeric-owner -czf rig-linux-x64.tar.gz rig
+          sha256sum rig-linux-x64.tar.gz > rig-linux-x64.tar.gz.sha256
+      # A tag pushed again (a history rewrite moves its commit, never its tree) finds its release
+      # already published: the published assets must then be what this tag builds, byte for byte
+      # (the compiled binary is reproducible at the pinned bun), and nothing is replaced.
+      - name: publish, or check the release the tag already has
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json tagName > /dev/null; then
+            mkdir published
+            gh release download "$GITHUB_REF_NAME" -D published -p 'rig-linux-x64.tar.gz*' -p install.sh
+            (cd published && sha256sum -c rig-linux-x64.tar.gz.sha256)
+            cmp install.sh published/install.sh
+            tar -C published -xzf published/rig-linux-x64.tar.gz
+            diff -r stage/rig published/rig
+            echo "$GITHUB_REF_NAME is already published with this tag's content"
+          else
+            gh release create "$GITHUB_REF_NAME" rig-linux-x64.tar.gz rig-linux-x64.tar.gz.sha256 \
+              install.sh --title "rig $GITHUB_REF_NAME" --generate-notes
+          fi

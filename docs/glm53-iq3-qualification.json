@@ -1,0 +1,55 @@
+{
+  "model": {
+    "repo": "BoldingBuilds/orcarouter_GLM-5.3-Flash-Uncensored-GGUF",
+    "revision": "1bc0afadd92f4ff9fc2b1281a95a7921b058d35d",
+    "source": "orcarouter/GLM-5.3-Flash-Uncensored-FP8",
+    "quantization": "IQ3_XXS",
+    "shards": [
+      {"file": "IQ3_XXS/GLM-5.3-Flash-Uncensored-IQ3_XXS-00001-of-00003.gguf", "bytes": 45672911040, "sha256": "9916f01db53f8a2bfd5db1d6eb8cd48f93ae2b732fe1dfce993450745334cae1"},
+      {"file": "IQ3_XXS/GLM-5.3-Flash-Uncensored-IQ3_XXS-00002-of-00003.gguf", "bytes": 45407495392, "sha256": "139f2ea5e2d1bb847cd21c5d5122e3a838fde7b5ae2895c6e2623ff318519a00"},
+      {"file": "IQ3_XXS/GLM-5.3-Flash-Uncensored-IQ3_XXS-00003-of-00003.gguf", "bytes": 43225116416, "sha256": "b94bcd70929d7f4445d3acb6490a801511452214c8cf633fa2d912bef89f2188"}
+    ]
+  },
+  "engine": {
+    "repo": "torad-labs/llama.cpp",
+    "sha": "a29b719559cd9f847114668e68a0e6b6a7dcded0",
+    "release": "engine-a29b719",
+    "archive_sha256": "6ebe2ed77cbbb92cf0a37381aad12b75226439a63b7404d9633b95e5b234cd42",
+    "server_sha256": "e7d8d603723aaa6f50c8447a1c91c1802409c0cf3d0a5fd830a28251f2ac5bb2",
+    "chat_template_sha256": "a4fddbbf0b432101a296c17094f8bc5a2b0d30713b5b5cd92f86be78511aa724"
+  },
+  "hardware": {"gpu": "RTX PRO 6000 Blackwell Workstation Edition", "count": 2, "vram_mib_each": 97887, "driver": "615.71.09", "power_limit_watts_each": 500},
+  "serving": {"model_alias": "GLM-5.3-Flash-Uncensored-IQ3_XXS", "context": 524288, "slots": 1, "split_mode": "layer", "tensor_split": "1/1", "flash_attention": true, "cache_k": "f16", "cache_v": "f16", "batch": 4096, "ubatch": 512, "speculation": "draft-mtp", "draft_tokens": 2, "host": "127.0.0.1"},
+  "tuning": {
+    "protocol": "A/B/A, three uncached requests per profile, temperature 0, seed 1, 14029 prompt tokens and 1024 generated tokens; medians from server timings",
+    "baseline_ub512": {"prompt_tokens_per_second": 1862.8459888858642, "generation_tokens_per_second": 85.37565161526477},
+    "rejected_ub128": {"prompt_tokens_per_second": 1100.7201718093238, "generation_tokens_per_second": 86.41715732830588},
+    "retained_ub512": {"prompt_tokens_per_second": 1869.5100881450885, "generation_tokens_per_second": 84.83214513046902},
+    "decision": "Retain ub512: substantially faster prefill with comparable generation throughput. Other flags unchanged."
+  },
+  "acceptance": {
+    "verified_at": "Sep 26, 2026, 6:56 PM CT",
+    "final_runtime": "pass",
+    "cold_probe_command": "bun scripts/glm53-verify.ts",
+    "short_answer": "READY",
+    "nonstream_tool_call": {"name": "emit_status", "arguments": {"status": "READY", "count": 7}},
+    "stream_tool_call": {"pass": true, "chunks": 8, "roundtrip_answer": "7"},
+    "cold_long_context": {
+      "prompt_tokens": 436077,
+      "cached_tokens": 0,
+      "completion_tokens": 99,
+      "question": "What are the east and west station codes? Answer with only the two codes.",
+      "expected": ["RIDGE-4267", "BIRCH-8314"],
+      "answer": "RIDGE-4267, BIRCH-8314",
+      "prompt_tokens_per_second": 612.9969825027194,
+      "generation_tokens_per_second": 34.58539522283935,
+      "wall_seconds": 714.986056211
+    },
+    "same_prompt_cached": {"prompt_tokens": 436077, "cached_tokens": 436073, "new_prompt_tokens": 4, "answer": "RIDGE-4267, BIRCH-8314", "wall_seconds": 3.60031512},
+    "short_context_generation_tokens_per_second": 94.18172377411854,
+    "bonsai_regression_gate": {"run": "e11-a29b719", "reference": "4283c36", "plain_exact": true, "drafted_exact": true, "without_logprobs_exact": true, "restore_tokens_identical": 128},
+    "cost_control": {"idle_seconds": 600, "active_requests_preserved": true, "admission_drain": true},
+    "claude_launcher": {"command": "claude-glml53", "result": "READY timeout=1860000", "actual_bash_tool_call": true, "turns": 2, "permission_denials": 0, "advertised_context": 524288, "cached_input_tokens": 38288},
+    "scope": "Text, tool calls, one active sequence, and tested context depth. Vision and video were not tested."
+  }
+}

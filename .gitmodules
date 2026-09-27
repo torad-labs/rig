@@ -1,0 +1,4 @@
+[submodule "engine/llama.cpp"]
+	path = engine/llama.cpp
+	url = https://github.com/torad-labs/llama.cpp.git
+	shallow = true
