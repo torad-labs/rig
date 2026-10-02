@@ -1,22 +1,21 @@
 {
   "name": "rig",
-  "version": "0.1.10",
-  "description": "Builds torad-labs/llama.cpp per GPU and brings model heads up, gated and measured — the local runtime behind splice's OpenAI-compatible provider rows",
-  "license": "FSL-1.1-ALv2",
   "private": true,
   "type": "module",
-  "bin": {
-    "rig": "src/main.ts"
+  "description": "Builds torad-labs/llama.cpp per GPU and brings model heads up, gated and measured — the local runtime behind splice's OpenAI-compatible provider rows",
+  "license": "FSL-1.1-ALv2",
+  "workspaces": {
+    "packages": ["apps/*", "packages/*", "tools"],
+    "catalog": {
+      "valibot": "^1.1.0"
+    }
   },
   "scripts": {
-    "rig": "bun run src/main.ts",
+    "rig": "bun run apps/cli/src/main.ts",
     "test": "bun test",
-    "lint": "bunx biome check --error-on-warnings . && bun run scripts/lint-orthogonality.ts && bunx tsc --noEmit",
+    "lint": "bunx biome check --error-on-warnings . && bun run tools/lint-architecture.ts && bunx tsc --noEmit",
     "format": "bunx biome check --write .",
-    "build": "bun build --compile --target=bun-linux-x64 --outfile dist/rig src/main.ts"
-  },
-  "dependencies": {
-    "valibot": "^1.1.0"
+    "build": "bun build --compile --target=bun-linux-x64 --outfile dist/rig apps/cli/src/main.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",

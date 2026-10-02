@@ -13,5 +13,5 @@ submodule, change `engine.toml`, say in its comment which commit changed what a 
 
 **Does not belong here:** a build (`local/engine-builds/<sha7>-sm<cap>/`, published by `rig build`), a
 build tree (`local/engine-build-trees/`), a patch to the fork (that is a commit in torad-labs/llama.cpp and a
-new pin), a per-card argument (that is a head's tier in `heads/<head>/head.toml`), a second
+new pin), a per-card argument (that is a head's profile in `heads/<head>/head.toml`), a second
 engine until the head contract names one.

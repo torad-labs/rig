@@ -191,12 +191,61 @@
 # test-recurrent-rollback-rounding (b9e1b78ec). Its prebuilt against 87a3596's (RTX 5090, the same four questions): the
 # same 1,536 tokens, log-probabilities, top-5 and draft counts plain and drafted, the same without n_probs, the
 # swapped-out conversation token for token, its first token in 1.03 s (gate-engine11.sh e15-b9e1b78, GATE PASS, 2026-09-27).
+# 02512a3 (5 commits past b9e1b78) reuses a decode step's graph wherever the inputs allow: GLM-5.3's pooled indexer
+# input had no reuse check, so every GLM-5.3 step rebuilt its graph (eec6d1d4e, the builder's pool count 7a17ff5c1), and
+# a recurrent input compares rs_z only when a graph baked it (02512a3); LLAMA_GRAPH_INPUT_DEBUG=2 names a refused
+# input and check, and a Release build logs its CUDA-graph refusals (7a17ff5c1, bf76114e9, cc9e415bd). GLM-5.3 IQ3_XXS
+# on 2 x RTX PRO 6000: 101.5 and 108.5 tok/s decode against 87 at b9e1b78, 75.2 with reuse off at the same tokens and
+# top-5; bonsai-2-27b drafted on a 5090: 286 tok/s, 214.6 with reuse off, 287.2 with CUDA graphs off, the same text.
+# Its prebuilt against b9e1b78's (RTX 5090, the same four questions): the same 1,536 tokens, log-probabilities, top-5
+# and draft counts plain and drafted, the same without n_probs, the swapped-out conversation token for token, its first
+# token in 1.01 s (gate-engine11.sh e17-02512a3, GATE PASS, 2026-09-27).
+# 4104c47 (4 commits past 02512a3) streams the PQ2_0 matmuls closer to the card's DRAM rate and says where a decode
+# token's time goes. A PQ2_0 launch's blocks take every gridDim.x-th tile and, once their last weight box has landed,
+# ask L2 for their share of the next PQ2_0 launch's head, sized per launch from the device's profile: 2 us of its DRAM
+# rate, a quarter of its L2 at most (GGML_CUDA_PQ2_PREFETCH_US, 0 off; 16ad036c4). bonsai-2-27b, llama-bench tg64 as
+# served against its parent b2eb433, medians of 20 in rotated order: +2.42 % on a 5080 at depth 16,384 and +2.70 % at
+# 0, +1.56 % and +1.10 % on a 5070 Ti; the greedy text byte-identical; test-backend-ops PQ2_0 296/296 and
+# MUL_MAT_GROUP 24/24 at 0, 8 and 64 us. The device's profile is logged at init, and GGML_CUDA_NVTX=1 puts an NVTX range
+# named with its bytes around each node, which the roofline probe reads (1c83edd3c); llama-bench takes -cts, and f32
+# among its cache types (b2eb4336a, 4104c47d5), so the probes' bench legs run the tier's state. Its prebuilt against
+# 02512a3's (RTX 5090, the same four questions): the same 1,536 tokens, log-probabilities, top-5 and draft counts plain
+# and drafted, the same without n_probs, the swapped-out conversation token for token, its first token in 1.01 s; plain
+# decode on the 245K question 90.9 -> 92.8 tok/s (gate-engine11.sh e19-4104c47, GATE PASS, 2026-09-27).
+# 4b61c54 (6 commits past 4104c47) takes the raw q4_0/q8_0 flash attention's shared memory out of its way at depth
+# (01f4f0fda). At 65,536 cells on a 5080, 3.43M of its 7.36M shared-memory wavefronts were bank conflicts: the V
+# tile's dequant now stores across 8 rows (3.2M -> 0.09M), K*Q reads each block's f16 scale from the raw rows (no float
+# tile: 26,272 bytes a block, 3 blocks an SM for a token), the stream-k fixup loads 8 blocks' partials ahead of its
+# fold, and padding columns write no partial (GGML_CUDA_FATTN_Q4_0_LEGACY=1 / _Q8_0_LEGACY=1 restore the stock
+# kernels). test-backend-ops perf on the served layout, a token: -16.7 / -3.7 / -3.8 / -1.8 % at 16,384 / 65,536 /
+# 131,072 / 245,760 cells. llama-bench takes -rs, the snapshots a draft's rollback keeps (7537f40da), and a tensor
+# split's ratio failure names its node (6b98c5d8e). A token's tile at 3 blocks an SM moves its stream-k split (340 ->
+# 510 ways on a 5090), so its prebuilt against 4104c47's (RTX 5090, the same four questions) is held to engine-10's G1
+# bars, not bit-exactness: plain four first differences, each at a tie, |dlogprob| p99 0.056 and max 0.090; drafted
+# one, p99 0.032, max 0.112; without n_probs the same tokens and drafting; the swapped-out conversation token for token,
+# its first token in 1.03 s; plain decode on the 245K question 91.9 -> 93.7 tok/s (gate-verdict20.py, GATE PASS,
+# 2026-09-27).
+# 32e695e (5 commits past 4b61c54) undoes 4b61c54's regression at depth on a 5090 and trims the multi-slot attention
+# on every card. With more than one slot and --kv-unified the live-tile split took every block the SMs hold: 510 on a
+# 5090 at 3 blocks an SM, 127.5 per KV head, so neighbouring heads read the 64-byte units their K/V rows share at
+# different times and fetched them twice (the cache read 4/3 times: 202-207 MB of DRAM reads for 151 MB of K/V on a
+# 5070 Ti at 131,072 cells). The split now rounds to a multiple of the output tiles (32e695ecf, 508 blocks; 152-153 MB):
+# a token's attention on the 5090 at 131,072 / 245,760 cells 145.50 / 255.48 -> 115.72 / 196.44 us (4104c47: 123.69 /
+# 204.66), the served decode at 245K with 4 slots 98.75 -> 107.92 tok/s plain, 205.43 -> 208.90 drafted
+# (GGML_CUDA_FATTN_LIVE_BLOCKS_ALIGN_LEGACY=1: every block). The tile code is one copy, not one per stream-k role
+# (818965d72), and a graph scans the mask's live steps once, not once a layer (6aa14679c,
+# GGML_CUDA_FATTN_LIVE_SCAN_EACH_LEGACY=1). Pre-sampling probabilities ride the top-k prefilter, their softmax on the
+# backend (f1e45c29c: n_probs 5 on a 5080, plain 95.65 -> 105.14 tok/s, drafted 166.20 -> 192.51). Its prebuilt against
+# 4b61c54's (RTX 5090, the same four questions, one slot) is held to engine-10's G1 bars: plain four first differences,
+# each at a tie, |dlogprob| p99 0.080 and max 0.144; drafted four, each at a tie, p99 0.089, max 0.227; without n_probs
+# the same tokens and drafting; the swapped-out conversation token for token, its first token in 1.08 s; plain decode on
+# the 245K question with n_probs 5 94.3 -> 107.5 tok/s (gate-verdict22.py, GATE PASS, 2026-09-27).
 # ORDER: publish the build (rig build) BEFORE merging a pin move. The unit's ExecStartPre verify refuses
 # to start a head whose pin has no complete build, so a restart in the gap is an outage: 2026-09-21
 # 00:38, four refused starts, 90 s down, while 60493a5-sm120 was still compiling.
 [fork]
 repo = "https://github.com/torad-labs/llama.cpp.git"
-sha = "b9e1b78ecf48e268f1202a53f6826ddcccfd7c84"
+sha = "32e695ecfb38171a71d2a24a236b2a1c683b6ebd"
 base = "prism-b10685-7dffb15"   # PrismML's llama.cpp (ggml-org b10685 + the ternary kernels) this branch sits on
 
 # Compute capabilities with a measured run behind them — anything else is refused by prepare and
@@ -210,7 +259,7 @@ cap = "90"
 cards = "H100 SXM / NVL, H200"
 evidence = "Bonsai-demo runs/2026-09-19/vast-h100-sxm: M=1/2/4 aggregate 50/83/131 tok/s, needle OK"
 
-# The cache formats this build runs on a CUDA card: serve and the gates refuse a tier that names any other.
+# The cache formats this build runs on a CUDA card: serve and the gates refuse a profile that names any other.
 [caches]
 # the K/V cache type pairs its flash attention runs (FA_ALL_QUANTS off: fattn.cu's same-type cases at the pin, and f32
 # through the f16 case, held to the source by a test where it is on the box); any other pair runs attention on the CPU
@@ -258,6 +307,6 @@ libs = ["libcublas.so.13", "libcublasLt.so.13"]
 # sha, so a rebuild of the same commit is a new release, engine-<sha7>-<n>.
 [[prebuilt]]
 cap = "120"
-url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-b9e1b78/engine-sm120-b9e1b78.tar.gz"
-sha256 = "8e1de8e13e68d7d66997baa9c4edba950533de5e7e06031d4b32e0ad4ef37af2"
+url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-32e695e/engine-sm120-32e695e.tar.gz"
+sha256 = "9df73c20b9b70695b2c39fb592aeae7ee1ab6c4af5db134ae16b321e990b1c21"
 glibc = "2.35"                 # scripts/prebuilt/Dockerfile's Ubuntu 22.04; its ELF files need GLIBC_2.34 at most

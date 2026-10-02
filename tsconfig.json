@@ -1,11 +1,11 @@
 {
   "compilerOptions": {
     "target": "ESNext", "module": "ESNext", "moduleResolution": "bundler",
-    "lib": ["ESNext"], "types": ["bun-types"],
+    "lib": ["ESNext"], "types": ["bun"],
     "strict": true, "noUncheckedIndexedAccess": true, "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true, "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true, "noEmit": true, "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src", "test", "scripts"]
+  "include": ["apps/*/src", "packages/*/src", "tools"]
 }

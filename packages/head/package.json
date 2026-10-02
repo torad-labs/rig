@@ -1,0 +1,18 @@
+{
+  "name": "@rig/head",
+  "private": true,
+  "type": "module",
+  "description": "A head as data: head.toml's schema and invariants, profiles and their placement on cards, cache formats, the draft head, and a serving head over http.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "@rig/engine": "workspace:*",
+    "valibot": "catalog:"
+  },
+  "devDependencies": {
+    "@rig/adapters": "workspace:*",
+    "@rig/testing": "workspace:*"
+  }
+}

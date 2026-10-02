@@ -10,6 +10,7 @@ disk_gb = 40
 label = "rig"
 local_port = 8100
 idle_minutes = 45              # a box nobody talks to is destroyed, not left billing overnight
+stopped_hours = 24             # a stopped box of rig's bills its disk: `rig vast sweep` destroys it after this
 remote_dir = "/workspace/rig"
 query = "verified=true rentable=true reliability>0.98 cuda_max_good>=13.0 cpu_ram>=48 inet_down>=200 direct_port_count>=2"
 

@@ -1,0 +1,264 @@
+import { describe, expect, test } from "bun:test";
+import type { Devices } from "@rig/core";
+import { layoutAt, ok } from "@rig/core";
+import { loadHead } from "@rig/head";
+import { fakePorts, repoRoot } from "@rig/testing";
+import { ManageUnit, type Planner } from "./systemd-unit.service.ts";
+import { cacheRamOf, devicesOf, renderUnit, slotsOf } from "./unit-file.ts";
+
+const headToml = await Bun.file(`${repoRoot}/heads/bonsai-2-27b/head.toml`).text();
+
+async function setup() {
+  const p = fakePorts();
+  const layout = layoutAt("/r");
+  p.fs.put("/r/heads/bonsai-2-27b/head.toml", headToml);
+  const head = await loadHead(p.fs, layout, "bonsai-2-27b");
+  if (!head.ok) throw new Error(head.message);
+  const plans: Array<{
+    devices: Devices;
+    cacheRam?: number | undefined;
+    slots?: number | undefined;
+  }> = [];
+  const planner: Planner = {
+    plan: async (_h, o) => {
+      plans.push(o);
+      const cacheRam = o.cacheRam ?? 15704;
+      const slots = o.slots ?? 4; // the profile's, in this fake
+      const gpus = o.devices === "auto" ? [0] : [...o.devices]; // auto takes card 0, in this fake
+      return ok({
+        argv: [
+          "/r/local/engine-builds/60feea0-sm120/llama-server",
+          "-m",
+          "/r/local/packs/x.gguf",
+          "-np",
+          String(slots),
+          "--cache-ram",
+          String(cacheRam),
+          "--chat-template-file",
+          "/r/a b.jinja",
+        ],
+        env: {
+          CUDA_VISIBLE_DEVICES: gpus.join(","),
+          LD_LIBRARY_PATH: "/r/local/engine-builds/60feea0-sm120",
+        },
+        gpus,
+        cacheRam,
+        slots,
+      });
+    },
+  };
+  const uc = new ManageUnit({ ...p, planner, self: ["/r/dist/rig"] }, layout);
+  return { p, head: head.value, uc, plans };
+}
+
+describe("unit", () => {
+  test("renders the plan as ExecStart with verify as ExecStartPre, quoting what needs it", async () => {
+    const { head, uc } = await setup();
+    const r = await uc.render(head, { devices: [1], cacheRam: 8192 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.text).toContain(
+      "ExecStartPre=/r/dist/rig verify bonsai-2-27b --gpu 1 --pack /r/local/packs/x.gguf\n",
+    );
+    expect(r.value.text).toContain(
+      'ExecStart=/r/local/engine-builds/60feea0-sm120/llama-server -m /r/local/packs/x.gguf -np 4 --cache-ram 8192 --chat-template-file "/r/a b.jinja"\n',
+    );
+    expect(r.value.text).toContain(
+      "Environment=CUDA_VISIBLE_DEVICES=1\nEnvironment=LD_LIBRARY_PATH=/r/local/engine-builds/60feea0-sm120\n",
+    );
+    expect(r.value.text).toContain("StandardOutput=append:/r/local/logs/bonsai-2-27b.log\n");
+    expect(r.value.text).toContain("WantedBy=default.target");
+    expect(cacheRamOf(r.value.text)).toBe(8192);
+  });
+  test("install writes, reloads and enables; a re-run with nothing changed is current; a change is backed up with a date", async () => {
+    const { p, head, uc } = await setup();
+    let r = await uc.install(head, { devices: [0], cacheRam: 8192 });
+    expect(r.ok && r.value.state).toBe("installed");
+    expect(p.systemd.ops).toEqual(["daemon-reload", "enable rig-bonsai-2-27b.service"]);
+    expect(p.fs.text("/home/u/.config/systemd/user/rig-bonsai-2-27b.service")).toContain(
+      "--cache-ram 8192",
+    );
+    // replaced by a rename: a reload another process triggers never reads half a unit
+    expect(p.fs.replaced).toEqual(["/home/u/.config/systemd/user/rig-bonsai-2-27b.service"]);
+    r = await uc.install(head, { devices: [0], cacheRam: 8192 });
+    expect(r.ok && r.value.state).toBe("current");
+    expect(p.systemd.ops.length).toBe(2);
+    p.clock.t = Date.UTC(2026, 8, 20, 3, 4, 5);
+    r = await uc.install(head, { devices: [1], cacheRam: 8192 });
+    expect(r.ok && r.value).toMatchObject({
+      state: "updated",
+      backup: "/home/u/.config/systemd/user/rig-bonsai-2-27b.service.20260920T030405Z.bak",
+    });
+    expect(
+      p.fs.text("/home/u/.config/systemd/user/rig-bonsai-2-27b.service.20260920T030405Z.bak"),
+    ).toContain("CUDA_VISIBLE_DEVICES=0");
+  });
+  test("without --cache-ram the installed unit's value is kept; only a fresh install takes the planner's rule", async () => {
+    const { p, head, uc, plans } = await setup();
+    await uc.install(head, { devices: [0] });
+    expect(plans.at(-1)).toEqual({ devices: [0], cacheRam: undefined }); // fresh: the rule (15704 in this fake)
+    await uc.install(head, { devices: [0], cacheRam: 8192 });
+    await uc.install(head, { devices: [0] });
+    expect(plans.at(-1)).toEqual({ devices: [0], cacheRam: 8192 }); // kept from the unit on disk
+    expect(p.log.lines.some((l) => l.startsWith("warn"))).toBe(false);
+  });
+  test("an operator's --slots is recorded and kept by re-renders; without one the profile decides every time", async () => {
+    const { p, head, uc, plans } = await setup();
+    const path = "/home/u/.config/systemd/user/rig-bonsai-2-27b.service";
+    await uc.install(head, { devices: [0] });
+    expect(plans.at(-1)?.slots).toBeUndefined(); // the profile's (4 in this fake), not recorded
+    await uc.install(head, { devices: [0], cacheRam: 8192 });
+    expect(plans.at(-1)?.slots).toBeUndefined(); // a derived -np is never frozen into a choice
+    const r = await uc.install(head, { devices: [0], cacheRam: 8192, slots: 1 });
+    expect(r.ok && r.value).toMatchObject({ state: "updated", slots: 1 });
+    expect(p.fs.text(path)).toContain(" -np 1 ");
+    await uc.install(head, { devices: [0] });
+    expect(plans.at(-1)).toEqual({ devices: [0], cacheRam: 8192, slots: 1 }); // kept from the unit on disk
+    expect(slotsOf(p.fs.text(path) ?? "")).toBe(1);
+    await uc.install(head, { devices: [0], slots: 0 });
+    expect(plans.at(-1)?.slots).toBeUndefined(); // --slots 0: the profile's again
+    expect(slotsOf(p.fs.text(path) ?? "")).toBeUndefined();
+  });
+  test("the cards are kept by re-renders: without --gpu the unit serves where it did, --gpu auto takes them afresh", async () => {
+    const { p, head, uc, plans } = await setup();
+    const path = "/home/u/.config/systemd/user/rig-bonsai-2-27b.service";
+    await uc.install(head, {});
+    expect(plans.at(-1)?.devices).toBe("auto"); // a first install: the cards the head's profile takes
+    expect(p.fs.text(path)).toContain("verify bonsai-2-27b --gpu 0 --pack");
+    const two = await uc.install(head, { devices: [1, 2] });
+    expect(two.ok && two.value.gpus).toEqual([1, 2]);
+    const unit = p.fs.text(path) ?? "";
+    expect(unit).toContain("ExecStartPre=/r/dist/rig verify bonsai-2-27b --gpu 1,2 --pack");
+    expect(unit).toContain("llama-server, GPU 1,2 (rig head");
+    expect(unit).toContain("Environment=CUDA_VISIBLE_DEVICES=1,2");
+    expect(devicesOf(unit)).toEqual([1, 2]);
+    await uc.install(head, {});
+    expect(plans.at(-1)?.devices).toEqual([1, 2]); // kept from the unit on disk
+    expect(await uc.devices(head)).toEqual([1, 2]);
+    await uc.install(head, { devices: "auto" });
+    expect(plans.at(-1)?.devices).toBe("auto");
+    expect(devicesOf(p.fs.text(path) ?? "")).toEqual([0]);
+  });
+  test("slotsOf reads the recorded choice, never a -np the profile put in ExecStart", () => {
+    expect(slotsOf("# --slots 1: the operator's choice\n[Service]\nExecStart=/b/s -np 1\n")).toBe(
+      1,
+    );
+    expect(slotsOf("[Service]\nExecStart=/b/llama-server -m /p.gguf -np 8\n")).toBeUndefined();
+  });
+  test("an installed unit without --cache-ram falls to the box rule out loud, never silently", async () => {
+    const { p, head, uc } = await setup();
+    p.fs.put(
+      "/home/u/.config/systemd/user/rig-bonsai-2-27b.service",
+      "[Service]\nExecStart=/r/llama-server -m /r/x.gguf --port 8099\n",
+    );
+    await uc.install(head, { devices: [0] });
+    expect(p.log.lines.find((l) => l.startsWith("warn"))).toContain(
+      "carries no --cache-ram to keep",
+    );
+  });
+  test("uninstall refuses an active unit (exit 2) and otherwise disables, removes and reloads", async () => {
+    const { p, head, uc } = await setup();
+    await uc.install(head, { devices: [0] });
+    p.systemd.active.add("rig-bonsai-2-27b.service");
+    let r = await uc.uninstall(head);
+    expect(!r.ok && r.code).toBe(2);
+    // the remedy it names is one that exists: `up` has no --stop
+    expect(!r.ok && r.message).toContain("systemctl --user stop rig-bonsai-2-27b.service");
+    expect(!r.ok && r.message).not.toContain("--stop,");
+    p.systemd.active.clear();
+    r = await uc.uninstall(head);
+    expect(r.ok && r.value.removed).toBe(true);
+    expect(await p.fs.exists("/home/u/.config/systemd/user/rig-bonsai-2-27b.service")).toBe(false);
+    expect(p.systemd.ops.slice(-2)).toEqual(["disable rig-bonsai-2-27b.service", "daemon-reload"]);
+  });
+  test("install keeps the head past logout: linger on is left alone, off is turned on, refused or unreadable is named with the command", async () => {
+    const { p, head, uc } = await setup();
+    let r = await uc.install(head, { devices: [0] });
+    expect(r.ok && r.value.linger).toBe(true);
+    expect(p.systemd.ops).not.toContain("enable-linger");
+    // off: turned on, and a re-run with the unit current still checks (a unit installed before this)
+    p.systemd.lingering = false;
+    r = await uc.install(head, { devices: [0] });
+    expect(r.ok && r.value).toMatchObject({ state: "current", linger: true });
+    expect(p.systemd.ops.filter((op) => op === "enable-linger")).toHaveLength(1);
+    expect(p.log.lines.some((l) => l.includes("turned linger on"))).toBe(true);
+    // refused: false, and the warning names the admin's command
+    p.systemd.lingering = false;
+    p.systemd.lingerAllowed = false;
+    r = await uc.install(head, { devices: [1] });
+    expect(r.ok && r.value).toMatchObject({ state: "updated", linger: false });
+    expect(p.log.lines.find((l) => l.startsWith("warn") && l.includes("linger"))).toContain(
+      "sudo loginctl enable-linger",
+    );
+    // unreadable (no logind): null, never a claim either way, and no attempt
+    p.systemd.lingering = null;
+    const before = p.systemd.ops.length;
+    r = await uc.install(head, { devices: [1] });
+    expect(r.ok && r.value.linger).toBeNull();
+    expect(p.systemd.ops.slice(before)).not.toContain("enable-linger");
+  });
+  test("the unit shields the server from the memory killer on the running pid, and does not block the start when the grant is absent", async () => {
+    const { head, uc } = await setup();
+    const r = await uc.render(head, { devices: [0] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // a --user unit cannot LOWER oom_score_adj (systemd clamps it silently at the inherited
+    // +200), so the pin goes through the choom grant on $MAINPID; "-" keeps a box without the
+    // grant starting normally
+    expect(r.value.text).toContain(
+      "ExecStartPost=-/usr/bin/sudo -n /usr/bin/choom -p $MAINPID -n -800\n",
+    );
+    expect(r.value.text).not.toContain("OOMScoreAdjust");
+  });
+  test("status reports the RUNNING oom_score_adj, never a unit property", async () => {
+    const { p, head, uc } = await setup();
+    await uc.install(head, { devices: [0] });
+    p.systemd.active.add("rig-bonsai-2-27b.service");
+    p.systemd.pids.set("rig-bonsai-2-27b.service", 4242);
+    p.fs.put("/proc/4242/oom_score_adj", "-800\n");
+    expect(await uc.status(head)).toMatchObject({ mainPid: 4242, oomScoreAdj: -800 });
+    p.fs.put("/proc/4242/oom_score_adj", "200\n");
+    expect(await uc.status(head)).toMatchObject({ oomScoreAdj: 200 });
+  });
+  test("status reads the file and systemd", async () => {
+    const { p, head, uc } = await setup();
+    expect(await uc.status(head)).toEqual({
+      unit: "rig-bonsai-2-27b.service",
+      path: "/home/u/.config/systemd/user/rig-bonsai-2-27b.service",
+      installed: false,
+      active: false,
+      mainPid: null,
+    });
+    await uc.install(head, { devices: [0] });
+    p.systemd.active.add("rig-bonsai-2-27b.service");
+    p.systemd.pids.set("rig-bonsai-2-27b.service", 777);
+    expect(await uc.status(head)).toMatchObject({ installed: true, active: true, mainPid: 777 });
+  });
+  test("renderUnit is a pure function of its inputs", () => {
+    const head = { name: "h", title: "H", port: 9 } as Parameters<typeof renderUnit>[0]["head"];
+    const a = renderUnit({
+      head,
+      root: "/r",
+      logPath: "/l",
+      argv: ["x"],
+      env: {},
+      gpus: [0],
+      self: ["rig"],
+    });
+    expect(a).toBe(
+      renderUnit({
+        head,
+        root: "/r",
+        logPath: "/l",
+        argv: ["x"],
+        env: {},
+        gpus: [0],
+        self: ["rig"],
+      }),
+    );
+    expect(a).toContain("ExecStart=x\n");
+    // no -m in argv (this fixture's is bare): ExecStartPre carries no --pack either, old-unit shaped
+    expect(a).toContain("ExecStartPre=rig verify h --gpu 0\n");
+    expect(a).not.toContain("--pack");
+  });
+});

@@ -1,0 +1,17 @@
+{
+  "name": "@rig/serve",
+  "private": true,
+  "type": "module",
+  "description": "A head running on this machine: the serve plan and its checks (serving/), the systemd unit (unit/), the description a proxy reads (describe/), and bring-up (up/).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "@rig/engine": "workspace:*",
+    "@rig/head": "workspace:*"
+  },
+  "devDependencies": {
+    "@rig/testing": "workspace:*"
+  }
+}

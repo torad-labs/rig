@@ -1,0 +1,15 @@
+{
+  "name": "@rig/adapters",
+  "private": true,
+  "type": "module",
+  "description": "The real ports on a Linux machine under Bun: the file system, shell, nvidia-smi, gpu-lease, git, docker, S3, http, ssh, systemd and vast.ai.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@rig/testing": "workspace:*"
+  }
+}

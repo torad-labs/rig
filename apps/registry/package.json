@@ -1,0 +1,9 @@
+{
+  "name": "@rig/registry",
+  "private": true,
+  "type": "module",
+  "description": "rig's image registry: a pull-only OCI distribution Worker over an R2 bucket, behind a pull key.",
+  "exports": {
+    ".": "./src/worker.ts"
+  }
+}

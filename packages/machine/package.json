@@ -1,0 +1,17 @@
+{
+  "name": "@rig/machine",
+  "private": true,
+  "type": "module",
+  "description": "Whether this machine can run the engine and a head: tools, card, driver, VRAM and disk, before anything is fetched or built.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "@rig/engine": "workspace:*",
+    "@rig/head": "workspace:*"
+  },
+  "devDependencies": {
+    "@rig/testing": "workspace:*"
+  }
+}

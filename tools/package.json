@@ -1,0 +1,13 @@
+{
+  "name": "@rig/tools",
+  "private": true,
+  "type": "module",
+  "description": "What a developer of rig runs from the checkout: the architecture lint, the public export, the prebuilt build and its gate.",
+  "dependencies": {
+    "@rig/adapters": "workspace:*",
+    "@rig/core": "workspace:*",
+    "@rig/engine": "workspace:*",
+    "@rig/head": "workspace:*",
+    "@rig/image": "workspace:*"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@rig/image",
+  "private": true,
+  "type": "module",
+  "description": "A head as a container image: built with only the compiled CLI in it, held to the public rules, proven on a card, pushed to rig's registry.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "@rig/engine": "workspace:*",
+    "@rig/head": "workspace:*",
+    "valibot": "catalog:"
+  },
+  "devDependencies": {
+    "@rig/adapters": "workspace:*",
+    "@rig/testing": "workspace:*"
+  }
+}

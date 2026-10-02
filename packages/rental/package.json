@@ -1,0 +1,19 @@
+{
+  "name": "@rig/rental",
+  "private": true,
+  "type": "module",
+  "description": "A rented card as a head: rent, ship, bring up and tunnel; the template a market boots a head's image from; the guard that stops an idle box.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "@rig/engine": "workspace:*",
+    "@rig/head": "workspace:*",
+    "@rig/image": "workspace:*",
+    "valibot": "catalog:"
+  },
+  "devDependencies": {
+    "@rig/testing": "workspace:*"
+  }
+}

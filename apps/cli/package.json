@@ -1,0 +1,25 @@
+{
+  "name": "@rig/cli",
+  "private": true,
+  "type": "module",
+  "description": "The rig binary: one command per verb over the packages, and the composition root that wires them to the real machine.",
+  "version": "0.1.11",
+  "bin": {
+    "rig": "src/main.ts"
+  },
+  "dependencies": {
+    "@rig/adapters": "workspace:*",
+    "@rig/core": "workspace:*",
+    "@rig/engine": "workspace:*",
+    "@rig/gate": "workspace:*",
+    "@rig/head": "workspace:*",
+    "@rig/image": "workspace:*",
+    "@rig/machine": "workspace:*",
+    "@rig/pack": "workspace:*",
+    "@rig/rental": "workspace:*",
+    "@rig/serve": "workspace:*"
+  },
+  "devDependencies": {
+    "@rig/testing": "workspace:*"
+  }
+}

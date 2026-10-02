@@ -1,0 +1,12 @@
+{
+  "name": "@rig/core",
+  "private": true,
+  "type": "module",
+  "description": "The kernel every package stands on: outcomes and exit codes, where things live, sha-pinned artifacts, card sets, downloads, and the ports through which rig touches a machine.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@rig/testing": "workspace:*"
+  }
+}

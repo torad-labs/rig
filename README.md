@@ -29,12 +29,15 @@ rig up bonsai-2-27b                   # prepare → fetch → build → derive �
 rig gate bonsai-2-27b                 # the head's probes on the gate card; evidence in local/gate-runs/
 rig describe bonsai-2-27b             # what the head is, as JSON, for whatever sits in front of it
 rig vast up bonsai-2-27b --gpu H100_SXM   # the same head on a rented card, through an ssh tunnel
+rig image glm-5.3-flash --push        # the head as a container image a rented box runs as is
 rig help
 ```
 
-`docs/architecture.md` is the map; `heads/bonsai-2-27b/evidence.md` is where the numbers come
-from. `bun test` runs the suite over in-memory ports (no card, no model); `bun run lint` holds
-the format (Biome, 100 columns), the dependency rule and the types; `bun run format` rewrites.
+`docs/architecture.md` is the map: the CLI in `apps/cli`, one package per part of the job under
+`packages/`, developer tools in `tools/`; `heads/bonsai-2-27b/evidence.md` is where the numbers come
+from. `bun test` runs every workspace's suite over in-memory ports (no card, no model); `bun run
+lint` holds the format (Biome, 100 columns), the layers (`tools/lint-architecture.ts`) and the
+types; `bun run format` rewrites.
 
 ## License
 

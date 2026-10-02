@@ -1,7 +1,7 @@
 # A release, on a v* tag: rig.yml's checks, then the binary, the engine pin and the heads packed as
 # rig-linux-x64.tar.gz with its sha256, and install.sh beside them (the one-line install fetches
-# releases/latest/download/install.sh). The tag must be package.json's version, which is what
-# `rig --version` prints and what an installer or a proxy compares against.
+# releases/latest/download/install.sh). The tag must be the CLI's version (apps/cli/package.json),
+# which is what `rig --version` prints and what an installer or a proxy compares against.
 name: release
 on:
   push:
@@ -19,12 +19,11 @@ jobs:
         with:
           bun-version: 1.4.2
           no-cache: true # a release is built from nothing a PR run could have cached
-      - name: the tag is package.json's version
-        run: test "$GITHUB_REF_NAME" = "v$(jq -r .version package.json)"
+      - name: the tag is the CLI's version
+        run: test "$GITHUB_REF_NAME" = "v$(jq -r .version apps/cli/package.json)"
       - run: bun install --frozen-lockfile
       - run: bun run lint
       - run: bun test
-      - run: bun test ./scripts/glm53-vast.test.ts ./scripts/glm53-admission.test.ts
       - run: bun run build
       - name: pack
         run: |

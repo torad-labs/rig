@@ -381,7 +381,7 @@ tg128 161.1 tok/s.
 
 `[cache]` names the formats every tier serves and the element counts their bytes follow from; a tier may name its own
 (`cache = { k, v, s }`). serve and the gates render the flags of the tier a card gets and the tier check charges exactly
-those bytes (`src/shared/head/cache-formats.ts`). engine.toml's `[caches]` lists what the pin runs on a CUDA card, and a
+those bytes (`packages/head/src/cache-formats.ts`). engine.toml's `[caches]` lists what the pin runs on a CUDA card, and a
 tier that names anything else is refused before a server starts: a K/V pair with no CUDA flash-attention kernel runs
 attention on the CPU, and a state type the graph cannot run aborts the server on its first decode.
 
@@ -621,7 +621,7 @@ Prism's runtime); the fork now restores the primal basis after the lookup as the
 DFlash do. Without it the pack's `prism.hadamard` verifier refuses the MTP graph.
 
 Measured on the 5070 Ti (GPU 1, display card, -c 131072 -np 2, lens on, greedy, 512 tokens,
-prompt cache off; `evidence/spec-bench-mtp-5070ti/`, rows produced by `scripts/bench-head.ts`):
+prompt cache off; `evidence/spec-bench-mtp-5070ti/`, rows produced by `tools/bench-head.ts`):
 
 | prompt | thinking | plain tok/s | MTP tok/s | gain | accepted |
 |---|---|---|---|---|---|
@@ -666,9 +666,9 @@ prompts at -c 65536: 34.0 → 42.0 tok/s (+24 %), acceptance 0.42–0.85 — the
 times the memory. The live 5080 head's first request after the switch (20:37, 27 tokens):
 18/18 drafted tokens accepted, 50.4 tok/s.
 
-n_max=4 trial (2026-09-21, 5080, engine f8394f1, lens off, four prompts, greedy, 256 tokens, warm-up discarded, `scripts/bench-head.ts`): the prompt-inclusive M4 trial ran the live head at `--spec-draft-n-max 4`. Per-prompt mean decode: code 90.3 / SQL 76.4 / prose 77.7 / reasoning 96.1 tok/s (mean 85.1), 4,999 drafted / 1,798 accepted tokens (acceptance 0.360 per drafted token; 0.25 per deep position). n_max=2 on the same card and build, same card, same context, same lens state, measured after the config fix (`--spec-draft-n-max 2`): code 100.1 / SQL 79.6 / prose 90.6 / reasoning 102.9 tok/s (mean 93.3, +9.6% over the trial), 3,074 drafted / 1,516 accepted tokens (acceptance 0.493 vs the trial's 0.360 per drafted token). The single-layer MTP head over-drafts at n=4: it produced 4,999 draft tokens — 63% more than n=2's 3,074 — to accept only 18% more total tokens (1,798 vs 1,516), i.e. its extra draft positions accepted far fewer tokens each, so the extra recurrent-state copies per slot and the larger verify batches bought decode time. n_max=2 matches ProCreations' own sweep peak and is the value every head now serves (superseded 2026-09-25: n_max 3, "Draft depth" above).
+n_max=4 trial (2026-09-21, 5080, engine f8394f1, lens off, four prompts, greedy, 256 tokens, warm-up discarded, `tools/bench-head.ts`): the prompt-inclusive M4 trial ran the live head at `--spec-draft-n-max 4`. Per-prompt mean decode: code 90.3 / SQL 76.4 / prose 77.7 / reasoning 96.1 tok/s (mean 85.1), 4,999 drafted / 1,798 accepted tokens (acceptance 0.360 per drafted token; 0.25 per deep position). n_max=2 on the same card and build, same card, same context, same lens state, measured after the config fix (`--spec-draft-n-max 2`): code 100.1 / SQL 79.6 / prose 90.6 / reasoning 102.9 tok/s (mean 93.3, +9.6% over the trial), 3,074 drafted / 1,516 accepted tokens (acceptance 0.493 vs the trial's 0.360 per drafted token). The single-layer MTP head over-drafts at n=4: it produced 4,999 draft tokens — 63% more than n=2's 3,074 — to accept only 18% more total tokens (1,798 vs 1,516), i.e. its extra draft positions accepted far fewer tokens each, so the extra recurrent-state copies per slot and the larger verify batches bought decode time. n_max=2 matches ProCreations' own sweep peak and is the value every head now serves (superseded 2026-09-25: n_max 3, "Draft depth" above).
 
-5080 `scripts/bench-head.ts` (2026-09-21, engine f8394f1, lens off, four prompts, greedy, 256 tokens, warm-up discarded):
+5080 `tools/bench-head.ts` (2026-09-21, engine f8394f1, lens off, four prompts, greedy, 256 tokens, warm-up discarded):
 
 | depth | mean decode tok/s | drafted | accepted | acceptance / drafted |
 |---|---|---|---|---|
@@ -779,7 +779,7 @@ draft ran, the drafted leg not slower (the result files are banked under `eviden
 - `--cache-type-k q4_0 --cache-type-v q4_0 --kv-mean-center assets/kv-mean-center-PQ2_0.gguf`:
   the K-cache mean-centering bias (16 vectors, one per attention layer, no text), calibrated
   2026-09-22 with the fork's `llama-kv-mean-center` on the corpus rig builds from the pinned
-  engine tree, so anyone can rebuild it: `bun scripts/engine-corpus.ts` (writes
+  engine tree, so anyone can rebuild it: `bun tools/engine-corpus.ts` (writes
   `local/calibration/engine-corpus.txt`: 3,145,728 characters of the fork's docs, server, core,
   common and ggml sources at pin c54ace8, sha256 5a1563c2…), then `llama-kv-mean-center -m <served
   pack> -f local/calibration/engine-corpus.txt -o <asset> -ngl 99 -c 512 --chunks 1000 -ctk q4_0`

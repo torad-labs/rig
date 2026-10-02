@@ -1,4 +1,13 @@
+[install]
+# Every workspace resolves only what its package.json declares: an import across a package boundary
+# that is not a declared dependency does not resolve (tools/lint-architecture.ts holds the layers).
+# hoist keeps the store's fallback for third-party packages only (bun-types reaches undici-types
+# without declaring it); it is no ancestor of a workspace, so rig's own packages stay isolated.
+linker = "isolated"
+hoist = true
+
 [test]
-# rig's own tests only: local/ holds the engine checkout, whose thousands of upstream tests are not ours
-root = "src"
+# rig's own tests only: engine/ is the engine's checkout and local/ holds engine build trees, whose
+# upstream tests are not ours; dist/ is the compiled binary
+pathIgnorePatterns = ["engine/**", "local/**", "dist/**", "node_modules/**"]
 coverageSkipTestFiles = true

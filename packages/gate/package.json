@@ -1,0 +1,18 @@
+{
+  "name": "@rig/gate",
+  "private": true,
+  "type": "module",
+  "description": "A head's numbers re-proven: gate runs on the gate card, the gate server, and the probes.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "@rig/engine": "workspace:*",
+    "@rig/head": "workspace:*",
+    "valibot": "catalog:"
+  },
+  "devDependencies": {
+    "@rig/testing": "workspace:*"
+  }
+}

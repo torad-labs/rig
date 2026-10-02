@@ -71,7 +71,7 @@ tolerance_pct = 5    # the served leg must sit within the base's own A-A spread 
 #    draft on the same greedy prompts — byte-identical answers, or a first divergence the pack
 #    itself rates a near-tie (the verify batch's accumulation order is not the one-token step's;
 #    evidence.md, "Draft head"), the draft ran, and not slower (a host whose CPU cannot keep up
-#    with the draft rounds would lose here; the tier opts out).
+#    with the draft rounds would lose here; the profile opts out).
 [speculative]
 max_tokens = 256
 prompts = [
@@ -134,7 +134,9 @@ min_gain = 1.0    # drafted tok/s over plain at this depth
 #    graph, adds 96 scale_f32_vec4); 1,160 launches per step, 257 of them quantize_q8_1 before as
 #    many PQ2_0 matmuls (2026-09-26). Against fork 7a46d1860 with #58 on a 5070 Ti (2026-09-25) only
 #    cpy_scalar moved, 64 -> 0: engine-9 reads the attention gate and the Gated DeltaNet output in
-#    place (31164d6c9, 55d977423). The other 17 counts are the same on the two cards.
+#    place (31164d6c9, 55d977423). The other 17 counts are the same on the two cards. The legs run the profile's
+#    state since fork 4104c47d5 (before it llama-bench's own f32): the served f16 state runs this same step, 6 of 7
+#    replays, 1,160 launches (RTX 5080, fork 16ad036c4's kernels, 2026-09-27).
 [census]
 gen = 8
 [census.kernels.sm120]
@@ -173,3 +175,13 @@ prompt = "Count from 1 to 40, one number per line, nothing else."
 max_tokens = 256
 batches = [1, 2, 4]
 min_gain = 1.5    # aggregate tok/s at the largest batch over M=1; a server that gains nothing is not batching (measured 2.6x)
+
+# 11. Where a decode token's time goes against the card's DRAM (roofline-probe.ts): llama-bench on the
+#    served pack under nsys with the fork's NVTX node ranges, CUDA graphs off, PDL on, `gen` tokens at
+#    each depth; each group of launches (a layer's matmul, norm, attention...) is charged the time it
+#    ends past every kernel before it and held to its bytes at the card's peak DRAM rate. Measured,
+#    not judged: the ranking is what to optimize for this head on this card. The depths are the empty
+#    context, a short session's and the one slot's served depth, where attention reads the most.
+[roofline]
+gen = 16
+depths = [0, 16384, 245760]

@@ -1,0 +1,17 @@
+{
+  "name": "@rig/pack",
+  "private": true,
+  "type": "module",
+  "description": "A head's weights: fetched by sha256 (fetch/) and derived to the served pack (derive/).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "@rig/head": "workspace:*"
+  },
+  "devDependencies": {
+    "@rig/adapters": "workspace:*",
+    "@rig/testing": "workspace:*"
+  }
+}

@@ -1,0 +1,108 @@
+# GLM-5.3 Flash Uncensored at IQ3_XXS, over two 96 GB cards. Everything rig knows about this model
+# is here, as data: what to fetch, the engine commit that runs it, how it spans the cards, and the
+# arguments the server is loaded with. The WHY behind each number is in evidence.md beside this file.
+name = "glm-5.3-flash"
+title = "GLM-5.3 Flash Uncensored (IQ3_XXS, 2 cards)"
+port = 8102
+
+# The public split GGUF (MIT, not gated), pinned to a revision: three shards of 134.3 GB, the
+# first the one the server loads, the others found beside it (split.count = 3).
+[source]
+repo = "BoldingBuilds/orcarouter_GLM-5.3-Flash-Uncensored-GGUF"
+rev = "1bc0afadd92f4ff9fc2b1281a95a7921b058d35d"
+
+[[source.files]]
+file = "IQ3_XXS/GLM-5.3-Flash-Uncensored-IQ3_XXS-00001-of-00003.gguf"
+sha256 = "9916f01db53f8a2bfd5db1d6eb8cd48f93ae2b732fe1dfce993450745334cae1"
+bytes = 45672911040
+
+[[source.files]]
+file = "IQ3_XXS/GLM-5.3-Flash-Uncensored-IQ3_XXS-00002-of-00003.gguf"
+sha256 = "139f2ea5e2d1bb847cd21c5d5122e3a838fde7b5ae2895c6e2623ff318519a00"
+bytes = 45407495392
+
+[[source.files]]
+file = "IQ3_XXS/GLM-5.3-Flash-Uncensored-IQ3_XXS-00003-of-00003.gguf"
+sha256 = "b94bcd70929d7f4445d3acb6490a801511452214c8cf633fa2d912bef89f2188"
+bytes = 43225116416
+
+# glm5next (MLA + KDA recurrent layers, 288 experts) runs on the fork after the global pin: the
+# routed experts' ring (b8d44d4b8), the SwiGLU limit's fused clamp (640a12c41), ssm_a on the card
+# (bb0e005fd), the KDA and DSA layers split by head under -sm tensor (1f004c9e4, PR #79), and the
+# whole-evaluation CUDA graph, the hyper-connection kernels, the shared q8_1 input and KDA's q, k, v
+# as one launch (0eb0464ad, PR #81); ba0e6ec26 is 0eb0464ad and the PDL restrict fix, nothing else.
+# 2e699cceb is ba0e6ec26 and what came after on the same line (TORAD.md has each row): the hyper-connection front by
+# the streams' Gram matrix, its comb in registers and on a side stream, and its q8_1 copy written in place of a quantize
+# launch, 16-byte small mat-vecs, KDA's raw gates, joint l2, conv order, f16 state write and conv weights read in place, the
+# MoE ring's vectors in shared memory, its ids before the PDL wait, its pairs decoded once, the fused top-k at 2-4 rows,
+# the routed experts' weighted sum in one launch, the meta buffers' usage, the paced L2 issuer, the two-card all-reduce as
+# LL packets under 16 KB; the rerun box measured it on the cards (evidence.md).
+# 9c506a40d is 2e699cceb and what came after on the same line (TORAD.md has each row): the routed-expert ring's pair
+# offsets from host tables and its pairs decoded once only where they are as many as the experts, a float mat-mul mmf
+# would underfill on the vector kernel, the hyper-connection comb beside the stream removed, the pooled-indexer inputs
+# following the cells that changed, sparse flash attention over the cells a DSA layer selected, a scatter's rows made
+# unique, the meta backend mirroring a node with no sources, and every warp of the MMA flash-attention combine reaching
+# one barrier.
+# e11e67c29 is 9c506a40d and what came after on the same line (TORAD.md has each row): the sparse mask's scan reading
+# 32768 columns a round, the lightning indexer reading pooled keys in place on a quad of lanes, the routed-expert ring
+# quantizing its own down-projection vectors, the one-launch hyper-connection front kept opt-in (it measured slower than
+# the two kernels), and the sparse mask's filler slots taken from dump pools in the top-k instead of a liveness chain in
+# every DSA layer. It is the next rental's engine, gated on the 44-layer proxy and not yet on the cards; the rental A/Bs
+# it against 2e699cceb, the engine the cards last measured, and the pin moves back if the cards say it is slower.
+# 765692590 is e11e67c29 and what came after on the same line (TORAD.md has each row): three prefill changes that are bit
+# for bit against their parents, each with a mutant that differs -- KDA's output norm a warp to a row and the hc norm
+# writing cuBLAS's BF16 operand (+4.40 % pp4096 on the cards), and KDA's decay computed once a token ahead of the
+# recurrence (-1.0 % device time); plus measuring legs that change no kernel (LLAMA_TIME_DECODE, GGML_CUDA_TIME_LAUNCH,
+# dKLD by position with same-top beside it). The pin deliberately stops here: chunked KDA (7755e858a) and its fp16 stage-3
+# operands land after it on the branch and are NOT in it, because neither is bit for bit and the trained model's KL is
+# still unmeasured -- the first real-pack box measures it, and shipping an unmeasured numerics change would contradict the
+# same bar that refused byte recipe A for +5 %.
+# 3d40ae99c is 765692590 and what came after on the same line (TORAD.md has each row), measured on the real pack on two
+# RTX PRO 6000 Max-Q (rental 1, Oct 1, evidence.md): chunked KDA prefill (7755e858a) with its fp16 stage-3 operands
+# (67275eacf), the hc post kernel a block a token with the next front's flat norm fused into it (fd5176e75), and MUL_MAT_ID's
+# MMQ tile width from the columns an expert gets (647703131). Chunked KDA is the one numerics change. Its real-pack KLD
+# against 765692590 (on 81aca7542, the same tree as this line before 647703131) is 0.011835 at 2k and 0.007412 at 16k, inside
+# the engine's own batch-shape floor (765692590 against itself at -ub 512: 0.011509 and 0.006932; at -sm layer: 0.011627),
+# so it ships on under the practical-equivalence gate: KLD at most 1.10x that floor at each depth, same top within 0.25 pt.
+# The rest is bit for bit on the real pack: the legacy switches give KLD 0 against 765692590, and so does 647703131 with
+# GGML_CUDA_KDA_CHUNKED_LEGACY=1. On the cards: pp32768 +6.0 % before 647703131, then 647703131 +21.4 % at pp4096 and
+# +17.2 % at pp32768 over its own LEGACY switch; decode flat; served at n_max 2, 154.7 tok/s decode. The sparse gather's
+# 32-head tile (258292bd8) and its switch-over (78a8e96b8) come after it and are not in it: the next rental measures them.
+[engine]
+sha = "3d40ae99ca0b9becce1b91134ad2bdd5f8aadf26"
+
+[speculative]
+type = "draft-mtp"             # the pack's own NextN block (glm5next.nextn_predict_layers = 1)
+n_max = 2                      # as qualified; the validation rental measured 1-4 and 2 decodes fastest
+
+[context]
+model = 524288                 # the window served: half the trained 1,048,576, as qualified (a 436,077-token prompt answered)
+advertise = 491520             # what one conversation is told it may use (15/16 of the window, bonsai's margin for the reply)
+
+# f16 K and V (the engine's default) and the recurrent state in the engine's own format, as qualified:
+# no [cache] section. No [sizing]: the one profile is served as measured.
+
+# Both cards of one kind, the model split across them. min_vram_mib: the validation rental's peak,
+# 90,817 MiB on the second card, and a GiB of margin; only the 96 GB class clears it.
+[[profiles]]
+devices = 2
+min_vram_mib = 92000
+split = "tensor"               # 1.31x the layer split's served speed at n_max 2 (134.5 against 102.6 tok/s), its logits not separable from the layer split's own batch-shape floor (evidence.md)
+slots = 1
+ctx = 524288
+cuda_graphs = 0                # no cap: under -sm tensor the default cap of 8 evicts every graph before its reuse (evidence.md)
+
+[runtime]
+# how the pack is loaded; "assets/…" paths resolve against this head's directory
+args = [
+  "-b", "4096",
+  "-ub", "1024",               # served under tensor: a 27,642-token prefill 16.1 s against 512's 20.9, 10 GB a card spare; 2048 does not fit (evidence.md)
+  "--alias", "GLM-5.3-Flash-Uncensored-IQ3_XXS",
+  "--chat-template-file", "assets/chat-template.jinja",
+]
+# no sampling flags: the engine reads the GGUF's own (general.sampling: temp 1.0, top_p 0.95, repeat penalty 1.1 over 256)
+
+[client]                       # facts whatever sits in front of this head must know
+rejects_reasoning_effort = false  # the template maps low and high, and anything else to max
+slot_pinning = false              # one slot
+any_model_id = true               # llama-server serves the loaded model for any model id

@@ -3,15 +3,167 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "dependencies": {
-        "valibot": "^1.1.0",
-      },
       "devDependencies": {
         "@biomejs/biome": "^2.5.14",
         "@types/bun": "^1.4.2",
         "typescript": "^7.0.2",
       },
     },
+    "apps/cli": {
+      "name": "@rig/cli",
+      "version": "0.1.10",
+      "bin": {
+        "rig": "src/main.ts",
+      },
+      "dependencies": {
+        "@rig/adapters": "workspace:*",
+        "@rig/core": "workspace:*",
+        "@rig/engine": "workspace:*",
+        "@rig/gate": "workspace:*",
+        "@rig/head": "workspace:*",
+        "@rig/image": "workspace:*",
+        "@rig/machine": "workspace:*",
+        "@rig/pack": "workspace:*",
+        "@rig/rental": "workspace:*",
+        "@rig/serve": "workspace:*",
+      },
+      "devDependencies": {
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "apps/registry": {
+      "name": "@rig/registry",
+    },
+    "packages/adapters": {
+      "name": "@rig/adapters",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/core": {
+      "name": "@rig/core",
+      "devDependencies": {
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/engine": {
+      "name": "@rig/engine",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "valibot": "catalog:",
+      },
+      "devDependencies": {
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/gate": {
+      "name": "@rig/gate",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "@rig/engine": "workspace:*",
+        "@rig/head": "workspace:*",
+        "valibot": "catalog:",
+      },
+      "devDependencies": {
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/head": {
+      "name": "@rig/head",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "@rig/engine": "workspace:*",
+        "valibot": "catalog:",
+      },
+      "devDependencies": {
+        "@rig/adapters": "workspace:*",
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/image": {
+      "name": "@rig/image",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "@rig/engine": "workspace:*",
+        "@rig/head": "workspace:*",
+        "valibot": "catalog:",
+      },
+      "devDependencies": {
+        "@rig/adapters": "workspace:*",
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/machine": {
+      "name": "@rig/machine",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "@rig/engine": "workspace:*",
+        "@rig/head": "workspace:*",
+      },
+      "devDependencies": {
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/pack": {
+      "name": "@rig/pack",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "@rig/head": "workspace:*",
+      },
+      "devDependencies": {
+        "@rig/adapters": "workspace:*",
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/rental": {
+      "name": "@rig/rental",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "@rig/engine": "workspace:*",
+        "@rig/head": "workspace:*",
+        "@rig/image": "workspace:*",
+        "valibot": "catalog:",
+      },
+      "devDependencies": {
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/serve": {
+      "name": "@rig/serve",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "@rig/engine": "workspace:*",
+        "@rig/head": "workspace:*",
+      },
+      "devDependencies": {
+        "@rig/testing": "workspace:*",
+      },
+    },
+    "packages/testing": {
+      "name": "@rig/testing",
+      "dependencies": {
+        "@rig/core": "workspace:*",
+        "@rig/head": "workspace:*",
+        "@rig/image": "workspace:*",
+        "@rig/registry": "workspace:*",
+      },
+    },
+    "tools": {
+      "name": "@rig/tools",
+      "dependencies": {
+        "@rig/adapters": "workspace:*",
+        "@rig/core": "workspace:*",
+        "@rig/engine": "workspace:*",
+        "@rig/head": "workspace:*",
+        "@rig/image": "workspace:*",
+      },
+    },
+  },
+  "catalog": {
+    "valibot": "^1.1.0",
   },
   "packages": {
     "@biomejs/biome": ["@biomejs/biome@2.5.14", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.5.14", "@biomejs/cli-darwin-x64": "2.5.14", "@biomejs/cli-linux-arm64": "2.5.14", "@biomejs/cli-linux-arm64-musl": "2.5.14", "@biomejs/cli-linux-x64": "2.5.14", "@biomejs/cli-linux-x64-musl": "2.5.14", "@biomejs/cli-win32-arm64": "2.5.14", "@biomejs/cli-win32-x64": "2.5.14" }, "bin": { "biome": "bin/biome" } }, "sha512-0FabLIjd4M/dm8VFI86RMaLLdgepzbdfiAL2R8cr7V81OYYrP1w7Z73KfAwPK5h9SrEBXTzNG2y+mBwPo9xRnw=="],
@@ -31,6 +183,34 @@
     "@biomejs/cli-win32-arm64": ["@biomejs/cli-win32-arm64@2.5.14", "", { "os": "win32", "cpu": "arm64" }, "sha512-pHgAFffmZtaYoxavEsWEYNvcA7NwOIjLyqw2HXyLbt16xYryX0L4fMV2u0G9ag6LNYPIoqWaWqzUcnc6rLGGXg=="],
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.5.14", "", { "os": "win32", "cpu": "x64" }, "sha512-oJWmBhoHsnhUKIke+0gXDX0mltJrWHA1UyHsrTlXwX0TL64ilVZAo+TYZm97baecV0esBdpzy3k96q+09JaZUQ=="],
+
+    "@rig/adapters": ["@rig/adapters@workspace:packages/adapters"],
+
+    "@rig/cli": ["@rig/cli@workspace:apps/cli"],
+
+    "@rig/core": ["@rig/core@workspace:packages/core"],
+
+    "@rig/engine": ["@rig/engine@workspace:packages/engine"],
+
+    "@rig/gate": ["@rig/gate@workspace:packages/gate"],
+
+    "@rig/head": ["@rig/head@workspace:packages/head"],
+
+    "@rig/image": ["@rig/image@workspace:packages/image"],
+
+    "@rig/machine": ["@rig/machine@workspace:packages/machine"],
+
+    "@rig/pack": ["@rig/pack@workspace:packages/pack"],
+
+    "@rig/registry": ["@rig/registry@workspace:apps/registry"],
+
+    "@rig/rental": ["@rig/rental@workspace:packages/rental"],
+
+    "@rig/serve": ["@rig/serve@workspace:packages/serve"],
+
+    "@rig/testing": ["@rig/testing@workspace:packages/testing"],
+
+    "@rig/tools": ["@rig/tools@workspace:tools"],
 
     "@types/bun": ["@types/bun@1.4.2", "", { "dependencies": { "bun-types": "1.4.2" } }, "sha512-GimotNn7+ZV0uVArItBbriZsR1oNf0+WTzPkdcFrzShI7k2norL0uzEaJT8T33dWr7O/c9ZDuAFQrctKCi72oQ=="],
 

@@ -2,7 +2,7 @@
 
 Everything rig fetched or built on this machine, and nothing else. It exists on every machine
 rig runs on: this checkout, a user's install, a rented box (`<remote_dir>/local/`). Gitignored
-except this file; never `/tmp`, never a cache dir. `src/shared/layout.ts` is the one place that
+except this file; never `/tmp`, never a cache dir. `packages/core/src/layout.ts` is the one place that
 names these paths, here and on a box.
 
 ```
@@ -16,7 +16,7 @@ engine-sources/          the fork at the pin when the submodule is not (a box ha
 logs/                    the head's log, build and configure logs
 gate-runs/<head>/<run>/  a gate run's results and summary.json (rig gate); HumanEval.jsonl
 rented-box/              the rented box's state, cached build tarballs, pulled runs (rig vast)
-calibration/             the calibration recipe's corpus and outputs (scripts/engine-corpus.ts)
+calibration/             the calibration recipe's corpus and outputs (tools/engine-corpus.ts)
 server.pid               the pid of a server started outside systemd (a box)
 ```
 

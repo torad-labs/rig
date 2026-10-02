@@ -1,0 +1,16 @@
+{
+  "name": "@rig/engine",
+  "private": true,
+  "type": "module",
+  "description": "The inference engine: its pin (engine.toml, prebuilts, the CUDA runtime), the corpus built from its tree, and building it for a card.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "valibot": "catalog:"
+  },
+  "devDependencies": {
+    "@rig/testing": "workspace:*"
+  }
+}

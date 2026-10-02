@@ -1,0 +1,15 @@
+{
+  "name": "@rig/testing",
+  "private": true,
+  "type": "module",
+  "description": "The in-memory machine: a fake for every port, and the fixtures more than one package's tests share.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rig/core": "workspace:*",
+    "@rig/head": "workspace:*",
+    "@rig/image": "workspace:*",
+    "@rig/registry": "workspace:*"
+  }
+}

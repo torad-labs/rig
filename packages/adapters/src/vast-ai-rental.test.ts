@@ -1,0 +1,98 @@
+import { describe, expect, test } from "bun:test";
+import { FakeShell } from "@rig/testing";
+import { VastAiRental } from "./vast-ai-rental.ts";
+
+const listing = (ids: number[]) => ({
+  code: 0,
+  stdout: JSON.stringify(ids.map((id) => ({ id, actual_status: "running", label: "rig" }))),
+  stderr: "",
+});
+
+describe("VastAiRental.show", () => {
+  test("a failed show falls back to the listing: its row when listed, null when the listing confirms the instance is gone, thrown when the listing fails too", async () => {
+    const shell = new FakeShell();
+    const vast = new VastAiRental(shell);
+    shell.on(/^vastai show instance 1000 --raw$/, {
+      code: 0,
+      stdout: JSON.stringify({
+        id: 1000,
+        actual_status: "running",
+        label: "rig",
+        gpu_util: 97,
+        image_uuid: "registry.torad.ai/rig:glm-5.3-flash-sm120-2a9d696-efb7b816",
+      }),
+      stderr: "",
+    });
+    expect(await vast.show(1000)).toMatchObject({
+      id: 1000,
+      status: "running",
+      gpuUtil: 97,
+      image: "registry.torad.ai/rig:glm-5.3-flash-sm120-2a9d696-efb7b816",
+    });
+    // a 429 on show while the listing still has the box: the box is not gone, and the listing's
+    // row is the market read, its card reading included
+    shell.on(/^vastai show instance 1000 --raw$/, {
+      code: 1,
+      stdout: "",
+      stderr: "429 Too Many Requests",
+    });
+    shell.on(/^vastai show instances --raw$/, {
+      code: 0,
+      stdout: JSON.stringify([{ id: 1000, actual_status: "running", label: "rig", gpu_util: 97 }]),
+      stderr: "",
+    });
+    expect(await vast.show(1000)).toMatchObject({ id: 1000, status: "running", gpuUtil: 97 });
+    // the listing unreadable too (an expired key): nothing confirms the box is gone
+    shell.on(/^vastai show instances --raw$/, { code: 1, stdout: "", stderr: "401 Unauthorized" });
+    await expect(vast.show(1000)).rejects.toThrow("401 Unauthorized");
+    // destroyed: show fails and the listing has no such box
+    shell.on(/^vastai show instances --raw$/, listing([56]));
+    expect(await vast.show(1000)).toBeNull();
+  });
+});
+
+describe("VastAiRental.searchOffers and create", () => {
+  test("offers are priced with the box's own disk, and their download and disk prices are read", async () => {
+    const shell = new FakeShell();
+    const vast = new VastAiRental(shell);
+    // a row as vast answers `--storage 160` (2026-09-30): dph_total includes the 160 GB disk's storage_total_cost
+    shell.on(/^vastai search offers .* --storage 160 -o dph_total --raw$/, {
+      code: 0,
+      stdout: JSON.stringify([
+        {
+          id: 50138870,
+          gpu_name: "RTX PRO 6000 S",
+          num_gpus: 2,
+          gpu_ram: 97887,
+          compute_cap: 1200,
+          dph_total: 0.261,
+          inet_down_cost: 0.0027,
+          storage_total_cost: 0.0741,
+        },
+      ]),
+      stderr: "",
+    });
+    expect(await vast.searchOffers("num_gpus=2", 160)).toMatchObject([
+      { id: 50138870, dph: 0.261, downCostPerGb: 0.0027, storagePerHour: 0.0741 },
+    ]);
+  });
+
+  test("a box from a template takes the template's image, login and launch; one from an image says them", async () => {
+    const shell = new FakeShell();
+    const vast = new VastAiRental(shell);
+    shell.on(/^vastai create instance/, {
+      code: 0,
+      stdout: JSON.stringify({ success: true, new_contract: 1000 }),
+      stderr: "",
+    });
+    await vast.create(7, { templateHash: "a79f7a77", diskGb: 160, label: "rig" });
+    await vast.create(7, { image: "nvidia/cuda:13", diskGb: 40, label: "rig" });
+    const creates = shell.calls
+      .filter((call) => call[1] === "create")
+      .map((call) => call.join(" "));
+    expect(creates).toEqual([
+      "vastai create instance 7 --template_hash a79f7a77 --disk 160 --label rig --cancel-unavail --raw",
+      "vastai create instance 7 --image nvidia/cuda:13 --ssh --direct --disk 40 --label rig --cancel-unavail --raw",
+    ]);
+  });
+});
