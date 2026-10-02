@@ -5,7 +5,15 @@
 import { dirname, resolve } from "node:path";
 import { realPorts } from "@rig/adapters";
 import { ExitCode, fail, type Layout, layoutAt, type Ports, type Result } from "@rig/core";
-import { BuildEngine, type Engine, EngineLab, headEngine, loadEngine } from "@rig/engine";
+import {
+  BuildEngine,
+  BuildPrebuilt,
+  DriverOnlyGate,
+  type Engine,
+  EngineLab,
+  headEngine,
+  loadEngine,
+} from "@rig/engine";
 import { allProbes, RunGates } from "@rig/gate";
 import { listHeads, loadHead } from "@rig/head";
 import { BuildImage, type RegistryCredentials, registryCredentials } from "@rig/image";
@@ -19,6 +27,7 @@ import type { Command, LoadHead } from "./cli/command.ts";
 import { buildEngineCommand } from "./commands/build.command.ts";
 import { derivePackCommand } from "./commands/derive.command.ts";
 import { describeHeadCommand } from "./commands/describe.command.ts";
+import { e2eCommand } from "./commands/e2e.command.ts";
 import { engineLabCommand } from "./commands/engine.command.ts";
 import { downloadPackCommand } from "./commands/fetch.command.ts";
 import { runGatesCommand } from "./commands/gate.command.ts";
@@ -55,6 +64,8 @@ function wireEngine(
 ): { commands: Command[]; gate: RunGates } {
   const prepare = new CheckMachine(ports, engine);
   const build = new BuildEngine(ports, layout, engine);
+  const prebuilt = new BuildPrebuilt(ports, layout, engine);
+  const driverOnly = new DriverOnlyGate(ports, layout);
   const fetch = new DownloadPack(ports);
   const derive = new DerivePack(ports);
   const serve = new ServeHead(ports, engine);
@@ -79,7 +90,8 @@ function wireEngine(
     gate,
     commands: [
       checkMachineCommand(prepare, ports.log),
-      buildEngineCommand(build, ports.log),
+      buildEngineCommand(build, prebuilt, ports.log),
+      e2eCommand(driverOnly, process.env.RIG_GATE_LOCK, ports.log),
       downloadPackCommand(fetch, head, ports.log),
       derivePackCommand(derive, head, ports.log),
       verifyHeadCommand(serve, head, ports.log),

@@ -136,6 +136,12 @@ export class InMemoryFileSystem implements FileSystem {
     for (const [p, b] of this.files)
       if (p === from || p.startsWith(`${from}/`)) moved.push([to + p.slice(from.length), b]);
     if (!moved.length && !this.dirs.has(from)) throw new Error(`ENOENT ${from}`);
+    // as rename(2): a file replaces a file, but a directory moves only onto a path that holds nothing (ENOTEMPTY)
+    if (
+      !this.files.has(from) &&
+      [...this.files.keys(), ...this.dirs].some((p) => p.startsWith(`${to}/`))
+    )
+      throw new Error(`ENOTEMPTY ${to}`);
     for (const [p] of this.files) if (p === from || p.startsWith(`${from}/`)) this.files.delete(p);
     for (const [p, b] of moved) this.files.set(p, b);
     if (this.dirs.delete(from)) this.dirs.add(to);

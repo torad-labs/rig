@@ -247,7 +247,7 @@ export class BuildImage {
     if (this.engine.prebuiltFor(cap)) return ok(undefined);
     return fail(
       ExitCode.Failure,
-      `no build of torad-labs/llama.cpp @ ${this.engine.sha7} for sm_${cap} to bake, and the pin publishes none: tools/build-prebuilt.sh --sha ${this.engine.fork.sha} makes ${name} on the release floor, or --from-tarball names one`,
+      `no build of torad-labs/llama.cpp @ ${this.engine.sha7} for sm_${cap} to bake, and the pin publishes none: rig build --prebuilt --sha ${this.engine.fork.sha} makes ${name} on the release floor, or --from-tarball names one`,
     );
   }
 

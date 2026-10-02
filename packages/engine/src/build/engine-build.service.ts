@@ -5,7 +5,8 @@
 // default job count, nproc+2, built the 487 objects inside the 15 GiB box on 2026-09-20; --jobs
 // overrides it); --portable builds the baseline and tars the result so the next box of the
 // same arch skips the 5–20 minute build; --from-tarball publishes a cached tarball instead of
-// compiling, with the pin's CUDA runtime beside it as a prebuilt gets; --cap names the compute
+// compiling, with the pin's CUDA runtime beside it as a prebuilt gets (with --off-pin NAME, a tarball
+// of another commit goes to local/engine-lab/NAME/ instead, for the lab to A/B against the pin); --cap names the compute
 // capability where no card is present (an image build). Where engine.toml pins a prebuilt build of the pin for the card, that is installed
 // instead (the build and NVIDIA's CUDA runtime, each by sha256), so a machine with only the driver
 // needs no toolkit and no compile; --compile builds from source regardless. The command lines are
@@ -30,6 +31,7 @@ import {
   miscompiles,
   type Prebuilt,
   prebuiltSkip,
+  TARGETS,
 } from "../engine.ts";
 import { BuildPublisher, type RuntimeArchive } from "./build-publisher.ts";
 import { buildArgv, configureArgv, pruneArgv } from "./cmake-invocation.ts";
@@ -44,6 +46,9 @@ export interface BuildEngineOptions {
   portable?: boolean;
   jobs?: number | undefined;
   fromTarball?: string | undefined;
+  /** with fromTarball: the tarball is a build of another commit, installed for the lab as
+   *  local/engine-lab/<offPin>/ and never where env resolution looks */
+  offPin?: string | undefined;
   /** from source even where a prebuilt build of the pin is published for this card */
   compile?: boolean;
 }
@@ -73,6 +78,9 @@ export interface BuildEngineDeps {
  *  GOMP_loop_nonmonotonic_dynamic_start). GCC's runtime library exception allows shipping it. */
 export const PORTABLE_RUNTIME = ["libgomp.so.1"] as const;
 
+/** a directory name under local/engine-lab/: one path segment, so an off-pin build lands nowhere else */
+const LAB_NAME = /^(?!\.\.?$)[\w.-]+$/;
+
 const CONFIGURE_TIMEOUT_MS = 1_800_000;
 const BUILD_TIMEOUT_MS = 3_600_000;
 
@@ -88,6 +96,17 @@ export class BuildEngine {
   }
 
   async run(options: BuildEngineOptions): Promise<Result<BuildEngineReport>> {
+    const offPin = options.offPin;
+    if (offPin !== undefined && options.fromTarball === undefined)
+      return fail(
+        ExitCode.Usage,
+        "--off-pin names the lab directory a build of another commit installs into: give its tarball with --from-tarball FILE",
+      );
+    if (offPin !== undefined && !LAB_NAME.test(offPin))
+      return fail(
+        ExitCode.Usage,
+        `--off-pin takes one directory name under local/engine-lab/ (letters, digits, '.', '_', '-'), not ${JSON.stringify(offPin)}`,
+      );
     const card = options.cap === undefined ? await this.deps.gpu.query(options.gpu) : null;
     const cap = options.cap ?? card?.computeCap;
     if (cap === undefined)
@@ -97,11 +116,25 @@ export class BuildEngine {
       const message = `REFUSING sm_${cap}: not a measured card (engine.toml lists ${measured}); --allow-arch ${cap} builds it for a benchmark`;
       return fail(ExitCode.Unsupported, message);
     }
+    if (offPin !== undefined && options.fromTarball !== undefined)
+      return this.installOffPin(options.fromTarball, offPin, cap);
+    // before "already built": that answers for the pin, which a tarball of another commit is not
+    const misnamed = options.fromTarball && this.publisher.misnamed(options.fromTarball, cap);
+    if (misnamed) return fail(ExitCode.Failure, misnamed);
 
     const dir = this.engine.binDir(cap);
+    // --portable answers with a tarball of the portable baseline holding every target: a build here that is native,
+    // installed, or made before a target existed is compiled again (its build tree is kept, so only what it lacks
+    // compiles) and published over this one
+    const portable = options.portable === true && options.fromTarball === undefined;
     if (await isBuilt(this.deps.fs, dir)) {
       const marker = (await this.deps.fs.readText(join(dir, BUILD_MARKER))).trim();
-      return ok({ dir, cap, alreadyBuilt: true, marker });
+      if (!portable) return ok({ dir, cap, alreadyBuilt: true, marker });
+      if (await this.compiledPortable(dir, marker)) {
+        const tarball = await this.publisher.pack(dir, this.layout.engineBuildsDir, cap);
+        if (!tarball.ok) return tarball;
+        return ok({ dir, cap, alreadyBuilt: true, marker, tarball: tarball.value });
+      }
     }
     await this.deps.fs.mkdirp(this.layout.engineBuildsDir);
     await this.deps.fs.mkdirp(this.layout.logsDir);
@@ -121,12 +154,20 @@ export class BuildEngine {
     if (!marker.ok) return marker;
 
     const report: BuildEngineReport = { dir, cap, alreadyBuilt: false, marker: marker.value };
-    if (options.portable && !options.fromTarball) {
+    if (portable) {
       const tarball = await this.publisher.pack(dir, this.layout.engineBuildsDir, cap);
       if (!tarball.ok) return tarball;
       report.tarball = tarball.value;
     }
     return ok(report);
+  }
+
+  /** a build compiled here as the portable baseline (not installed: an installed one holds NVIDIA's runtime beside its
+   *  libraries, which a prebuilt never carries) that holds every target this rig compiles */
+  private async compiledPortable(dir: string, marker: string): Promise<boolean> {
+    if (!/\bnative=off\b/.test(marker) || !/\bsource=compiled\b/.test(marker)) return false;
+    for (const target of TARGETS) if (!(await this.deps.fs.exists(join(dir, target)))) return false;
+    return true;
   }
 
   /** the pin's published build and the CUDA runtime it links, each fetched by sha256 into
@@ -157,12 +198,54 @@ export class BuildEngine {
 
   /** a portable build of the pin from a file (an earlier box's, or one built for an image), with the pin's CUDA
    *  runtime beside it where engine.toml pins one, as a published build gets: a machine with only the driver runs it */
-  private async installTarball(tarball: string, cap: string, dir: string): Promise<Result<string>> {
+  private async installTarball(
+    tarball: string,
+    cap: string,
+    dir: string,
+    offPin?: { sha256: string },
+  ): Promise<Result<string>> {
     const runtime = await this.runtime();
     if (!runtime.ok) return runtime;
-    const published = await this.publisher.publishTarball(tarball, cap, dir, runtime.value);
+    const published = await this.publisher.publishTarball(tarball, cap, dir, runtime.value, offPin);
     if (published.ok) for (const archive of runtime.value) await this.deps.fs.remove(archive.path);
     return published;
+  }
+
+  /** a build of another commit from its tarball (a candidate's `--portable` output) for the lab, as
+   *  local/engine-lab/<name>/, never where env resolution looks, with the pin's CUDA runtime beside it as an installed
+   *  build carries it: an A/B of it against the pin compares the engines on one cuBLAS, which the lab's runtime guard
+   *  requires. The same tarball again is a no-op; another one under that name is refused. */
+  private async installOffPin(
+    tarball: string,
+    name: string,
+    cap: string,
+  ): Promise<Result<BuildEngineReport>> {
+    const { fs, hasher, log } = this.deps;
+    if (!(await fs.exists(tarball))) return fail(ExitCode.Failure, `${tarball} does not exist`);
+    const named = /^engine-sm(\d+)-/.exec(basename(tarball))?.[1];
+    if (named !== undefined && named !== cap)
+      return fail(
+        ExitCode.Failure,
+        `${basename(tarball)} is a build for sm_${named}, not this card's sm_${cap}`,
+      );
+    const dir = join(this.layout.engineLabDir, name);
+    const sha256 = await hasher.sha256File(tarball);
+    if (await fs.exists(dir)) {
+      const built = await isBuilt(fs, dir);
+      const marker = built ? (await fs.readText(join(dir, BUILD_MARKER))).trim() : "";
+      if (marker.includes(`sha256=${sha256}`)) return ok({ dir, cap, alreadyBuilt: true, marker });
+      return fail(
+        ExitCode.Failure,
+        `${dir} exists and is not ${basename(tarball)} (sha256 ${sha256.slice(0, 12)}): name another directory`,
+      );
+    }
+    await fs.mkdirp(this.layout.engineLabDir);
+    log.info(
+      `installing ${basename(tarball)} OFF THE PIN (not torad-labs/llama.cpp @ ${this.engine.sha7}), with the pin's CUDA runtime, for the lab → ${dir}`,
+    );
+    const marker = await this.installTarball(tarball, cap, dir, { sha256 });
+    if (!marker.ok) return marker;
+    return ok({ dir, cap, alreadyBuilt: false, marker: marker.value });
   }
 
   /** NVIDIA's CUDA runtime the pin links, each archive fetched by sha256 into local/downloads/; none when engine.toml
@@ -279,8 +362,9 @@ export class BuildEngine {
     return new RegExp(`^${key}:\\w+=(.+)$`, "m").exec(await this.deps.fs.readText(cache))?.[1];
   }
 
-  /** a build tree is reused only when CMakeCache.txt names this source and this directory:
-   *  one moved from elsewhere (a copied checkout, a renamed build dir) refuses to configure */
+  /** a build tree is reused only when CMakeCache.txt names this source and this directory (one moved from
+   *  elsewhere, a copied checkout or a renamed build dir, refuses to configure) and was configured with the prebuilt
+   *  UI off (one that downloaded it keeps tools/ui/dist, which an off build then embeds as stale assets) */
   private async cacheMatches(buildTree: string, source: string): Promise<boolean> {
     const cache = join(buildTree, "CMakeCache.txt");
     if (!(await this.deps.fs.exists(cache))) return true;
@@ -295,8 +379,15 @@ export class BuildEngine {
       this.deps.log.info(
         `discarding ${buildTree}: its cache was generated for ${home} in ${cacheDir}`,
       );
+      return false;
     }
-    return same;
+    const uiOff = /^LLAMA_USE_PREBUILT_UI:[A-Z]+=OFF$/m.test(text);
+    if (!uiOff) {
+      this.deps.log.info(
+        `discarding ${buildTree}: it was configured with the prebuilt web UI on, and the engine embeds none`,
+      );
+    }
+    return uiOff;
   }
 
   private keepLog(name: string, text: string): Promise<void> {

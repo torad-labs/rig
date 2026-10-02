@@ -18,7 +18,7 @@ export interface Layout {
   packs(head: string): string;
   /** published engine builds, one per commit and card: <sha7>-sm<cap>/ */
   engineBuildsDir: string;
-  /** tools/build-prebuilt.sh's tarballs, built on the release floor (glibc 2.35) */
+  /** `rig build --prebuilt`'s tarballs, built on the release floor (glibc 2.35) */
   releaseBuildsDir: string;
   /** builds a rented box made, as tarballs the next box of that sm unpacks */
   cachedBuildsDir: string;

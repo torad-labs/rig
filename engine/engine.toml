@@ -299,9 +299,9 @@ libs = ["libcublas.so.13", "libcublasLt.so.13"]
 
 # The pin's own build for a card, published with a fork release engine-<sha7>[-<n>]; `rig build`
 # installs it instead of compiling. A pin move republishes it or drops it: loadEngine refuses an
-# entry named for another commit. Publishing: `scripts/build-prebuilt.sh` (`rig build --portable`
+# entry named for another commit. Publishing: `rig build --prebuilt` (`rig build --portable`
 # inside Ubuntu 22.04, so glibc 2.35 is the floor; no build path, host or user recorded; libgomp
-# bundled; no OpenSSL), then `scripts/e2e-driver-only.sh <pack> --prebuilt <tarball>` must pass
+# bundled; no OpenSSL), then `rig e2e <pack> --prebuilt <tarball>` must pass
 # (Ubuntu 22.04, driver only: install, ldd -r, decode), then `gh release create` on the fork with
 # the tarball, and its sha256 here. A published asset is never replaced: a released rig pins its
 # sha, so a rebuild of the same commit is a new release, engine-<sha7>-<n>.

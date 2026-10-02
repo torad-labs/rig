@@ -282,7 +282,7 @@ describe("rig image", () => {
     const p = machine();
     p.fs.files.delete(TARBALL);
     const r = await build(p);
-    expect(!r.ok && r.message).toContain(`tools/build-prebuilt.sh --sha ${SHA}`);
+    expect(!r.ok && r.message).toContain(`rig build --prebuilt --sha ${SHA}`);
     const published = { ...engine, prebuiltFor: () => ({ cap: "120" }) } as unknown as Engine;
     const q = machine();
     q.fs.files.delete(TARBALL);

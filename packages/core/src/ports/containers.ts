@@ -6,6 +6,15 @@ export interface ContainerRun {
   gpu?: number;
   /** host path → container path, read-only */
   mounts?: Record<string, string>;
+  /** host path → container path, writable */
+  writable?: Record<string, string>;
+  /** the environment `cmd` runs with */
+  env?: Record<string, string>;
+  /** as the calling user and group, so what it writes into a writable mount is the caller's */
+  asCaller?: boolean;
+  /** a hard cap: `memory` with no swap beyond it (docker's size, "14g"), and a CPU quota */
+  limits?: { memory: string; cpus: number };
+  timeoutMs?: number;
 }
 export interface Containers {
   /** the image `context` holds a Dockerfile for, tagged `tag`, with each label; its output to `logPath` */

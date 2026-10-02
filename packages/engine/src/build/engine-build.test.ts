@@ -220,10 +220,10 @@ describe("build", () => {
     expect(r.ok).toBe(true);
     expect(await p.fs.exists(`${bld}/stale.o`)).toBe(false);
     expect(p.log.lines.join("\n")).toContain("discarding");
-    // a cache made for this source in this directory is kept (an incremental build)
+    // a cache made for this source in this directory, with the web UI off, is kept (an incremental build)
     p.fs.put(
       `${bld}/CMakeCache.txt`,
-      `CMAKE_HOME_DIRECTORY:INTERNAL=/r/engine/llama.cpp\nCMAKE_CACHEFILE_DIR:INTERNAL=${bld}\n`,
+      `CMAKE_HOME_DIRECTORY:INTERNAL=/r/engine/llama.cpp\nCMAKE_CACHEFILE_DIR:INTERNAL=${bld}\nLLAMA_USE_PREBUILT_UI:BOOL=OFF\n`,
     );
     p.fs.put(`${bld}/keep.o`, "x");
     await p.fs.remove(`${layout.engineBuildsDir}/${engine.sha7}-sm120`);
@@ -248,6 +248,31 @@ describe("build", () => {
     expect(configure).toContain(`-DCMAKE_CXX_FLAGS=${map}`);
     expect(configure).toContain(`-DCMAKE_CUDA_FLAGS=-Xcompiler=${map}`);
   });
+  test("the engine embeds no web UI, so no build reaches the network for one: the HF download is off, not only the npm build", async () => {
+    const { p, uc } = await setup();
+    await uc.run({ gpu: 0 });
+    const configure = p.shell.calls.find((c) => c[0] === "cmake" && c[1] === "-S")!;
+    // LLAMA_BUILD_UI=OFF alone leaves ui-assets.cmake's step 3 on: LLAMA_USE_PREBUILT_UI (default ON) downloads
+    // whatever the bucket's "latest" is and embeds it, so no two builds of one commit were the same
+    expect(configure).toContain("-DLLAMA_BUILD_UI=OFF");
+    expect(configure).toContain("-DLLAMA_USE_PREBUILT_UI=OFF");
+  });
+  test("a build tree configured with the prebuilt UI on is discarded, with the reason: its downloaded assets would be embedded as stale", async () => {
+    const { p, uc, layout } = await setup();
+    const bld = `${layout.engineBuildTreesDir}/${engine.sha7}-sm120`;
+    for (const entry of ["LLAMA_USE_PREBUILT_UI:BOOL=ON\n", ""]) {
+      p.fs.put(
+        `${bld}/CMakeCache.txt`,
+        `CMAKE_HOME_DIRECTORY:INTERNAL=/r/engine/llama.cpp\nCMAKE_CACHEFILE_DIR:INTERNAL=${bld}\n${entry}`,
+      );
+      p.fs.put(`${bld}/tools/ui/dist/index.html`, "downloaded");
+      await p.fs.remove(`${layout.engineBuildsDir}/${engine.sha7}-sm120`);
+      p.log.lines.length = 0;
+      expect((await uc.run({ gpu: 0 })).ok).toBe(true);
+      expect(await p.fs.exists(`${bld}/tools/ui/dist/index.html`)).toBe(false);
+      expect(p.log.lines.join("\n")).toContain("web UI");
+    }
+  });
   test("--portable links no OpenSSL (a newer host's would not load on an older one); native does, both say so", async () => {
     const configureOf = async (portable: boolean) => {
       const { p, uc } = await setup();
@@ -270,6 +295,58 @@ describe("build", () => {
     expect(pack).toContain("--owner=0");
     expect(pack).toContain("--numeric-owner");
   });
+  describe("--portable over a build already published here", () => {
+    const dir = `/r/local/engine-builds/${engine.sha7}-sm120`;
+    const tarball = `/r/local/engine-builds/engine-sm120-${engine.sha7}.tar.gz`;
+    /** a build published here before this run: its marker, and `targets` */
+    async function over(native: "on" | "off", targets: readonly string[], source = "compiled") {
+      const s = await setup();
+      s.p.shell.on(/^tar -C \S+ -czf/, { code: 0, stdout: "", stderr: "" });
+      s.p.fs.put(
+        `${dir}/BUILD`,
+        `fork=${engine.fork.sha} cap=sm_120 native=${native} built=2026-10-01T19:43:36.779Z host=h source=${source}`,
+      );
+      for (const t of targets) s.p.fs.put(`${dir}/${t}`, `old ${t}`);
+      return s;
+    }
+    test("one made before a target existed is compiled again, and the tarball holds every target", async () => {
+      const { p, uc } = await over(
+        "off",
+        TARGETS.filter((t) => t !== "llama-perplexity"),
+      );
+      const r = await uc.run({ gpu: 0, portable: true });
+      expect(r.ok ? { built: r.value.alreadyBuilt, tarball: r.value.tarball } : r.message).toEqual({
+        built: false,
+        tarball,
+      });
+      expect(p.shell.calls.some((c) => c[0] === "cmake")).toBe(true);
+      for (const t of TARGETS) expect(p.fs.text(`${dir}/${t}`)).toBe(`elf ${t}`);
+    });
+    test("a native one is compiled again as the portable baseline", async () => {
+      const { p, uc } = await over("on", TARGETS);
+      const r = await uc.run({ gpu: 0, portable: true });
+      expect(r.ok && r.value.tarball).toBe(tarball);
+      expect(p.fs.text(`${dir}/BUILD`)).toContain("native=off");
+    });
+    test("an installed one is compiled again: it holds NVIDIA's runtime beside its libraries, which a prebuilt never carries", async () => {
+      const { p, uc } = await over("off", TARGETS, `tarball:engine-sm120-${engine.sha7}.tar.gz`);
+      p.fs.put(`${dir}/libcudart.so.13`, "so libcudart.so.13");
+      const r = await uc.run({ gpu: 0, portable: true });
+      expect(r.ok && r.value.tarball).toBe(tarball);
+      expect(p.shell.calls.some((c) => c[0] === "cmake")).toBe(true);
+      expect(await p.fs.exists(`${dir}/libcudart.so.13`)).toBe(false);
+    });
+    test("a complete portable one is packed again, compiling nothing: --portable always answers with its tarball", async () => {
+      const { p, uc } = await over("off", TARGETS);
+      const r = await uc.run({ gpu: 0, portable: true });
+      expect(r.ok ? { built: r.value.alreadyBuilt, tarball: r.value.tarball } : r.message).toEqual({
+        built: true,
+        tarball,
+      });
+      expect(p.shell.calls.some((c) => c[0] === "cmake")).toBe(false);
+      expect(p.shell.calls.some((c) => c.includes("-czf"))).toBe(true);
+    });
+  });
   test("a portable build ships the compiler's libgomp beside its targets; a native one does not", async () => {
     const portable = await setup();
     portable.p.shell.on(/^tar -C \S+ -czf/, { code: 0, stdout: "", stderr: "" });
@@ -288,7 +365,7 @@ describe("build", () => {
     const tree = `/r/local/engine-build-trees/${engine.sha7}-sm120`;
     p.fs.put(
       `${tree}/CMakeCache.txt`,
-      `CMAKE_HOME_DIRECTORY:INTERNAL=/r/engine/llama.cpp\nCMAKE_CACHEFILE_DIR:INTERNAL=${tree}\nCMAKE_CXX_COMPILER:FILEPATH=/opt/gcc/bin/g++\n`,
+      `CMAKE_HOME_DIRECTORY:INTERNAL=/r/engine/llama.cpp\nCMAKE_CACHEFILE_DIR:INTERNAL=${tree}\nCMAKE_CXX_COMPILER:FILEPATH=/opt/gcc/bin/g++\nLLAMA_USE_PREBUILT_UI:BOOL=OFF\n`,
     );
     p.shell.on(/^\/opt\/gcc\/bin\/g\+\+ -print-file-name=/, {
       code: 0,
@@ -370,10 +447,44 @@ glibc = "2.35"
 `;
   const downloads = "/r/local/downloads";
   const dir = `/r/local/engine-builds/${engine.sha7}-sm120`;
+  /** engine-sm120-32e695e.tar.gz as published on Sep 27, 2026 (sha256 9df73c20…, engine.toml's [[prebuilt]]): its
+   *  members by `tar -tzf`, not TARGETS. A published build never changes, so it holds the targets of its day: this one
+   *  predates llama-perplexity (f183b82), and v0.1.11 refused to install it on every fresh machine. */
+  const PUBLISHED_32E695E = [
+    "libggml-base.so.0.21.0",
+    "libggml-base.so.0",
+    "libggml-base.so",
+    "libggml-cpu.so.0.21.0",
+    "libggml-cpu.so.0",
+    "libggml-cpu.so",
+    "libggml-cuda.so.0.21.0",
+    "libggml-cuda.so.0",
+    "libggml-cuda.so",
+    "libggml.so.0.21.0",
+    "libggml.so.0",
+    "libggml.so",
+    "libllama.so.0.2.0",
+    "libllama.so.0",
+    "libllama.so",
+    "libllama-common.so.0.2.0",
+    "libmtmd.so.0.2.0",
+    "libmtmd.so.0",
+    "libmtmd.so",
+    "libllama-common.so.0",
+    "libllama-common.so",
+    "llama-kv-mean-center",
+    "libllama-bench-impl.so",
+    "libllama-server-impl.so",
+    "llama-bench",
+    "llama-server",
+    "libgomp.so.1",
+  ];
 
-  /** curl writes each file's bytes (`served` overrides one); tar unpacks the build, and each
-   *  runtime archive the libraries its wildcards name (`omit` leaves one out) */
-  async function prebuiltSetup(o: { served?: Record<string, string>; omit?: string } = {}) {
+  /** curl writes each file's bytes (`served` overrides one); tar unpacks the build (`members`, TARGETS unless
+   *  given), and each runtime archive the libraries its wildcards name (`omit` leaves one out) */
+  async function prebuiltSetup(
+    o: { served?: Record<string, string>; omit?: string; members?: readonly string[] } = {},
+  ) {
     const s = await setup(prebuiltToml);
     s.p.shell.on(/^curl/, (cmd) => {
       const out = cmd[cmd.indexOf("-o") + 1]!;
@@ -382,7 +493,7 @@ glibc = "2.35"
       return { code: 0, stdout: "", stderr: "" };
     });
     s.p.shell.on(/^tar -C (\S+) -xzf/, (cmd) => {
-      for (const t of TARGETS) s.p.fs.put(`${cmd[2]}/${t}`, `elf ${t}`);
+      for (const t of o.members ?? TARGETS) s.p.fs.put(`${cmd[2]}/${t}`, `elf ${t}`);
       return { code: 0, stdout: "", stderr: "" };
     });
     s.p.shell.on(/^tar -C (\S+) -xJf/, (cmd) => {
@@ -413,6 +524,28 @@ glibc = "2.35"
     for (const name of Object.keys(bytes))
       expect(await p.fs.exists(`${downloads}/${name}`)).toBe(false);
   });
+  test("installs a build published before llama-perplexity was a target: an install needs the targets that serve", async () => {
+    const { p, uc } = await prebuiltSetup({ members: PUBLISHED_32E695E });
+    const r = await uc.run({ gpu: 0 });
+    expect(r.ok ? r.value.marker : r.message).toContain(`source=tarball:${tarballName}`);
+    for (const target of ["llama-server", "llama-bench", "llama-kv-mean-center"])
+      expect(await p.fs.exists(`${dir}/${target}`)).toBe(true);
+    expect(await p.fs.exists(`${dir}/llama-perplexity`)).toBe(false);
+    // the symbol check ran over the targets the tarball holds, and asked nothing of the one it lacks
+    const checked = p.shell.calls
+      .filter((c) => c[0] === "ldd")
+      .map((c) => c.at(-1)!.split("/").at(-1));
+    expect(checked).toContain("llama-server");
+    expect(checked).not.toContain("llama-perplexity");
+  });
+  test("an install still refuses a tarball missing a target that serves, by name", async () => {
+    const members = PUBLISHED_32E695E.filter((m) => m !== "llama-bench");
+    const { p, uc } = await prebuiltSetup({ members });
+    const r = await uc.run({ gpu: 0 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("llama-bench is missing");
+    expect(await p.fs.exists(dir)).toBe(false);
+  });
   test("--cap installs with no card present, and a tarball given by hand gets the pin's CUDA runtime beside it", async () => {
     const { p, uc } = await prebuiltSetup();
     p.gpu.cards.clear(); // an image build: no card
@@ -430,6 +563,78 @@ glibc = "2.35"
       expect(await p.fs.exists(`${downloads}/${name}`)).toBe(false);
     const again = await uc.run({ gpu: 0, cap: "120" });
     expect(again.ok && again.value.alreadyBuilt).toBe(true); // published under the pin, a later build finds it
+  });
+
+  // a candidate's `--portable` output: another commit's build, which the lab A/Bs against the pin
+  const candidate = "/r/local/candidates/engine-sm120-0123abc.tar.gz";
+  const lab = "/r/local/engine-lab/cand";
+  test("a tarball off the pin is refused without --off-pin, the refusal naming the flag, and nothing is published", async () => {
+    const { p, uc } = await prebuiltSetup();
+    p.fs.put(candidate, "a candidate build");
+    const r = await uc.run({ gpu: 0, fromTarball: candidate });
+    expect(!r.ok && r.message).toContain("--off-pin");
+    expect(await p.fs.exists(dir)).toBe(false);
+    expect(await p.fs.exists(lab)).toBe(false);
+    // and where the pin is already installed: "already built" would answer for a build that was not asked for
+    expect((await uc.run({ gpu: 0 })).ok).toBe(true);
+    const installed = await uc.run({ gpu: 0, fromTarball: candidate });
+    expect(!installed.ok && installed.message).toContain("--off-pin");
+  });
+  test("--off-pin installs it as local/engine-lab/<name>/ with the pin's CUDA runtime beside it, never as the pin's build", async () => {
+    const { p, uc } = await prebuiltSetup();
+    p.fs.put(candidate, "a candidate build");
+    // a tarball packed by hand can carry its builder's marker, naming the pin
+    p.shell.on(/^tar -C (\S+) -xzf/, (cmd) => {
+      for (const t of TARGETS) p.fs.put(`${cmd[2]}/${t}`, `elf ${t}`);
+      p.fs.put(`${cmd[2]}/BUILD`, `fork=${engine.fork.sha} cap=sm_120`);
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    // one named for another card is refused by its name, as the pin's are
+    const sm90 = "/r/local/candidates/engine-sm90-0123abc.tar.gz";
+    p.fs.put(sm90, "a candidate build for sm_90");
+    const wrong = await uc.run({ gpu: 0, fromTarball: sm90, offPin: "cand" });
+    expect(!wrong.ok && wrong.message).toContain("a build for sm_90, not this card's sm_120");
+    const r = await uc.run({ gpu: 0, fromTarball: candidate, offPin: "cand" });
+    expect(r.ok && [r.value.dir, r.value.alreadyBuilt]).toEqual([lab, false]);
+    for (const lib of ["libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13", "llama-server"])
+      expect(await p.fs.exists(`${lab}/${lib}`)).toBe(true);
+    const marker = p.fs.text(`${lab}/BUILD`);
+    expect(marker).toContain("fork=off-pin");
+    expect(marker).not.toContain(engine.fork.sha);
+    expect(marker).toContain(`sha256=${sha("a candidate build")}`);
+    // the symbol check ran over it with the runtime beside it, as over an installed build
+    expect(p.shell.calls.some((c) => c[0] === "ldd")).toBe(true);
+    expect(await p.fs.exists(dir)).toBe(false); // where env resolution looks: never there
+    expect(await p.fs.exists(candidate)).toBe(true);
+    for (const name of ["cuda_cudart-archive.tar.xz", "libcublas-archive.tar.xz"])
+      expect(await p.fs.exists(`${downloads}/${name}`)).toBe(false);
+  });
+  test("--off-pin again with the same tarball is a no-op, and another tarball under that name is refused", async () => {
+    const { p, uc } = await prebuiltSetup();
+    p.fs.put(candidate, "a candidate build");
+    expect((await uc.run({ gpu: 0, fromTarball: candidate, offPin: "cand" })).ok).toBe(true);
+    const again = await uc.run({ gpu: 0, fromTarball: candidate, offPin: "cand" });
+    expect(again.ok && again.value.alreadyBuilt).toBe(true);
+    const other = "/r/local/candidates/engine-sm120-4567def.tar.gz";
+    p.fs.put(other, "another candidate");
+    const clash = await uc.run({ gpu: 0, fromTarball: other, offPin: "cand" });
+    expect(!clash.ok && clash.message).toContain(`${lab} exists`);
+    expect(p.fs.text(`${lab}/BUILD`)).toContain(`sha256=${sha("a candidate build")}`);
+  });
+  test("--off-pin without --from-tarball, or naming a path and not a directory, is a usage error before anything runs", async () => {
+    const { p, uc } = await prebuiltSetup();
+    p.gpu.cards.clear(); // refused before the card is asked for
+    p.fs.put(candidate, "a candidate build");
+    const bare = await uc.run({ gpu: 0, offPin: "cand" });
+    expect(!bare.ok && [bare.code, bare.message.includes("--from-tarball")]).toEqual([
+      ExitCode.Usage,
+      true,
+    ]);
+    for (const name of ["../engine-builds/x", "a/b", "..", ""]) {
+      const r = await uc.run({ gpu: 0, fromTarball: candidate, offPin: name });
+      expect(!r.ok && r.code).toBe(ExitCode.Usage);
+    }
+    expect(p.shell.calls.length).toBe(0);
   });
   test("a download that is not the pinned bytes is refused and nothing is published; what verified is kept for a retry", async () => {
     const { p, uc } = await prebuiltSetup({ served: { "libcublas-archive.tar.xz": "tampered" } });

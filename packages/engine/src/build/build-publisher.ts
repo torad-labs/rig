@@ -8,7 +8,13 @@
 import { basename, join } from "node:path";
 import type { Clock, FileSystem, Host, Shell } from "@rig/core";
 import { ExitCode, fail, ok, type Result } from "@rig/core";
-import { BUILD_MARKER, type Engine, engineTarballName, TARGETS } from "../engine.ts";
+import {
+  BUILD_MARKER,
+  type Engine,
+  engineTarballName,
+  SERVING_TARGETS,
+  TARGETS,
+} from "../engine.ts";
 
 export interface PublisherDeps {
   fs: FileSystem;
@@ -29,6 +35,8 @@ export interface Provenance {
   native: "on" | "off";
   /** "compiled", or "tarball:<name>" */
   source: string;
+  /** a build of another commit (`--off-pin`): its marker names no fork commit, and the tarball by sha256 */
+  offPin?: { sha256: string };
 }
 
 export class BuildPublisher {
@@ -40,6 +48,13 @@ export class BuildPublisher {
   /** the name a cached build of this engine for this card must carry */
   tarballName(cap: string): string {
     return engineTarballName(this.engine.sha7, cap);
+  }
+
+  /** why `tarball` is not this engine's build for `cap`, read from its name, else null */
+  misnamed(tarball: string, cap: string): string | null {
+    const expected = this.tarballName(cap);
+    if (basename(tarball) === expected) return null;
+    return `${basename(tarball)} is not the tarball for sm_${cap} @ ${this.engine.sha7} (expected ${expected}); a build of another commit installs for the lab with --off-pin NAME`;
   }
 
   /** a staging directory beside `dir`, emptied */
@@ -63,22 +78,20 @@ export class BuildPublisher {
     return this.publish(staging, dir, provenance);
   }
 
-  /** a cached tarball, checked by name, unpacked with the libraries of each `runtime` archive
-   *  beside it, and published as `dir` */
+  /** a cached tarball, checked by name unless it is `offPin` (a build of another commit), unpacked with the
+   *  libraries of each `runtime` archive beside it, and published as `dir` */
   async publishTarball(
     tarball: string,
     cap: string,
     dir: string,
     runtime: RuntimeArchive[] = [],
+    offPin?: { sha256: string },
   ): Promise<Result<string>> {
     if (!(await this.deps.fs.exists(tarball))) {
       return fail(ExitCode.Failure, `${tarball} does not exist`);
     }
-    const expected = this.tarballName(cap);
-    if (basename(tarball) !== expected) {
-      const message = `${basename(tarball)} is not the tarball for sm_${cap} @ ${this.engine.sha7} (expected ${expected})`;
-      return fail(ExitCode.Failure, message);
-    }
+    const misnamed = offPin ? null : this.misnamed(tarball, cap);
+    if (misnamed) return fail(ExitCode.Failure, misnamed);
     const staging = await this.stage(dir);
     await this.deps.fs.mkdirp(staging);
     const untar = await this.deps.shell.run(["tar", "-C", staging, "-xzf", tarball], {
@@ -96,7 +109,7 @@ export class BuildPublisher {
       }
     }
     const source = `tarball:${basename(tarball)}`;
-    return this.publish(staging, dir, { cap, native: "off", source });
+    return this.publish(staging, dir, { cap, native: "off", source, ...(offPin && { offPin }) });
   }
 
   /** an NVIDIA redistributable archive (<name>-archive/lib/<soname>*) reduced to the libraries it
@@ -147,28 +160,42 @@ export class BuildPublisher {
     return ok(tarball);
   }
 
-  /** every target present, the marker last, then one rename; the marker's text is returned */
+  /** every target present (a compiled build's every TARGET, a tarball's the SERVING_TARGETS: it holds the targets of
+   *  the day it was published), the marker last, then one rename, moving aside a build already there (a rename onto a
+   *  directory that holds files fails); the marker's text is returned */
   private async publish(
     staging: string,
     dir: string,
     provenance: Provenance,
   ): Promise<Result<string>> {
-    for (const target of TARGETS) {
+    const required = provenance.source === "compiled" ? TARGETS : SERVING_TARGETS;
+    for (const target of required) {
       if (!(await this.deps.fs.exists(join(staging, target)))) {
         await this.deps.fs.remove(staging);
         return fail(ExitCode.Failure, `${target} is missing from the build output`);
       }
     }
-    const unresolved = await this.unresolvedSymbol(staging);
+    const present: string[] = [];
+    for (const target of TARGETS)
+      if (await this.deps.fs.exists(join(staging, target))) present.push(target);
+    const unresolved = await this.unresolvedSymbol(staging, present);
     if (unresolved) {
       await this.deps.fs.remove(staging);
       return fail(ExitCode.Failure, unresolved);
     }
     const markerPath = join(staging, BUILD_MARKER);
-    if (!(await this.deps.fs.exists(markerPath))) {
+    // an off-pin build's marker is always rig's own: a tarball packed by hand can carry one naming the pin
+    if (provenance.offPin || !(await this.deps.fs.exists(markerPath))) {
       await this.deps.fs.writeText(markerPath, `${this.marker(provenance)}\n`);
     }
+    const old = `${dir}.old-${process.pid}`;
+    const replacing = await this.deps.fs.exists(dir);
+    if (replacing) {
+      await this.deps.fs.remove(old);
+      await this.deps.fs.rename(dir, old);
+    }
     await this.deps.fs.rename(staging, dir);
+    if (replacing) await this.deps.fs.remove(old);
     return ok((await this.deps.fs.readText(join(dir, BUILD_MARKER))).trim());
   }
 
@@ -180,8 +207,8 @@ export class BuildPublisher {
    *  libraries are resolved from the staging directory the way the unit and the gate load them
    *  (LD_LIBRARY_PATH = the build dir): an inherited LD_LIBRARY_PATH outranks the $ORIGIN runpath
    *  and would check the libraries of whatever build it names instead of these. */
-  private async unresolvedSymbol(staging: string): Promise<string | null> {
-    for (const target of TARGETS) {
+  private async unresolvedSymbol(staging: string, targets: string[]): Promise<string | null> {
+    for (const target of targets) {
       const ldd = await this.deps.shell.run(["ldd", "-r", join(staging, target)], {
         timeoutMs: 60_000,
         env: { LD_LIBRARY_PATH: staging },
@@ -197,6 +224,8 @@ export class BuildPublisher {
 
   private marker(provenance: Provenance): string {
     const built = new Date(this.deps.clock.now()).toISOString();
-    return `fork=${this.engine.fork.sha} cap=sm_${provenance.cap} native=${provenance.native} built=${built} host=${this.deps.host.hostname()} source=${provenance.source}`;
+    const fork = provenance.offPin ? "off-pin" : this.engine.fork.sha;
+    const sha256 = provenance.offPin ? ` sha256=${provenance.offPin.sha256}` : "";
+    return `fork=${fork} cap=sm_${provenance.cap} native=${provenance.native} built=${built} host=${this.deps.host.hostname()} source=${provenance.source}${sha256}`;
   }
 }

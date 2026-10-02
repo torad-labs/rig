@@ -58,7 +58,10 @@ export function configureArgv(request: ConfigureRequest): string[] {
     "-DLLAMA_BUILD_EXAMPLES=OFF",
     "-DLLAMA_BUILD_TESTS=OFF",
     "-DLLAMA_BUILD_MTMD=OFF",
+    // no web UI: -DLLAMA_BUILD_UI=OFF stops only the npm build; ui-assets.cmake's step 3 downloads the HF bucket's
+    // "latest" while LLAMA_USE_PREBUILT_UI (default ON) is on, an unpinned network input embedded in llama-server
     "-DLLAMA_BUILD_UI=OFF",
+    "-DLLAMA_USE_PREBUILT_UI=OFF",
   ];
 }
 

@@ -16,13 +16,23 @@ export class DockerContainers implements Containers {
   }
   run(image: string, cmd: readonly string[], options: ContainerRun = {}): Promise<RunResult> {
     const device = options.gpu === undefined ? [] : ["--device", `nvidia.com/gpu=${options.gpu}`];
-    const mounts = Object.entries(options.mounts ?? {}).flatMap(([host, at]) => [
-      "-v",
-      `${host}:${at}:ro`,
+    const user = options.asCaller ? ["--user", `${process.getuid?.()}:${process.getgid?.()}`] : [];
+    const { memory, cpus } = options.limits ?? {};
+    const limits = options.limits
+      ? ["--memory", `${memory}`, "--memory-swap", `${memory}`, "--cpus", `${cpus}`]
+      : [];
+    const env = Object.entries(options.env ?? {}).flatMap(([key, value]) => [
+      "-e",
+      `${key}=${value}`,
     ]);
-    return this.shell.run(["docker", "run", "--rm", ...device, ...mounts, image, ...cmd], {
-      timeoutMs: RUN_TIMEOUT_MS,
-    });
+    const mounts = [
+      ...Object.entries(options.mounts ?? {}).map(([host, at]) => `${host}:${at}:ro`),
+      ...Object.entries(options.writable ?? {}).map(([host, at]) => `${host}:${at}`),
+    ].flatMap((mount) => ["-v", mount]);
+    return this.shell.run(
+      ["docker", "run", "--rm", ...device, ...user, ...limits, ...env, ...mounts, image, ...cmd],
+      { timeoutMs: options.timeoutMs ?? RUN_TIMEOUT_MS },
+    );
   }
   save(image: string, tarball: string) {
     return this.shell.run(["docker", "save", "-o", tarball, image], {

@@ -134,12 +134,11 @@ export const BUILD_MARKER = "BUILD";
 // so leaving it out made that second half false -- a rented box, which only ever has installed builds,
 // could not measure its own engine's KL. The lab swaps the LIBRARY under one driver, so one build's
 // llama-perplexity measures any other build of the same soname.
-export const TARGETS = [
-  "llama-server",
-  "llama-bench",
-  "llama-kv-mean-center",
-  "llama-perplexity",
-] as const;
+/** the targets every published build holds, which an install needs: a published tarball never changes, so it keeps
+ *  the targets of the day it was published (engine-sm120-32e695e.tar.gz predates llama-perplexity) */
+export const SERVING_TARGETS = ["llama-server", "llama-bench", "llama-kv-mean-center"] as const;
+/** what a build compiles, and a compiled build must hold */
+export const TARGETS = [...SERVING_TARGETS, "llama-perplexity"] as const;
 
 export async function loadEngine(fs: FileSystem, layout: Layout): Promise<Result<Engine>> {
   const file = join(layout.engineDir, "engine.toml");

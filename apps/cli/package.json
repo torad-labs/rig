@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "description": "The rig binary: one command per verb over the packages, and the composition root that wires them to the real machine.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "bin": {
     "rig": "src/main.ts"
   },
