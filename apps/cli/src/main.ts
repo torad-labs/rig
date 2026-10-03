@@ -13,6 +13,7 @@ import {
   EngineLab,
   headEngine,
   loadEngine,
+  TagRelease,
 } from "@rig/engine";
 import { allProbes, RunGates } from "@rig/gate";
 import { listHeads, loadHead } from "@rig/head";
@@ -34,6 +35,7 @@ import { runGatesCommand } from "./commands/gate.command.ts";
 import { buildImageCommand, type PublishAfterPush } from "./commands/image.command.ts";
 import { checkMachineCommand } from "./commands/prepare.command.ts";
 import { serveHeadCommand } from "./commands/serve.command.ts";
+import { tagCommand } from "./commands/tag.command.ts";
 import { manageUnitCommand } from "./commands/unit.command.ts";
 import { bringUpHeadCommand } from "./commands/up.command.ts";
 import { gpuRentalCommand, publishTemplate } from "./commands/vast.command.ts";
@@ -160,6 +162,7 @@ function commandsFor(
     ...(wired?.commands ?? []),
     gpuRentalCommand(vast, template, guard, sweep, head, ports.log),
     lab,
+    tagCommand(new TagRelease(ports, layout), ports.log),
   ];
 }
 

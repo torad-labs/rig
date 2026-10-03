@@ -106,6 +106,89 @@ describe("rig engine", () => {
     expect(p.cardLease.leases).toEqual([]);
   });
 
+  test("--b-args is one argument under the lease, whitespace and all, and only ab takes it", async () => {
+    const { p, command } = setup();
+    p.shell.on(/^\/bin\/rig engine/, { code: 0, stdout: "", stderr: "" });
+    await command.run(
+      parseArgs([
+        "ab",
+        "--tree",
+        "glm",
+        "--gpu",
+        "0",
+        "--model",
+        "/m.gguf",
+        "--b-args=-ctk q8_0 -ctv q8_0",
+        "--run",
+        "kv",
+      ]),
+    );
+    expect(p.cardLease.leases[0]?.cmd).toContain("--b-args=-ctk q8_0 -ctv q8_0");
+    await expect(
+      command.run(
+        parseArgs([
+          "kld",
+          "--tree",
+          "glm",
+          "--gpu",
+          "0",
+          "--model",
+          "/m.gguf",
+          "--text",
+          "/t",
+          "--base",
+          "/b",
+          "--tag",
+          "x",
+          "--b-args=-ctk q8_0",
+        ]),
+      ),
+    ).rejects.toThrow(UsageError);
+  });
+
+  test("held, --a-args and --b-args are the arguments of that side's bench and of no other", async () => {
+    const { p, command } = setup();
+    const tree = "/r/local/engine-build-trees/glm";
+    p.fs.put(`${tree}/bin/libggml-cuda.so.0`, "the tree's library");
+    p.fs.put(`${tree}/bin/llama-bench`, "elf");
+    p.shell.on(/^ldd /, (_cmd, opts) => ({
+      code: 0,
+      stdout: `\tlibggml-cuda.so.0 => ${opts?.env?.LD_LIBRARY_PATH?.split(":")[0]}/libggml-cuda.so.0 (0x7f)\n`,
+      stderr: "",
+    }));
+    const benches: string[] = [];
+    // -o jsonl is on the bench argv and not on the ldd one, which also names llama-bench
+    p.shell.on(/-o jsonl/, (cmd) => {
+      benches.push(cmd.slice(cmd.indexOf("-p")).join(" "));
+      return { code: 0, stdout: `{"samples_ts": [1, 100, 100]}\n`, stderr: "" };
+    });
+    const code = await command.run(
+      parseArgs([
+        "ab",
+        "--tree",
+        "glm",
+        "--gpu",
+        "0",
+        "--model",
+        "/m.gguf",
+        "--a-args=-ctk f16",
+        "--b-args=  -ctk q8_0   -ctv q8_0 ",
+        "--pairs",
+        "1",
+        "--run",
+        "kv",
+        "--held",
+        "--",
+        "-p",
+        "0",
+      ]),
+    );
+    expect(code).toBe(0);
+    // pair 1 runs a then b; the b value's stray spaces are not arguments
+    expect(benches).toEqual(["-p 0 -ctk f16", "-p 0 -ctk q8_0 -ctv q8_0"]);
+    expect(p.log.lines.join("\n")).toContain("with -ctk q8_0 -ctv q8_0");
+  });
+
   test("an unknown subcommand is a usage error", async () => {
     const { command } = setup();
     expect(await command.run(parseArgs(["bench"]))).toBe(ExitCode.Usage);

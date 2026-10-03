@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ExitCode, layoutAt } from "@rig/core";
+import { ExitCode, layoutAt, type RunOptions } from "@rig/core";
 import { fakePorts, repoRoot } from "@rig/testing";
 import { loadEngine, TARGETS } from "../engine.ts";
 import { BuildEngine } from "./engine-build.service.ts";
@@ -673,5 +673,81 @@ glibc = "2.35"
       expect(p.shell.calls.some((c) => c[0] === "cmake")).toBe(true);
       expect(p.shell.calls.some((c) => c[0] === "curl")).toBe(false);
     }
+  });
+});
+
+describe("build, on a machine with no NVIDIA driver (a compile in a container with no card)", () => {
+  const STUB = "/usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so";
+  const tree = `/r/local/engine-build-trees/${engine.sha7}-sm120`;
+  const NO_DRIVER = {
+    code: 0,
+    stdout: "\tlibcuda.so.1 => not found\n",
+    stderr: "undefined symbol: cuMemCreate\t(/r/libggml-cuda.so.0)\n",
+  };
+
+  /** configure leaves the entry cmake's FindCUDAToolkit writes: the libcuda stub the engine links against */
+  function configures(p: Awaited<ReturnType<typeof setup>>["p"], entries: string) {
+    p.shell.on(/^cmake -S/, () => {
+      p.fs.put(
+        `${tree}/CMakeCache.txt`,
+        `CMAKE_HOME_DIRECTORY:INTERNAL=/r/engine/llama.cpp\nCMAKE_CACHEFILE_DIR:INTERNAL=${tree}\n${entries}`,
+      );
+      return { code: 0, stdout: "configured", stderr: "" };
+    });
+  }
+  /** ldd as the loader answers it, recording what each call preloaded */
+  function loader(
+    p: Awaited<ReturnType<typeof setup>>["p"],
+    answer: (preload: string | undefined) => { code: number; stdout: string; stderr: string },
+  ) {
+    const preloaded: (string | undefined)[] = [];
+    p.shell.on(/^ldd -r /, (_cmd, opts?: RunOptions) => {
+      preloaded.push(opts?.env?.LD_PRELOAD);
+      return answer(opts?.env?.LD_PRELOAD);
+    });
+    return preloaded;
+  }
+
+  test("libcuda.so.1 resolves through the toolkit's stub the engine linked against, preloaded only after a check without it fails to find the driver", async () => {
+    const { p, uc } = await setup();
+    configures(p, `CUDA_cuda_driver_LIBRARY:FILEPATH=${STUB}\n`);
+    const preloaded = loader(p, (preload) =>
+      preload === STUB ? { code: 0, stdout: `\tlibcuda.so.1 => ${STUB}\n`, stderr: "" } : NO_DRIVER,
+    );
+    const r = await uc.run({ gpu: 0 });
+    expect(r.ok).toBe(true);
+    expect(preloaded).toEqual(TARGETS.flatMap(() => [undefined, STUB]));
+  });
+  test("a machine with the driver resolves against it: the stub is never preloaded", async () => {
+    const { p, uc } = await setup();
+    configures(p, `CUDA_cuda_driver_LIBRARY:FILEPATH=${STUB}\n`);
+    const preloaded = loader(p, () => ({
+      code: 0,
+      stdout: "\tlibcuda.so.1 => /usr/lib/x86_64-linux-gnu/libcuda.so.1\n",
+      stderr: "",
+    }));
+    expect((await uc.run({ gpu: 0 })).ok).toBe(true);
+    expect(preloaded).toEqual(TARGETS.map(() => undefined));
+  });
+  test("a symbol that is really missing is refused by name under the stub too, and nothing is published", async () => {
+    const { p, uc } = await setup();
+    configures(p, `CUDA_cuda_driver_LIBRARY:FILEPATH=${STUB}\n`);
+    const missing =
+      "undefined symbol: _Z14mul_mat_q_caseIL9ggml_type142EEvR25ggml_backend_cuda_contextRK8mmq_argsP11CUstream_st\t(/r/libggml-cuda.so.0)";
+    loader(p, (preload) =>
+      preload === STUB ? { code: 0, stdout: "", stderr: missing } : NO_DRIVER,
+    );
+    const r = await uc.run({ gpu: 0 });
+    expect(!r.ok && r.message).toContain("llama-server does not resolve");
+    expect(!r.ok && r.message).toContain("mul_mat_q_case");
+    expect(await p.fs.exists(`/r/local/engine-builds/${engine.sha7}-sm120`)).toBe(false);
+  });
+  test("with no stub in the cache there is nothing to preload: the driver's missing symbols are the refusal", async () => {
+    const { p, uc } = await setup();
+    configures(p, "CMAKE_CUDA_COMPILER:FILEPATH=/usr/local/cuda/bin/nvcc\n");
+    const preloaded = loader(p, () => NO_DRIVER);
+    const r = await uc.run({ gpu: 0 });
+    expect(!r.ok && r.message).toContain("undefined symbol: cuMemCreate");
+    expect(preloaded.every((preload) => preload === undefined)).toBe(true);
   });
 });

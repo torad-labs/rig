@@ -273,7 +273,7 @@ describe("glm-5.3-flash", () => {
       cacheRam: 8192,
     });
     if (!r.ok) throw new Error(r.message);
-    const bin = `${root}/local/engine-builds/3d40ae9-sm120`;
+    const bin = `${root}/local/engine-builds/0090733-sm120`;
     expect(r.value.argv).toEqual([
       `${bin}/llama-server`,
       "-m",
@@ -288,9 +288,11 @@ describe("glm-5.3-flash", () => {
       "-fa",
       "on",
       "--cache-type-k",
-      "f16",
+      "q8_0",
       "--cache-type-v",
-      "f16",
+      "q8_0",
+      "-ctki",
+      "q8_0",
       "-b",
       "4096",
       "-ub",
@@ -306,7 +308,7 @@ describe("glm-5.3-flash", () => {
       "-c",
       "524288",
       "-np",
-      "1",
+      "3",
       "--kv-unified",
       "--cache-ram",
       "8192",

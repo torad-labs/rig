@@ -7,3 +7,4 @@ export * from "./engine-corpus.ts";
 export * from "./lab/engine-lab.service.ts";
 export type { RelinkReport, RelinkRequest } from "./lab/relink.ts";
 export * from "./release/driver-only-gate.service.ts";
+export * from "./release/tag-release.service.ts";

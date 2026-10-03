@@ -14,7 +14,7 @@ import { type Args, flagBool, flagInt, flagNumber, flagStr } from "../cli/args.t
 import { type Command, type LoadHead, reportJson, reportLine, withHead } from "../cli/command.ts";
 
 const USAGE =
-  "vast up <head> --gpu CLASS [--gpus N] [--max-price DPH] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--private] [--dry-run] | up <head> --template [--hours H] [--budget USD] [--disk-gb GB] [--max-price DPH] [--idle-minutes MIN] [--dry-run] | down [--all] | status | idle-check | sweep | bench <head> | template <head> [--disk-gb GB] [--idle-minutes MIN] [--max-hours H] [--dry-run] | guard <head> [--idle-minutes MIN] [--max-hours H] [--stop-when FILE], each with [--json]   a rented card as a head, reached through an ssh tunnel (its public pack; --private ships the private [derive] assets); up --template: a box from the head's published template, the offers ranked by the session's cost all in for --hours (1 when not given), its own on-start bringing the head up, and none over --budget dollars all in rented; sweep: destroy rig's boxes stopped for vast.toml's stopped_hours (hourly from rig-vast-sweep.timer); template: the head's pushed image as a vast template a box comes up from with no script, and the sweep's timer armed; guard: on such a box, stop it after the idle budget, after --max-hours whatever it reads, or at once when --stop-when's file exists";
+  "vast up <head> --gpu CLASS [--gpus N] [--max-price DPH] [--min-down-mbps MBPS] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--private] [--dry-run] | up <head> --template [--hours H] [--budget USD] [--disk-gb GB] [--max-price DPH] [--idle-minutes MIN] [--dry-run] | lab --gpu CLASS [--gpus N] [--max-price DPH] [--min-down-mbps MBPS] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--vm] [--image IMAGE] [--dry-run] | down [--all] | status | idle-check | sweep | bench <head> | template <head> [--disk-gb GB] [--idle-minutes MIN] [--max-hours H] [--dry-run] | guard <head> [--idle-minutes MIN] [--max-hours H] [--stop-when FILE], each with [--json]   a rented card as a head, reached through an ssh tunnel (its public pack; --private ships the private [derive] assets); up --template: a box from the head's published template, the offers ranked by the session's cost all in for --hours (1 when not given), its own on-start bringing the head up, and none over --budget dollars all in rented; --min-down-mbps (up, lab): no offer whose host downloads slower is rented, and with none above it the command fails naming the fastest offer and its price (up --template floors at 800 and ranks by download time already); lab: a rented card with no head, rig and the engine pin shipped to it for `rig engine` measurements over ssh (nothing is fetched, derived or served, and the idle reaper reads the card alone); --vm asks the market for a host that rents a full virtual machine and brings it up from vast's KVM image, the one kind of box that runs docker (`rig e2e`, `rig image`), and --image names another image for either kind; sweep: destroy rig's boxes stopped for vast.toml's stopped_hours (hourly from rig-vast-sweep.timer); template: the head's pushed image as a vast template a box comes up from with no script, and the sweep's timer armed; guard: on such a box, stop it after the idle budget, after --max-hours whatever it reads, or at once when --stop-when's file exists";
 const FORM = USAGE.split("   ")[0] ?? USAGE;
 /** the flags each subcommand takes: main holds a command's flags to its whole usage line, which names every
  *  subcommand's, so `down --dry-run` would pass there and destroy the box; each subcommand refuses any other */
@@ -23,6 +23,7 @@ export const SUBCOMMAND_FLAGS: Record<string, readonly string[]> = {
     "gpu",
     "gpus",
     "max-price",
+    "min-down-mbps",
     "geo",
     "allow-arch",
     "disk-gb",
@@ -32,6 +33,20 @@ export const SUBCOMMAND_FLAGS: Record<string, readonly string[]> = {
     "template",
     "hours",
     "budget",
+    "json",
+  ],
+  lab: [
+    "gpu",
+    "gpus",
+    "max-price",
+    "min-down-mbps",
+    "geo",
+    "allow-arch",
+    "disk-gb",
+    "idle-minutes",
+    "vm",
+    "image",
+    "dry-run",
     "json",
   ],
   down: ["all", "json"],
@@ -98,6 +113,12 @@ export function gpuRentalCommand(
         case "up":
           return withHead(name, "vast up <head>", loadHead, log, async (head) => {
             if (flagBool(args, "template")) {
+              if (args.flags["min-down-mbps"] !== undefined) {
+                log.error(
+                  "usage: up --template does not take --min-down-mbps: it ranks offers by the pack's download time and floors the host at 800 Mb/s",
+                );
+                return ExitCode.Usage;
+              }
               const hours = flagNumber(args, "hours") ?? 1;
               const budget = flagNumber(args, "budget");
               const idleMinutes = positiveInt(args, "idle-minutes");
@@ -127,9 +148,10 @@ export function gpuRentalCommand(
             const gpus = positiveInt(args, "gpus");
             const diskGb = positiveInt(args, "disk-gb");
             const idleMinutes = positiveInt(args, "idle-minutes");
-            if (gpus === null || diskGb === null || idleMinutes === null) {
+            const minDownMbps = positiveInt(args, "min-down-mbps");
+            if (gpus === null || diskGb === null || idleMinutes === null || minDownMbps === null) {
               log.error(
-                "usage: --gpus, --disk-gb and --idle-minutes take a whole number above zero",
+                "usage: --gpus, --disk-gb, --idle-minutes and --min-down-mbps take a whole number above zero",
               );
               return ExitCode.Usage;
             }
@@ -137,6 +159,7 @@ export function gpuRentalCommand(
               gpu,
               gpus,
               maxDph: flagNumber(args, "max-price"),
+              minDownMbps,
               geo: flagStr(args, "geo"),
               dryRun: flagBool(args, "dry-run"),
               allowArch: flagStr(args, "allow-arch"),
@@ -146,6 +169,37 @@ export function gpuRentalCommand(
             });
             return reportJson(log, args, result);
           });
+        case "lab": {
+          const gpu = flagStr(args, "gpu");
+          if (!gpu) {
+            log.error("usage: rig vast lab --gpu CLASS (as vast names it: RTX_5090, H100_SXM, …)");
+            return ExitCode.Usage;
+          }
+          const gpus = positiveInt(args, "gpus");
+          const diskGb = positiveInt(args, "disk-gb");
+          const idleMinutes = positiveInt(args, "idle-minutes");
+          const minDownMbps = positiveInt(args, "min-down-mbps");
+          if (gpus === null || diskGb === null || idleMinutes === null || minDownMbps === null) {
+            log.error(
+              "usage: --gpus, --disk-gb, --idle-minutes and --min-down-mbps take a whole number above zero",
+            );
+            return ExitCode.Usage;
+          }
+          const result = await service.lab({
+            gpu,
+            gpus,
+            maxDph: flagNumber(args, "max-price"),
+            minDownMbps,
+            geo: flagStr(args, "geo"),
+            dryRun: flagBool(args, "dry-run"),
+            allowArch: flagStr(args, "allow-arch"),
+            diskGb,
+            idleMinutes,
+            vm: flagBool(args, "vm"),
+            image: flagStr(args, "image"),
+          });
+          return reportJson(log, args, result);
+        }
         case "down":
           return reportJson(log, args, await service.down({ all: flagBool(args, "all") }));
         case "status":

@@ -5,7 +5,7 @@ import { loadEngine } from "@rig/engine";
 import { loadHead } from "@rig/head";
 import { fakePorts, putHead, repoRoot } from "@rig/testing";
 import { headPackBytes } from "./box-template.ts";
-import { type LiveGate, RentGpu } from "./gpu-rental.service.ts";
+import { type LiveGate, RentGpu, VM_ONSTART } from "./gpu-rental.service.ts";
 import { loadVastConfig, offerQuery } from "./rental-config.ts";
 
 const root = repoRoot;
@@ -98,6 +98,22 @@ describe("vast.toml", () => {
       "dph_total<=2",
     );
   });
+  test("a download floor replaces the query's own inet_down term when it is higher, and never lowers it", async () => {
+    const { p, layout } = await setup();
+    const cfg = await loadVastConfig(p.fs, layout);
+    if (!cfg.ok) throw new Error("fixture");
+    const floored = offerQuery(cfg.value, "H100_SXM", { diskGb: 40, minDownMbps: 2000 });
+    expect(floored).toContain("inet_down>=2000 direct_port_count>=2");
+    expect(floored.split("inet_down").length - 1).toBe(1);
+    // vast caps a search at 64 rows, so the floor has to be in the query: a filter on the rows read could miss the fast ones
+    expect(offerQuery(cfg.value, "H100_SXM", { diskGb: 40, minDownMbps: 100 })).toBe(
+      offerQuery(cfg.value, "H100_SXM", { diskGb: 40 }),
+    );
+    const bare = { ...cfg.value, rental: { ...cfg.value.rental, query: "verified=true" } };
+    expect(offerQuery(bare, "H100_SXM", { diskGb: 40, minDownMbps: 2000 })).toContain(
+      "verified=true inet_down>=2000",
+    );
+  });
 });
 
 describe("vast up", () => {
@@ -188,6 +204,12 @@ describe("vast up", () => {
     expect(p.fs.text("/home/u/.config/systemd/user/rig-vast-idle.service")).toContain(
       "ExecStart=/r/dist/rig vast idle-check",
     );
+    // The card is a point sample, so the box is read often enough that a run of a few minutes cannot fall between
+    // two reads (2026-10-02: a box in use by short runs read under 10 % at every ten-minute check and was destroyed).
+    const timer = p.fs.text("/home/u/.config/systemd/user/rig-vast-idle.timer");
+    expect(timer).toContain("OnUnitActiveSec=3min");
+    expect(timer).toContain("every 3 minutes");
+    expect(timer).not.toContain("10min");
   });
   test("--private ships the adapter, and the box must serve this machine's pack", async () => {
     const { p, head, uc } = await setup("served");
@@ -367,6 +389,248 @@ describe("vast up", () => {
         ),
       ).toBe(true);
     }
+  });
+});
+
+describe("vast lab", () => {
+  const rtx5090: Offer = {
+    ...h100,
+    id: 50263001,
+    gpu: "RTX 5090",
+    gpuRamMiB: 32607,
+    computeCap: "120",
+    dph: 0.41,
+    geo: "Texas, US",
+    bandwidth: 1792,
+  };
+  test("dry run: the cheapest matching offer for the class, no head read, nothing created", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [rtx5090];
+    const r = await uc.lab({ gpu: "RTX_5090", maxDph: 0.55, dryRun: true });
+    expect(r.ok && r.value.kind === "dry-run" && r.value.pick.id).toBe(50263001);
+    expect(p.rental.instances.size).toBe(0);
+    expect(p.ssh.calls).toEqual([]);
+  });
+  describe("a download floor", () => {
+    const slow = { ...rtx5090, id: 50263101, dph: 0.41, downMbps: 251 };
+    const quick = { ...rtx5090, id: 50263102, dph: 0.6, downMbps: 5436, geo: "Spain, ES" };
+    const quicker = { ...rtx5090, id: 50263103, dph: 0.7, downMbps: 8000 };
+    test("skips a cheaper offer below it and rents the cheapest one above it", async () => {
+      const { p, uc } = await setup();
+      p.rental.offers = [slow, quick, quicker];
+      const r = await uc.lab({ gpu: "RTX_5090", maxDph: 1, minDownMbps: 2000 });
+      expect(r.ok && r.value.kind === "lab" && r.value.instanceId).toBe(1000);
+      expect(p.rental.ops.filter((op) => op.startsWith("search "))).toEqual([
+        expect.stringContaining("inet_down>=2000"),
+      ]);
+      expect(p.rental.ops.filter((op) => op.startsWith("create "))).toEqual([
+        expect.stringContaining("create 50263102 "),
+      ]);
+    });
+    test("without one the cheapest offer is rented, slow or not", async () => {
+      const { p, uc } = await setup();
+      p.rental.offers = [slow, quick];
+      expect((await uc.lab({ gpu: "RTX_5090", maxDph: 1 })).ok).toBe(true);
+      expect(p.rental.ops.filter((op) => op.startsWith("create "))).toEqual([
+        expect.stringContaining("create 50263101 "),
+      ]);
+    });
+    test("an offer exactly at it is kept", async () => {
+      const { p, uc } = await setup();
+      p.rental.offers = [{ ...slow, downMbps: 2000 }];
+      const r = await uc.lab({ gpu: "RTX_5090", maxDph: 1, minDownMbps: 2000, dryRun: true });
+      expect(r.ok && r.value.kind === "dry-run" && r.value.pick.id).toBe(50263101);
+    });
+    test("with none above it the command fails naming the fastest offer and its price, and rents nothing", async () => {
+      const { p, uc } = await setup();
+      p.rental.offers = [slow, { ...quick, downMbps: 1200, dph: 0.55 }];
+      const r = await uc.lab({ gpu: "RTX_5090", maxDph: 1, minDownMbps: 2000 });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.message).toContain("2000 Mb/s");
+      expect(r.message).toContain("offer 50263102");
+      expect(r.message).toContain("1200 Mb/s");
+      expect(r.message).toContain("$0.550/h");
+      expect(r.message).toContain("nothing rented");
+      // the market was asked with the floor first, and again without it to name the fastest
+      const searches = p.rental.ops.filter((op) => op.startsWith("search "));
+      expect(searches.length).toBe(2);
+      expect(searches[0]).toContain("inet_down>=2000");
+      expect(searches[1]).toContain("inet_down>=200 ");
+      expect(p.rental.instances.size).toBe(0);
+      expect(p.rental.ops.some((op) => op.startsWith("create"))).toBe(false);
+    });
+    test("a dry run under it fails the same way, and the offers it read are still kept", async () => {
+      const { p, uc } = await setup();
+      p.rental.offers = [slow];
+      const r = await uc.lab({ gpu: "RTX_5090", maxDph: 1, minDownMbps: 2000, dryRun: true });
+      expect(r.ok).toBe(false);
+      expect(p.fs.text("/r/local/rented-box/offers.json")).toContain("50263101");
+    });
+    test("vast up takes the same floor", async () => {
+      const { p, head, uc } = await setup();
+      p.rental.offers = [h100, { ...h100, id: 50262230, dph: 2.4, downMbps: 4000 }];
+      const r = await uc.up(head, { gpu: "H100_SXM", minDownMbps: 2000, dryRun: true });
+      expect(r.ok && r.value.kind === "dry-run" && r.value.pick.id).toBe(50262230);
+      const none = await uc.up(head, { gpu: "H100_SXM", minDownMbps: 9000, dryRun: true });
+      expect(none.ok).toBe(false);
+      if (!none.ok) expect(none.message).toContain("offer 50262230");
+    });
+  });
+  test("rents a card and ships rig and the pin to it, serving nothing: no head, no fetch, no derive, no tunnel", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [rtx5090];
+    const r = await uc.lab({ gpu: "RTX_5090", maxDph: 0.55, idleMinutes: 45 });
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.value.kind !== "lab") return;
+    expect(r.value).toMatchObject({
+      instanceId: 1000,
+      gpu: "RTX 5090",
+      cap: "120",
+      dph: 0.41,
+      sshHost: "ssh5.vast.ai",
+      sshPort: 12345,
+    });
+    // only the binary and the pin go: a rented box is someone else's machine, and nothing of a head is on it
+    expect(p.shell.calls.find((c) => c[0] === "tar")).toEqual([
+      "tar",
+      "-C",
+      "/r",
+      "-czf",
+      "/r/local/rented-box/payload.tar.gz",
+      "dist/rig",
+      "engine/engine.toml",
+    ]);
+    expect(p.ssh.pushed).toEqual([
+      ["/r/local/rented-box/payload.tar.gz", "/workspace/rig/payload.tar.gz"],
+    ]);
+    const rigCalls = p.ssh.calls.filter((c) => c.includes("/workspace/rig/dist/rig "));
+    expect(rigCalls).toEqual([]);
+    const saved = JSON.parse(p.fs.text("/r/local/rented-box/instance.json")!);
+    expect(saved).toMatchObject({ instanceId: 1000, cap: "120", sshPort: 12345, idleMinutes: 45 });
+    expect(saved.head).toBeUndefined();
+    // the reaper is armed and its unit written; the tunnel to a server that is not there is neither
+    expect(p.systemd.ops).not.toContain("restart rig-vast-tunnel.service");
+    expect(p.fs.replaced).toEqual(
+      ["rig-vast-idle.service", "rig-vast-idle.timer"].map(
+        (unit) => `/home/u/.config/systemd/user/${unit}`,
+      ),
+    );
+    expect(p.systemd.ops).toContain("enable rig-vast-idle.timer");
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    expect(p.log.lines.join("\n")).toContain("idle timer armed (45 min");
+  });
+  test("a lab box nobody uses is destroyed by the idle check on the card's reading alone, and a busy card keeps it", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [rtx5090];
+    await uc.lab({ gpu: "RTX_5090", idleMinutes: 45 });
+    const listed = p.rental.instances.get(1000)!;
+    p.rental.instances.set(1000, { ...listed, gpuUtil: 90 });
+    for (let check = 0; check < 20; check++) {
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+      p.clock.t += 10 * 60_000;
+    }
+    p.rental.instances.set(1000, { ...listed, gpuUtil: 0 });
+    expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "idle", idleMinutes: 10 } });
+    p.clock.t += 45 * 60_000;
+    expect(await uc.idleCheck()).toEqual({
+      ok: true,
+      value: { action: "destroyed", idleMinutes: 55 },
+    });
+    expect(p.rental.instances.size).toBe(0);
+  });
+  test("--vm asks the market for a VM-capable host and brings it up from the KVM image, which --image overrides", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [rtx5090];
+    const r = await uc.lab({ gpu: "RTX_5090", vm: true, dryRun: true });
+    expect(r.ok && r.value.kind === "dry-run" && r.value.query).toContain("vms_enabled=true");
+    // a container box is what rig rents by default, and its query must not carry the filter
+    const plain = await uc.lab({ gpu: "RTX_5090", dryRun: true });
+    expect(plain.ok && plain.value.kind === "dry-run" && plain.value.query).not.toContain(
+      "vms_enabled",
+    );
+
+    const vm = await setup();
+    vm.p.rental.offers = [rtx5090];
+    expect((await vm.uc.lab({ gpu: "RTX_5090", vm: true })).ok).toBe(true);
+    // a KVM box's sshd refuses the key vast writes (vast-cli#336: authorized_keys owned by a uid the VM has
+    // no user for, StrictModes says no), so a VM is created with the on-start that repairs it
+    expect(vm.p.rental.ops.at(-1)).toBe(
+      `create 50263001 docker.io/vastai/kvm:ubuntu_terminal 40 onstart ${VM_ONSTART}`,
+    );
+    expect(VM_ONSTART).toContain("chown root:root /root/.ssh/authorized_keys");
+    // and it is reached at the host's own address, where box 53930876's sshd answered while vast's proxy refused
+    const recorded = async (t: typeof vm) =>
+      JSON.parse(await t.p.fs.readText("/r/local/rented-box/instance.json")) as {
+        sshHost: string;
+        sshPort: number;
+      };
+    expect(await recorded(vm)).toMatchObject({ sshHost: "203.0.113.7", sshPort: 40174 });
+    const container = await setup();
+    container.p.rental.offers = [rtx5090];
+    expect((await container.uc.lab({ gpu: "RTX_5090" })).ok).toBe(true);
+    expect(container.p.rental.ops.at(-1)).not.toContain("onstart");
+    // a container keeps vast's proxy
+    expect(await recorded(container)).toMatchObject({ sshHost: "ssh5.vast.ai", sshPort: 12345 });
+    const named = await setup();
+    named.p.rental.offers = [rtx5090];
+    expect(
+      (await named.uc.lab({ gpu: "RTX_5090", vm: true, image: "docker.io/vastai/kvm:ubuntu_22" }))
+        .ok,
+    ).toBe(true);
+    expect(named.p.rental.ops.at(-1)).toContain("docker.io/vastai/kvm:ubuntu_22");
+  });
+  // A VM boots slower than a container (vast's own docs say so, with no figure), and the first one rig rented sat at
+  // "Connection refused" past the five minutes a container is given while vast already listed it running. A VM gets
+  // the longer wait; a container still gets the short one, so a container box that is dead is not billed for twenty.
+  test("a VM that refuses ssh for longer than a container is given is waited for; a container is not", async () => {
+    const refused = {
+      code: 255,
+      stdout: "",
+      stderr: "ssh: connect to host h port 1: Connection refused",
+    };
+    const answersAfter = (p: Awaited<ReturnType<typeof setup>>["p"], n: number) => {
+      let tries = 0;
+      p.ssh.on(/^true$/, () => (++tries > n ? { code: 0, stdout: "", stderr: "" } : refused));
+    };
+    const vm = await setup();
+    vm.p.rental.offers = [rtx5090];
+    answersAfter(vm.p, 100);
+    expect((await vm.uc.lab({ gpu: "RTX_5090", vm: true })).ok).toBe(true);
+    expect(vm.p.rental.instances.size).toBe(1);
+
+    const container = await setup();
+    container.p.rental.offers = [rtx5090];
+    answersAfter(container.p, 100);
+    const r = await container.uc.lab({ gpu: "RTX_5090" });
+    expect(!r.ok && r.message).toContain("ssh never answered");
+    expect(!r.ok && r.message).toContain("Connection refused");
+    expect(container.p.rental.instances.size).toBe(0);
+
+    // and even a VM is not waited for for ever
+    const dead = await setup();
+    dead.p.rental.offers = [rtx5090];
+    answersAfter(dead.p, 10_000);
+    const gone = await dead.uc.lab({ gpu: "RTX_5090", vm: true });
+    expect(!gone.ok && gone.message).toContain("ssh never answered");
+    expect(dead.p.rental.instances.size).toBe(0);
+  });
+  test("an unmeasured card is refused unless --allow-arch, a second box is refused, and a box that never answers is destroyed", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [{ ...rtx5090, gpu: "RTX 4090", computeCap: "89" }];
+    const refused = await uc.lab({ gpu: "RTX_4090", dryRun: true });
+    expect(!refused.ok && refused.code).toBe(3);
+    p.rental.offers = [rtx5090];
+    p.fs.put("/r/local/rented-box/instance.json", JSON.stringify({ instanceId: 7 }));
+    const second = await uc.lab({ gpu: "RTX_5090" });
+    expect(!second.ok && second.message).toContain("already exists");
+    await p.fs.remove("/r/local/rented-box/instance.json");
+    p.ssh.on(/^true$/, { code: 255, stdout: "", stderr: "refused" });
+    const dead = await uc.lab({ gpu: "RTX_5090" });
+    expect(!dead.ok && dead.message).toContain("ssh never answered");
+    // and what it last said, so a box that refuses the key reads differently from one that never booted
+    expect(!dead.ok && dead.message).toContain("last ssh said: refused");
+    expect(p.rental.instances.size).toBe(0);
   });
 });
 
@@ -581,6 +845,257 @@ describe("vast down / status / idle", () => {
     p.rental.instances.set(1000, { ...unsampled, gpuUtil: 0 });
     expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "destroyed" } });
     expect(p.rental.instances.size).toBe(0);
+  });
+  // vast lists no gpu_util for a VM (boxes 53930876 and 53933738), so the reaper, which refuses to count a card it did
+  // not read, never destroyed one: nothing stopped a forgotten VM billing. The card is then read on the box itself, over
+  // ssh, at the address rig recorded for it, and it decides the way vast's own reading does.
+  describe("idle-check on a box vast lists no GPU reading for (a VM)", () => {
+    const smi = /nvidia-smi --query-gpu=utilization\.gpu/;
+    const reads = (util: string, rc = 0) => ({
+      code: 0,
+      stdout: `${util}\nrc=${rc}\n`,
+      stderr: "",
+    });
+    /** what the check prints on a box whose sampler has been writing: the card now, its peak over the window, and the
+     *  average KB/s the box received over it (absent from a box whose sampler predates the download column) */
+    const sampled = (now: string, peak: number, download?: number) => ({
+      code: 0,
+      stdout: `${now}\nrc=0\nwindow=${peak}\n${download === undefined ? "" : `download=${download}\n`}`,
+      stderr: "",
+    });
+    const unreachable = {
+      code: 255,
+      stdout: "",
+      stderr: "ssh: connect to host h port 1: Connection timed out",
+    };
+    const rtx: Offer = { ...h100, id: 50263001, gpu: "RTX 5090", computeCap: "120", dph: 0.41 };
+    async function vm() {
+      const t = await setup();
+      t.p.rental.offers = [rtx];
+      expect((await t.uc.lab({ gpu: "RTX_5090", vm: true })).ok).toBe(true);
+      // the box answers ssh for rig's own steps; the market lists the VM running with no sample
+      const { gpuUtil: _, ...unsampled } = t.p.rental.instances.get(1000)!;
+      t.p.rental.instances.set(1000, unsampled);
+      return t;
+    }
+    test("the card read over ssh decides: busy resets the clock, idle for the budget destroys", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, reads("57"));
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+      p.ssh.on(smi, reads("3"));
+      p.clock.t += 20 * 60_000;
+      expect(await uc.idleCheck()).toEqual({
+        ok: true,
+        value: { action: "idle", idleMinutes: 20 },
+      });
+      p.ssh.on(smi, reads("41\n0")); // the busiest of several cards
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+      p.ssh.on(smi, reads("0"));
+      p.clock.t += 44 * 60_000;
+      expect(await uc.idleCheck()).toEqual({
+        ok: true,
+        value: { action: "idle", idleMinutes: 44 },
+      });
+      p.clock.t += 60_000;
+      expect(await uc.idleCheck()).toEqual({
+        ok: true,
+        value: { action: "destroyed", idleMinutes: 45 },
+      });
+      expect(p.rental.instances.size).toBe(0);
+      expect(p.log.lines.join("\n")).toContain("GPU 0 % read on the box");
+    });
+    // 2026-10-02: a lab VM held for hours was destroyed with "idle for 51 min (GPU 0 % read on the box)" and the six
+    // checks before it left no trace, so nothing could say whether the card had been busy between samples or the
+    // reads had failed. Every check now says what it saw.
+    test("every check says what it saw and where it read it, so a destroy can be traced to the readings behind it", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, reads("57"));
+      await uc.idleCheck();
+      p.ssh.on(smi, reads("3"));
+      p.clock.t += 20 * 60_000;
+      await uc.idleCheck();
+      p.ssh.on(smi, unreachable);
+      p.clock.t += 5 * 60_000;
+      await uc.idleCheck();
+      const seen = p.log.lines.filter((line) => line.includes("idle-check box 1000"));
+      expect(seen).toHaveLength(3);
+      expect(seen[0]).toMatch(/GPU 57 % read on the box: active$/);
+      expect(seen[1]).toMatch(/GPU 3 % read on the box: idle 20 of 45 min$/);
+      expect(seen[2]).toMatch(/box unreachable over ssh: idle 25 of 45 min$/);
+    });
+    // The orchestrator's acceptance for the reaper (2026-10-02, after VM 4): a trace in which every check reads under
+    // 10 % at the instant while work runs between the checks must not destroy the box, and a box with nothing running
+    // for the whole budget must still be destroyed. A card read at one instant cannot tell the first from the second.
+    test("work that ran between two reads is seen: six checks that each read under 10 % at the instant, with the sampler's peak in the window, keep the box", async () => {
+      const { p, uc } = await vm();
+      // 10 minutes apart, 60 minutes: VM 4's shape, against a 45-minute budget
+      const trace: Array<[string, number]> = [
+        ["1", 0],
+        ["2", 64],
+        ["0", 0],
+        ["3", 41],
+        ["0", 0],
+        ["1", 88],
+      ];
+      for (const [now, peak] of trace) {
+        p.ssh.on(smi, sampled(now, peak));
+        const r = await uc.idleCheck();
+        expect(r.ok && r.value.action).not.toBe("destroyed");
+        p.clock.t += 10 * 60_000;
+      }
+      expect(p.rental.instances.size).toBe(1);
+      // the same six reads without a sampler's window are VM 4's trace, and it is destroyed: the replay can fail
+      const bare = await vm();
+      let destroyed = false;
+      for (const [now] of trace) {
+        bare.p.ssh.on(smi, reads(now));
+        const r = await bare.uc.idleCheck();
+        destroyed ||= r.ok && r.value.action === "destroyed";
+        bare.p.clock.t += 10 * 60_000;
+      }
+      expect(destroyed).toBe(true);
+      expect(bare.p.rental.instances.size).toBe(0);
+      // and what each check saw is on the log, the window's peak beside the instant
+      expect(p.log.lines.join("\n")).toMatch(
+        /GPU 3 % now, peak 41 % in the last 6 min, read on the box: active/,
+      );
+    });
+    test("a box with nothing running for the whole budget is destroyed, the sampler's quiet window included", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, sampled("0", 0));
+      expect((await uc.idleCheck()).ok).toBe(true); // the clock starts here
+      for (let minute = 3; minute < 45; minute += 3) {
+        p.clock.t += 3 * 60_000;
+        const r = await uc.idleCheck();
+        expect(r.ok && r.value.action).toBe("idle");
+      }
+      p.clock.t += 3 * 60_000;
+      expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "destroyed" } });
+      expect(p.rental.instances.size).toBe(0);
+      expect(p.log.lines.join("\n")).toContain("idle-check box 1000");
+    });
+    // 2026-10-02: the 2a box was rented with a 60-minute budget for a 134 GB pack pulled at 251 Mb/s, about 70 minutes
+    // with the card at 0 % and no server: the reaper would have destroyed it mid-pull. A box receiving data is working.
+    test("a box receiving at a steady rate is kept past the whole budget, its card and server idle throughout", async () => {
+      const { p, uc } = await vm();
+      for (let minute = 0; minute <= 3 * 45; minute += 3) {
+        p.ssh.on(smi, sampled("0", 0, 31_000));
+        const r = await uc.idleCheck();
+        expect(r.ok && r.value.action).toBe("active");
+        p.clock.t += 3 * 60_000;
+      }
+      expect(p.rental.instances.size).toBe(1);
+      expect(p.log.lines.filter((line) => line.includes("idle-check box 1000")).at(-1)).toMatch(
+        /GPU 0 % read on the box, download 30\.3 MB\/s: active$/,
+      );
+    });
+    test("a box with no traffic and no GPU work is destroyed after its budget, and the check says it saw none", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, sampled("0", 0, 0));
+      expect((await uc.idleCheck()).ok).toBe(true);
+      p.clock.t += 44 * 60_000;
+      expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "idle" } });
+      p.clock.t += 60_000;
+      expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "destroyed" } });
+      expect(p.rental.instances.size).toBe(0);
+      expect(p.log.lines.join("\n")).toMatch(
+        /GPU 0 % read on the box, download 0 KB\/s: idle 44 of 45 min/,
+      );
+    });
+    test("the budget runs from where the traffic stopped, and a trickle under the floor is not traffic", async () => {
+      const { p, uc } = await vm();
+      for (let check = 0; check < 20; check++) {
+        p.ssh.on(smi, sampled("0", 0, 25_000));
+        expect((await uc.idleCheck()).ok).toBe(true);
+        p.clock.t += 3 * 60_000;
+      }
+      // the pull ended at the last of those checks: 200 KB/s is an ssh session and a log tail, not a download
+      p.ssh.on(smi, sampled("0", 0, 200));
+      for (let minute = 3; minute < 45; minute += 3) {
+        expect(await uc.idleCheck()).toEqual({
+          ok: true,
+          value: { action: "idle", idleMinutes: minute },
+        });
+        p.clock.t += 3 * 60_000;
+      }
+      expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "destroyed" } });
+    });
+    test("a box whose sampler has no download column yet is read as before: the card decides alone", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, sampled("0", 0));
+      expect((await uc.idleCheck()).ok).toBe(true);
+      expect(p.log.lines.join("\n")).not.toContain("download");
+    });
+    test("the check's command reads the box's received bytes and retires the sampler that predates the column", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, sampled("0", 0, 0));
+      await uc.idleCheck();
+      const command = p.ssh.calls.filter((call) => smi.test(call)).at(-1) ?? "";
+      expect(command).toContain("/proc/net/dev");
+      expect(command).toContain("rig-card-sampler.v2.pid");
+      expect(command).toContain("kill"); // the first-generation sampler, found by its own pid file
+    });
+    test("the check keeps the box's sampler running and asks for the last two checks' worth of it", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, sampled("0", 0));
+      await uc.idleCheck();
+      const command = p.ssh.calls.filter((call) => smi.test(call)).at(-1) ?? "";
+      expect(command).toContain("rig-card-sampler"); // started when it is not running, so a rebooted box has one again
+      expect(command).toContain("kill -0");
+      expect(command).toContain("360"); // the window, in seconds: two checks of 3 minutes
+      expect(command).toContain("sleep 5");
+    });
+    test("a box that does not answer ssh counts as idle, so a VM that lost its network does not bill for ever; one that answers busy resets it", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, unreachable);
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "changed" } });
+      p.clock.t += 30 * 60_000;
+      expect(await uc.idleCheck()).toEqual({
+        ok: true,
+        value: { action: "idle", idleMinutes: 30 },
+      });
+      p.ssh.on(smi, reads("88"));
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+      p.ssh.on(smi, unreachable);
+      p.clock.t += 44 * 60_000;
+      expect(await uc.idleCheck()).toEqual({
+        ok: true,
+        value: { action: "idle", idleMinutes: 44 },
+      });
+      p.clock.t += 60_000;
+      expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "destroyed" } });
+      expect(p.rental.instances.size).toBe(0);
+      expect(p.log.lines.join("\n")).toContain("unreachable over ssh");
+    });
+    test("a box that answers but whose nvidia-smi gives no number is still a card nobody read: nothing is counted", async () => {
+      const { p, uc } = await vm();
+      p.ssh.on(smi, { code: 0, stdout: "rc=9\n", stderr: "" });
+      for (let check = 0; check < 80; check++) {
+        const r = await uc.idleCheck();
+        expect(!r.ok && r.message).toBe(
+          "the server did not answer and vast listed no GPU reading: box 1000 not counted, its idle clock unchanged",
+        );
+        p.clock.t += 10 * 60_000;
+      }
+      expect(p.rental.instances.size).toBe(1);
+    });
+    // vast's sample for a container is one instant too, so a box it does sample is read on the box as well, and the
+    // higher of the two decides; an ssh that fails leaves vast's reading standing rather than reading as an idle card
+    test("a box vast does sample is read on the box too: the higher reading decides, and an ssh that fails leaves vast's", async () => {
+      const { p, head, uc } = await setup();
+      await uc.up(head, { gpu: "H100_SXM" });
+      const instance = p.rental.instances.get(1000)!;
+      p.rental.instances.set(1000, { ...instance, gpuUtil: 2 });
+      p.ssh.on(smi, { code: 0, stdout: "1\nrc=0\nwindow=77\n", stderr: "" });
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+      expect(p.ssh.calls.filter((c) => smi.test(c))).toHaveLength(1);
+      p.ssh.on(smi, { code: 255, stdout: "", stderr: "ssh: connect to host h port 1: timed out" });
+      p.log.lines.length = 0;
+      await uc.idleCheck();
+      const said = p.log.lines.filter((line) => line.includes("idle-check box 1000")).at(-1) ?? "";
+      expect(said).toContain("GPU 2 %");
+      expect(said).not.toContain("unreachable over ssh");
+    });
   });
   test("status reads the state, the market and the tunnel", async () => {
     const { p, head, uc } = await setup();

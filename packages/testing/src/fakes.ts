@@ -492,12 +492,13 @@ export class FakeRental implements Rental {
       dph: offer?.dph ?? 0,
       sshHost: "ssh5.vast.ai",
       sshPort: 12345,
+      directSsh: { host: "203.0.113.7", port: 40174 },
       gpuUtil: 0, // vast samples a running box's card; a test drops it to model a box with none
     });
     this.ops.push(
       "templateHash" in o
         ? `create ${offerId} template ${o.templateHash} ${o.diskGb} label ${o.label}`
-        : `create ${offerId} ${o.image} ${o.diskGb}`,
+        : `create ${offerId} ${o.image} ${o.diskGb}${o.onstart ? ` onstart ${o.onstart}` : ""}`,
     );
     return id;
   }

@@ -65,17 +65,20 @@ export class BuildPublisher {
   }
 
   /** the build tree's outputs, with each `bundle` file (a library the build links that the machine
-   *  running it may not have) copied beside them under its own name, staged and published as `dir` */
+   *  running it may not have) copied beside them under its own name, staged and published as `dir`;
+   *  `driverStub` is the toolkit's stub of libcuda the engine linked against, which the symbol check
+   *  uses on a machine with no NVIDIA driver */
   async publishOutput(
     buildTree: string,
     dir: string,
     provenance: Provenance,
     bundle: string[] = [],
+    driverStub?: string,
   ): Promise<Result<string>> {
     const staging = await this.stage(dir);
     await this.deps.fs.copyTree(join(buildTree, "bin"), staging);
     for (const file of bundle) await this.deps.fs.copy(file, join(staging, basename(file)));
-    return this.publish(staging, dir, provenance);
+    return this.publish(staging, dir, provenance, driverStub);
   }
 
   /** a cached tarball, checked by name unless it is `offPin` (a build of another commit), unpacked with the
@@ -167,6 +170,7 @@ export class BuildPublisher {
     staging: string,
     dir: string,
     provenance: Provenance,
+    driverStub?: string,
   ): Promise<Result<string>> {
     const required = provenance.source === "compiled" ? TARGETS : SERVING_TARGETS;
     for (const target of required) {
@@ -178,7 +182,7 @@ export class BuildPublisher {
     const present: string[] = [];
     for (const target of TARGETS)
       if (await this.deps.fs.exists(join(staging, target))) present.push(target);
-    const unresolved = await this.unresolvedSymbol(staging, present);
+    const unresolved = await this.unresolvedSymbol(staging, present, driverStub);
     if (unresolved) {
       await this.deps.fs.remove(staging);
       return fail(ExitCode.Failure, unresolved);
@@ -206,20 +210,35 @@ export class BuildPublisher {
    *  published libggml-cuda.so had no mul_mat_q_case<PQ2_0> until a gate server hit it. The
    *  libraries are resolved from the staging directory the way the unit and the gate load them
    *  (LD_LIBRARY_PATH = the build dir): an inherited LD_LIBRARY_PATH outranks the $ORIGIN runpath
-   *  and would check the libraries of whatever build it names instead of these. */
-  private async unresolvedSymbol(staging: string, targets: string[]): Promise<string | null> {
+   *  and would check the libraries of whatever build it names instead of these.
+   *
+   *  A machine with no NVIDIA driver (a compile in a container with no card) cannot find libcuda.so.1, so every
+   *  driver call the engine imports reads as undefined. Then, and only then, the toolkit's stub of it is preloaded:
+   *  it carries the soname and exports the driver API the engine linked against, and every other symbol is still
+   *  checked. A machine with the driver is checked against the driver. */
+  private async unresolvedSymbol(
+    staging: string,
+    targets: string[],
+    driverStub?: string,
+  ): Promise<string | null> {
     for (const target of targets) {
-      const ldd = await this.deps.shell.run(["ldd", "-r", join(staging, target)], {
-        timeoutMs: 60_000,
-        env: { LD_LIBRARY_PATH: staging },
-      });
-      const output = `${ldd.stdout}\n${ldd.stderr}`;
-      const missing = output.split("\n").find((line) => line.includes("undefined symbol"));
+      let ldd = await this.ldd(join(staging, target), staging);
+      if (driverStub && /libcuda\.so\.1 => not found/.test(ldd.output))
+        ldd = await this.ldd(join(staging, target), staging, driverStub);
+      const missing = ldd.output.split("\n").find((line) => line.includes("undefined symbol"));
       if (ldd.code !== 0 || missing) {
         return `${target} does not resolve: ${(missing ?? ldd.stderr).trim()} (a stale or empty object in the build tree; the next build prunes empty ones)`;
       }
     }
     return null;
+  }
+
+  private async ldd(target: string, libraries: string, preload?: string) {
+    const run = await this.deps.shell.run(["ldd", "-r", target], {
+      timeoutMs: 60_000,
+      env: { LD_LIBRARY_PATH: libraries, ...(preload && { LD_PRELOAD: preload }) },
+    });
+    return { code: run.code, stderr: run.stderr, output: `${run.stdout}\n${run.stderr}` };
   }
 
   private marker(provenance: Provenance): string {

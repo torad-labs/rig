@@ -41,6 +41,7 @@ import { loadVastConfig, offerQuery, type VastConfig } from "./rental-config.ts"
 import { RentedBox } from "./rented-box.ts";
 import { type OfferEstimate, rankOffers, templateQuery } from "./template-offers.ts";
 import {
+  IDLE_CHECK_MINUTES,
   IDLE_SERVICE,
   IDLE_TIMER,
   renderIdleService,
@@ -52,6 +53,12 @@ import {
 /** the card's utilization, as vast lists it, at which a box `vast up` rented is in use whatever its server says: an idle
  *  llama-server with its model loaded reads 0. A template box's guard reads its container's CPU instead (box-guard.ts) */
 const GPU_BUSY_PCT = 10;
+/** a box receiving this much on average over a check's window is working, whatever its card and server read: a pack
+ *  being pulled (134 GB at 251 Mb/s is 70 minutes of an idle card), an image pushed to it, a clone. 512 KB/s is 4 Mb/s;
+ *  an idle box's ssh session and a log tail are a few KB/s. */
+const DOWNLOAD_BUSY_KBPS = 512;
+/** how far back a read of the box's sampler looks: two checks' worth, so one tick the timer missed is still covered */
+const CARD_WINDOW_SECONDS = 2 * IDLE_CHECK_MINUTES * 60;
 /** what the box needs beyond the pack: the engine, the logs, and the derive step's room */
 const PACK_SLACK_BYTES = 5e9;
 
@@ -90,12 +97,46 @@ export interface RentOptions {
   allowArch?: string | undefined;
   /** the box's disk, over vast.toml's disk_gb: a job that keeps data on the box needs more */
   diskGb?: number | undefined;
+  /** the host's download speed under which an offer is never rented, in Mb/s: a pack of 134 GB takes about 70
+   *  minutes at 251 Mb/s and 3.5 minutes at 5 Gb/s. With no offer above it the rent fails and names the fastest. */
+  minDownMbps?: number | undefined;
   /** this box's idle budget, over vast.toml's idle_minutes: a job the server's counters cannot
    *  see (training beside it) needs longer, and the budget is still the cost cap */
   idleMinutes?: number | undefined;
   /** ship the head's private [derive] assets too, so the box serves this machine's pack */
   private?: boolean;
 }
+
+/** the image a `--vm` box comes up from: a VM's image comes from vast's own KVM repository, fully qualified
+ *  (docs.vast.ai/guides/instances/virtual-machines), and a plain one so the gate's driver-only checks hold */
+export const VM_IMAGE = "docker.io/vastai/kvm:ubuntu_terminal";
+
+/** How long rig waits for ssh once vast lists a box running, in tries of up to 25 s (a refused connection costs 5). A
+ *  container answers within the first few minutes; a VM boots an operating system inside the container, vast's docs say
+ *  its boot is "slower" without a figure, and the first one rig rented was still refusing connections after the 5
+ *  minutes a container is given (instance 53930104, Oct 2: running by 22:46Z, "Connection refused" until 22:51Z). */
+const SSH_ATTEMPTS = 60;
+export const VM_SSH_ATTEMPTS = 240;
+
+/** What a KVM box is created with, because some KVM hosts' sshd refuses the key vast writes: the file ends up owned by
+ *  a uid the VM has no user for, and sshd's StrictModes says no (vast-ai/vast-cli#336, open, repaired by this on-start
+ *  on two reporters' instances; a chmod alone is not enough, the file needs the chown). On-start runs after vast
+ *  writes the key, so it is the one place the repair holds; on a healthy host it changes nothing. It is a guard
+ *  against that fault, not what made our boxes unreachable: the VMs of Oct 2 were refused by vast's ssh proxy,
+ *  and the host's own address (`Instance.directSsh`) answered with this key (box 53930876). */
+export const VM_ONSTART =
+  "mkdir -p /root/.ssh; chown root:root /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; chmod 700 /root/.ssh; chmod g-w,o-w /root";
+
+/** `vast lab`: a card to measure on, with no head: the same offer query and idle budget as `up`, nothing private to
+ *  hold back (a head's assets are not shipped at all) */
+export type LabOptions = Omit<RentOptions, "private"> & {
+  /** rent a full virtual machine rather than a container, the one kind of box that runs docker: `rig e2e` and
+   *  `rig image` both drive it, and a container box's dockerd cannot create its iptables chain or mount its
+   *  overlayfs (measured on box 53914526, 2026-10-02). Takes VM_IMAGE unless `image` names another. */
+  vm?: boolean;
+  /** the instance image over vast.toml's, for a box whose job needs another (a driver-only one for the gate) */
+  image?: string | undefined;
+};
 
 /** `vast up <head> --template`: a box from the head's published template, which brings the head up on its own */
 export interface TemplateRentOptions {
@@ -122,6 +163,19 @@ export interface RentReport {
   serving: Serving;
   /** a template box: its price all in and its time to serve, as estimated when it was picked */
   estimate?: { dollars: number; minutesToServe: number; hours: number };
+}
+
+export interface LabReport {
+  kind: "lab";
+  instanceId: number;
+  gpu: string;
+  cap: string;
+  dph: number;
+  geo: string;
+  sshHost: string;
+  sshPort: number;
+  /** minutes with the card idle before the reaper destroys the box, and what that costs at most */
+  idleMinutes: number;
 }
 
 export interface DryRunReport {
@@ -282,6 +336,54 @@ export class RentGpu {
       sshPort: box.value.sshPort,
       localUrl: endpoint.url,
       serving,
+    });
+  }
+
+  /** a card rented to measure on and nothing else: rig and the engine pin shipped, no head brought up (no fetch, no
+   *  derive, no server, no tunnel). What is measured goes on afterwards (an engine build, a pack) and runs with
+   *  `rig engine` over ssh. The idle timer is armed at create like any box's; with no server to answer it, its check
+   *  reads the card alone, and a card under GPU_BUSY_PCT for the whole budget is destroyed. */
+  async lab(options: LabOptions): Promise<Result<LabReport | DryRunReport>> {
+    if (!this.loaded.ok) return this.loaded;
+    const config = await loadVastConfig(this.deps.fs, this.layout);
+    if (!config.ok) return config;
+
+    const ready = await this.preflight(options);
+    if (!ready.ok) return ready;
+
+    const pick = await this.pickOffer(config.value, options);
+    if (!pick.ok) return pick;
+    if (options.dryRun) {
+      this.deps.log.info("dry run: no box created");
+      return ok({ kind: "dry-run", pick: pick.value.offer, query: pick.value.query });
+    }
+
+    const image = options.vm ? (options.image ?? VM_IMAGE) : options.image;
+    const box = await this.createBox(config.value, null, pick.value.offer, {
+      ...options,
+      image,
+      ...(options.vm ? { onstart: VM_ONSTART, vm: true } : {}),
+    });
+    if (!box.ok) return box;
+    const shipped = await this.shipPayload(this.remote(config.value, box.value), null, false);
+    if (!shipped.ok) return shipped;
+
+    const offer = pick.value.offer;
+    const idleMinutes = idleBudget(config.value, box.value);
+    const kind = options.vm ? "VM" : "box";
+    this.deps.log.info(
+      `READY: ${pick.value.label} ${kind} ${box.value.instanceId} at $${offer.dph.toFixed(3)}/h, ${offer.geo} — rig and the engine pin on it, no head; ssh root@${box.value.sshHost} -p ${box.value.sshPort}; idle timer armed (${idleExposure(idleMinutes, offer.dph)})`,
+    );
+    return ok({
+      kind: "lab",
+      instanceId: box.value.instanceId,
+      gpu: offer.gpu,
+      cap: offer.computeCap,
+      dph: offer.dph,
+      geo: offer.geo,
+      sshHost: box.value.sshHost,
+      sshPort: box.value.sshPort,
+      idleMinutes,
     });
   }
 
@@ -544,7 +646,32 @@ export class RentGpu {
     const now = this.deps.clock.now();
     const activity = await this.endpoint(config.value).activity();
     const listing = await this.listing(box);
-    const gpuUtil = listing === "unread" ? undefined : listing?.gpuUtil;
+    let gpuUtil = listing === "unread" ? undefined : listing?.gpuUtil;
+    // The card is read on the box itself, at the address rig recorded for it, for a box vast lists as running: vast
+    // lists no sample at all for a VM, and its sample for a container is one instant, as the box's own is. The box keeps
+    // a sampler, so the read carries the peak since the last read and work that ran between two reads is seen. A box that
+    // does not answer, with nothing from vast to go on, is idle by the same clock (else a VM that lost its network bills
+    // for ever); one that answers without a number stays a card nobody read, below.
+    let readOnBox: "box" | "unreachable" | undefined;
+    let seenOnBox: { now: number; window: number | null; downloadKBps: number | null } | undefined;
+    if (listing && listing !== "unread" && listing.status === "running") {
+      if (box.sshHost && box.sshPort) {
+        const seen = await this.remote(config.value, box).cardUtilization(
+          20_000,
+          CARD_WINDOW_SECONDS,
+        );
+        if (seen === "unreachable") {
+          if (gpuUtil === undefined) {
+            gpuUtil = 0;
+            readOnBox = "unreachable";
+          }
+        } else if (seen !== null) {
+          seenOnBox = seen;
+          gpuUtil = Math.max(gpuUtil ?? 0, seen.now, seen.window ?? 0);
+          readOnBox = "box";
+        }
+      }
+    }
     // The card's reading is the other half of the evidence: vast unreadable, or listing the box
     // running with no sample (its gpu_util is number | null), leaves a busy card looking like an
     // idle one. Only a box it lists as not running, or no longer lists, needs no reading.
@@ -566,10 +693,29 @@ export class RentGpu {
       return fail(ExitCode.Failure, message);
     }
     const gpuBusy = gpuUtil !== undefined && gpuUtil >= GPU_BUSY_PCT;
+    const downloadKBps = seenOnBox?.downloadKBps ?? null;
+    const downloading = downloadKBps !== null && downloadKBps >= DOWNLOAD_BUSY_KBPS;
     const last = await this.state.idle();
-    if (activity.busy > 0 || gpuBusy || activity.key !== last?.key) {
+    const gpu =
+      readOnBox === "unreachable"
+        ? "box unreachable over ssh"
+        : gpuUtil === undefined
+          ? "no GPU reading"
+          : seenOnBox && seenOnBox.window !== null && seenOnBox.window > seenOnBox.now
+            ? `GPU ${seenOnBox.now} % now, peak ${seenOnBox.window} % in the last ${CARD_WINDOW_SECONDS / 60} min, read on the box`
+            : `GPU ${gpuUtil} %${readOnBox === "box" ? " read on the box" : ""}`;
+    const card = downloadKBps === null ? gpu : `${gpu}, download ${rate(downloadKBps)}`;
+    // Every check says what it saw. The reaper's decision is a run of readings, and a destroy that cannot be traced to
+    // them cannot be told from a reaper that read wrong (2026-10-02: "idle for 51 min", six checks before it silent).
+    const said = (verdict: string) =>
+      this.deps.log.info(
+        `idle-check box ${box.instanceId}: server ${activity.key}, ${card}: ${verdict}`,
+      );
+    if (activity.busy > 0 || gpuBusy || downloading || activity.key !== last?.key) {
       await this.state.saveIdle({ key: activity.key, ts: now });
-      return ok({ action: activity.busy > 0 || gpuBusy ? "active" : "changed" });
+      const verdict = activity.busy > 0 || gpuBusy || downloading ? "active" : "changed";
+      said(verdict);
+      return ok({ action: verdict });
     }
     // an idle server beside an unread card counts nothing either: a busy card is never idle,
     // whatever the server says
@@ -579,8 +725,11 @@ export class RentGpu {
     }
 
     const idleMinutes = Math.floor((now - last.ts) / 60_000);
-    if (idleMinutes < idleBudget(config.value, box)) return ok({ action: "idle", idleMinutes });
-    const card = gpuUtil === undefined ? "no GPU reading" : `GPU ${gpuUtil} %`;
+    const budget = idleBudget(config.value, box);
+    if (idleMinutes < budget) {
+      said(`idle ${idleMinutes} of ${budget} min`);
+      return ok({ action: "idle", idleMinutes });
+    }
     this.deps.log.info(
       `idle for ${idleMinutes} min (${activity.key}, ${card}) — destroying the box`,
     );
@@ -687,16 +836,39 @@ export class RentGpu {
 
   /** the market queried, the offers kept beside the box's state, the cheapest one picked;
    *  a card this engine is not measured on needs --allow-arch */
-  private async pickOffer(config: VastConfig, options: RentOptions): Promise<Result<Pick>> {
+  private async pickOffer(
+    config: VastConfig,
+    options: RentOptions & { vm?: boolean },
+  ): Promise<Result<Pick>> {
     const diskGb = options.diskGb ?? config.rental.disk_gb;
-    const query = offerQuery(config, options.gpu, {
+    const shape = {
       maxDph: options.maxDph,
       geo: options.geo,
       diskGb,
       gpus: options.gpus,
-    });
-    const offers = await this.deps.rental.searchOffers(query, diskGb);
+      vm: options.vm,
+    };
+    const floor = options.minDownMbps;
+    const query = offerQuery(config, options.gpu, { ...shape, minDownMbps: floor });
+    // the floor goes in the query, not only over the rows read: vast returns at most 64 offers, cheapest first, and a
+    // fast one dearer than the 64th would never be seen
+    const found = await this.deps.rental.searchOffers(query, diskGb);
+    const offers = floor === undefined ? found : found.filter((each) => each.downMbps >= floor);
     await this.deps.fs.mkdirp(this.state.dir);
+    if (offers.length === 0 && floor !== undefined) {
+      // nothing at the floor: read the market without it, to say what the fastest is and what it costs
+      const market = await this.deps.rental.searchOffers(
+        offerQuery(config, options.gpu, shape),
+        diskGb,
+      );
+      await this.deps.fs.writeText(this.state.path("offers.json"), JSON.stringify(market, null, 2));
+      if (market.length === 0) return fail(ExitCode.Failure, `no offer matches: ${query}`);
+      const fastest = market.reduce((best, each) => (each.downMbps > best.downMbps ? each : best));
+      return fail(
+        ExitCode.Failure,
+        `no offer downloads at ${floor} Mb/s or more: the fastest is offer ${fastest.id} at ${fastest.downMbps.toFixed(0)} Mb/s, $${fastest.dph.toFixed(3)}/h (${fastest.geo}); nothing rented`,
+      );
+    }
     await this.deps.fs.writeText(this.state.path("offers.json"), JSON.stringify(offers, null, 2));
     if (offers.length === 0) return fail(ExitCode.Failure, `no offer matches: ${query}`);
     for (const offer of offers.slice(0, 5)) this.deps.log.info(`  ${describeOffer(offer)}`);
@@ -718,17 +890,26 @@ export class RentGpu {
    *  answers; a box that never gets there is destroyed, not left billing */
   private async createBox(
     config: VastConfig,
-    head: Head,
+    /** the head the box is for; null for a lab box, which serves none */
+    head: Head | null,
     offer: Offer,
     options: {
-      /** vast.toml's stock image unless a template is named */
+      /** vast.toml's stock image unless a template is named, or `image` names another */
       source?: { templateHash: string };
+      image?: string | undefined;
+      /** run on the box once vast has written its key */
+      onstart?: string | undefined;
+      /** a VM, which boots slower than a container and is waited for longer */
+      vm?: boolean | undefined;
       diskGb?: number | undefined;
       idleMinutes?: number | undefined;
     },
   ): Promise<Result<ReachableBox>> {
     const instanceId = await this.deps.rental.create(offer.id, {
-      ...(options.source ?? { image: config.rental.image }),
+      ...(options.source ?? {
+        image: options.image ?? config.rental.image,
+        ...(options.onstart ? { onstart: options.onstart } : {}),
+      }),
       diskGb: options.diskGb ?? config.rental.disk_gb,
       label: config.rental.label,
     });
@@ -741,14 +922,18 @@ export class RentGpu {
       dph: offer.dph,
       geo: offer.geo,
       createdAt: this.deps.clock.now(),
-      head: head.name,
+      ...(head ? { head: head.name } : {}),
       ...(options.idleMinutes !== undefined ? { idleMinutes: options.idleMinutes } : {}),
     };
     await this.state.saveBox(box);
     // the box bills from here, so the reaper is installed and armed here and not after provisioning:
     // a box whose provisioning dies, or whose `up` is killed, otherwise bills with nothing watching
     // it. Only tunnel.env needs the box's endpoint, so the units themselves can be written now.
-    await this.installUnits(config, head, options.idleMinutes ?? config.rental.idle_minutes);
+    await this.installUnits(
+      config,
+      head?.port ?? null,
+      options.idleMinutes ?? config.rental.idle_minutes,
+    );
     await this.armIdleTimer();
     this.deps.log.info(
       `instance ${instanceId} created; waiting for it to run (image pull + vast's sshd install)`,
@@ -763,13 +948,25 @@ export class RentGpu {
       await this.abandon(instanceId, "no ssh endpoint");
       return fail(ExitCode.Failure, `instance ${instanceId} has no ssh endpoint; destroyed`);
     }
-    const reachable: ReachableBox = { ...box, sshHost: running.sshHost, sshPort: running.sshPort };
+    // a VM is reached at the host's own address when vast gives one: its proxy port refused ssh for 13 minutes
+    // after `running` on a VM whose direct port answered at the first try (box 53930876). A container keeps the
+    // proxy, which is what every container box has been reached by.
+    const direct = options.vm ? running.directSsh : undefined;
+    const reachable: ReachableBox = {
+      ...box,
+      sshHost: direct?.host ?? running.sshHost,
+      sshPort: direct?.port ?? running.sshPort,
+    };
     await this.state.saveBox(reachable);
     await this.deps.fs.remove(this.state.knownHosts);
 
-    if (!(await this.waitSsh(this.remote(config, reachable)))) {
+    const said = await this.waitSsh(
+      this.remote(config, reachable),
+      options.vm ? VM_SSH_ATTEMPTS : SSH_ATTEMPTS,
+    );
+    if (said !== null) {
       await this.abandon(instanceId, "ssh never answered");
-      const message = `ssh never answered at ${reachable.sshHost}:${reachable.sshPort}; destroyed ${instanceId}`;
+      const message = `ssh never answered at ${reachable.sshHost}:${reachable.sshPort} (last ssh said: ${said}); destroyed ${instanceId}`;
       return fail(ExitCode.Failure, message);
     }
     this.deps.log.info(`ssh up: root@${reachable.sshHost}:${reachable.sshPort}`);
@@ -780,12 +977,13 @@ export class RentGpu {
    *  with --private */
   private async shipPayload(
     remote: RentedBox,
-    head: Head,
+    /** null for a lab box: rig and the pin only, nothing of any head */
+    head: Head | null,
     shipPrivate: boolean,
   ): Promise<Result<void>> {
     const payload = this.state.path("payload.tar.gz");
-    const held = shipPrivate ? [] : privateAssets(head);
-    if (held.length > 0) {
+    const held = head === null || shipPrivate ? [] : privateAssets(head);
+    if (head !== null && held.length > 0) {
       this.deps.log.info(
         `kept here: ${held.join(", ")} (private); the box serves ${boxServedFile(head, false)} — --private ships them`,
       );
@@ -795,11 +993,11 @@ export class RentGpu {
         "tar",
         "-C",
         this.layout.root,
-        ...held.map((path) => `--exclude=heads/${head.name}/${path}`),
+        ...(head ? held.map((path) => `--exclude=heads/${head.name}/${path}`) : []),
         "-czf",
         payload,
         "dist/rig",
-        `heads/${head.name}`,
+        ...(head ? [`heads/${head.name}`] : []),
         "engine/engine.toml",
       ],
       { timeoutMs: 300_000 },
@@ -941,21 +1139,30 @@ export class RentGpu {
       this.state.tunnelEnv,
       `HOST=${box.sshHost}\nPORT=${box.sshPort}\n`,
     );
-    await this.installUnits(config, head, idleMinutes);
+    await this.installUnits(config, head.port, idleMinutes);
     await this.deps.systemd.restart(TUNNEL_UNIT);
     return this.endpoint(config);
   }
 
-  private async installUnits(config: VastConfig, head: Head, idleMinutes: number): Promise<void> {
+  /** the idle reaper's units, and the tunnel's unless the box serves nothing (`remotePort` null) */
+  private async installUnits(
+    config: VastConfig,
+    remotePort: number | null,
+    idleMinutes: number,
+  ): Promise<void> {
     const dir = this.deps.systemd.unitDir();
     await this.deps.fs.mkdirp(dir);
     const units: Record<string, string> = {
-      [TUNNEL_UNIT]: renderTunnelUnit({
-        tunnelEnv: this.state.tunnelEnv,
-        knownHosts: this.state.knownHosts,
-        localPort: config.rental.local_port,
-        remotePort: head.port,
-      }),
+      ...(remotePort === null
+        ? {}
+        : {
+            [TUNNEL_UNIT]: renderTunnelUnit({
+              tunnelEnv: this.state.tunnelEnv,
+              knownHosts: this.state.knownHosts,
+              localPort: config.rental.local_port,
+              remotePort,
+            }),
+          }),
       [IDLE_SERVICE]: renderIdleService({
         self: this.deps.self,
         idleMinutes,
@@ -1059,12 +1266,15 @@ export class RentGpu {
     return null;
   }
 
-  private async waitSsh(remote: RentedBox): Promise<boolean> {
-    for (let attempt = 0; attempt < 60; attempt++) {
-      if (await remote.reachable(20_000)) return true;
+  /** null once ssh answers, else what it last said after the whole wait */
+  private async waitSsh(remote: RentedBox, attempts: number): Promise<string | null> {
+    let said: string | null = "never tried";
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      said = await remote.unreachable(20_000);
+      if (said === null) return null;
       await this.deps.clock.sleep(5000);
     }
-    return false;
+    return said;
   }
 
   private async abandon(instanceId: number, why: string): Promise<void> {
@@ -1077,6 +1287,11 @@ export class RentGpu {
 }
 
 /** the idle minutes that destroy this box: its own budget from `up`, else vast.toml's */
+/** a received rate as the log shows it: 30.3 MB/s, 200 KB/s */
+function rate(kbps: number): string {
+  return kbps >= 1024 ? `${(kbps / 1024).toFixed(1)} MB/s` : `${kbps} KB/s`;
+}
+
 function idleBudget(config: VastConfig, box: BoxState): number {
   return box.idleMinutes ?? config.rental.idle_minutes;
 }

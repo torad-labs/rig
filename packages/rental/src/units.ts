@@ -31,8 +31,13 @@ RestartSec=3
 `;
 }
 
+/** How often the idle check reads the box. The card is a point sample, so the gap between two reads is a gap in what the
+ *  reaper can see: a run shorter than it can fall wholly inside. Three minutes is the gap a run of a few minutes cannot
+ *  hide in, at a few seconds of ssh per read. */
+export const IDLE_CHECK_MINUTES = 3;
+
 export function renderIdleService(o: { self: readonly string[]; idleMinutes: number }): string {
-  return `# One idle check; ${IDLE_TIMER} runs it every 10 minutes while a box exists.
+  return `# One idle check; ${IDLE_TIMER} runs it every ${IDLE_CHECK_MINUTES} minutes while a box exists.
 [Unit]
 Description=Destroy the rented box after ${o.idleMinutes} idle minutes
 
@@ -47,11 +52,11 @@ export function renderIdleTimer(): string {
 # Enabled and started by \`rig vast up\` (so a user-manager restart or a reboot arms it again while
 # the box bills), re-armed by \`rig vast status\` if found dead, disabled and stopped by \`rig vast down\`.
 [Unit]
-Description=Idle check for the rented box, every 10 minutes
+Description=Idle check for the rented box, every ${IDLE_CHECK_MINUTES} minutes
 
 [Timer]
-OnActiveSec=10min
-OnUnitActiveSec=10min
+OnActiveSec=${IDLE_CHECK_MINUTES}min
+OnUnitActiveSec=${IDLE_CHECK_MINUTES}min
 AccuracySec=1min
 
 [Install]

@@ -78,6 +78,28 @@ describe("cache formats", () => {
       ran: { k: "q5_1", v: "q8_0", s: "f16", k_bias: false },
     });
   });
+  test("the indexer's cache is named per head or profile, rendered as -ctki and run by a bench leg only when named", () => {
+    const glm = {
+      cache: { k: "q8_0", v: "q8_0", idx: "q8_0" },
+      path: (rel: string) => `/h/${rel}`,
+    } as const;
+    expect(profileCache(glm, {})).toEqual({ k: "q8_0", v: "q8_0", s: undefined, idx: "q8_0" });
+    expect(profileCache(glm, { cache: { idx: "f16" } }).idx).toBe("f16");
+    expect(profileCache(head, {}).idx).toBeUndefined();
+    expect(cacheArgv(glm, { k: "q8_0", v: "q8_0", idx: "q8_0" })).toEqual([
+      "--cache-type-k",
+      "q8_0",
+      "--cache-type-v",
+      "q8_0",
+      "-ctki",
+      "q8_0",
+    ]);
+    expect(cacheArgv(glm, { k: "q8_0", v: "q8_0" })).not.toContain("-ctki"); // unnamed: the engine's f16, no flag
+    expect(benchCache({ k: "q8_0", v: "q8_0", idx: "q8_0" })).toEqual({
+      args: ["-ctk", "q8_0", "-ctv", "q8_0", "-ctki", "q8_0"],
+      ran: { k: "q8_0", v: "q8_0", idx: "q8_0", k_bias: false },
+    });
+  });
   test("a K/V pair the engine's CUDA flash attention does not run, or a state type it does not run, is refused by name", () => {
     const engine = {
       sha7: "abc1234",

@@ -11,9 +11,13 @@
 // of the one engine.toml pins (the staged engine.toml points its [[prebuilt]] entry at the file, with the file's
 // sha256): the check a build passes BEFORE it is uploaded and pinned. Without it, the pinned URL is fetched as a user
 // would. A gate lock (RIG_GATE_LOCK) is held with flock around the decode only: a shared gate card.
-import { basename, join } from "node:path";
-import type { Containers, FileSystem, Hasher, Layout, Log, Shell } from "@rig/core";
+//
+// A pass without --prebuilt, in a checkout with no change git sees, is recorded for its commit (e2e-receipt.ts):
+// `rig tag` tags no release without it. A run without --prebuilt that fails takes the commit's receipt back.
+import { basename, dirname, join } from "node:path";
+import type { Clock, Containers, FileSystem, Hasher, Layout, Log, Shell } from "@rig/core";
 import { ExitCode, fail, ok, type Result } from "@rig/core";
+import { receiptLogName, receiptPaths } from "./e2e-receipt.ts";
 
 export interface DriverOnlyGateOptions {
   /** a GGUF the installed llama-bench decodes; with `head`, that head's source pack */
@@ -32,6 +36,8 @@ export interface DriverOnlyGateReport {
   base: string;
   prebuilt: string | null;
   log: string;
+  /** the receipt `rig tag` reads, written for a pass on the published pin at a commit; null for any other pass */
+  receipt: string | null;
 }
 
 export interface DriverOnlyGateDeps {
@@ -39,6 +45,7 @@ export interface DriverOnlyGateDeps {
   fs: FileSystem;
   hasher: Hasher;
   containers: Containers;
+  clock: Clock;
   log: Log;
 }
 
@@ -116,6 +123,8 @@ export class DriverOnlyGate {
     const { root } = this.layout;
     const pack = await fs.realpath(options.pack);
     const prebuilt = options.prebuilt === undefined ? null : await fs.realpath(options.prebuilt);
+    // the commit the stage below copies, when it is all git sees: a receipt is kept by commit
+    const commit = prebuilt === null ? await this.cleanCommit(root) : null;
 
     // the release, as release.yml packs it: its checkout holds only the files git tracks and a dist/ with the one
     // binary it built. A copy of this checkout's directories would also carry what git ignores here: the private
@@ -186,12 +195,44 @@ export class DriverOnlyGate {
     await fs.mkdirp(this.layout.logsDir);
     const logPath = join(this.layout.logsDir, "e2e-driver-only.log");
     await fs.writeText(logPath, `${run.stdout}\n${run.stderr}`);
-    if (run.code !== 0 || !/^== PASS$/m.test(run.stdout))
+    const paths = commit === null ? null : receiptPaths(this.layout, commit);
+    if (run.code !== 0 || !/^== PASS$/m.test(run.stdout)) {
+      if (paths) for (const path of [paths.receipt, paths.log]) await fs.remove(path);
       return fail(
         ExitCode.Failure,
         `the driver-only gate failed (exit ${run.code}, ${logPath}): ${tail(`${run.stdout}\n${run.stderr}`)}`,
       );
-    return ok({ base: options.base, prebuilt: prebuilt && basename(prebuilt), log: logPath });
+    }
+    if (paths && commit) {
+      await fs.mkdirp(dirname(paths.receipt));
+      await fs.copy(logPath, paths.log);
+      const receipt = {
+        commit,
+        base: options.base,
+        head: options.head ?? null,
+        passed: new Date(this.deps.clock.now()).toISOString(),
+        // beside the receipt, not this machine's path for it: the gate runs on a rented box and the
+        // pair is carried to the machine that tags (e2e-receipt.ts)
+        log: receiptLogName(paths.log),
+      };
+      await fs.writeText(paths.receipt, `${JSON.stringify(receipt, null, 2)}\n`);
+    }
+    return ok({
+      base: options.base,
+      prebuilt: prebuilt && basename(prebuilt),
+      log: logPath,
+      receipt: paths?.receipt ?? null,
+    });
+  }
+
+  /** HEAD of `root` when git sees no change in it (nothing modified, staged or untracked), else null */
+  private async cleanCommit(root: string): Promise<string | null> {
+    const git = (...args: string[]) =>
+      this.deps.shell.run(["git", "-C", root, ...args], { timeoutMs: STEP_TIMEOUT_MS });
+    const status = await git("status", "--porcelain");
+    if (status.code !== 0 || status.stdout.trim() !== "") return null;
+    const head = await git("rev-parse", "HEAD");
+    return head.code === 0 ? head.stdout.trim() : null;
   }
 
   /** a command that must succeed: its stdout, or a failure naming it */

@@ -1772,3 +1772,91 @@ its 27–37 % gaps are the instrument's.
 
 **The pin moves to 3d40ae99c** (head.toml has its lineage). Chunked KDA ships on under the practical-equivalence gate
 above; the hc post kernel and lever 2 are bit for bit on the real pack.
+
+### Rental 2a: the v1 cache, the slot count, and a stall the served shape never reaches (rig-glm, Oct 2-3, 2026)
+
+Box 53941474, two RTX PRO 6000 Blackwell Workstation (97,887 MiB, sm_120), the real IQ3_XXS pack (3 of 3 shards
+sha256-checked on the box), engine 737ee4450 (libggml-cuda 31056d48), the served shape `-sm tensor -ts 1,1 -fa on
+-b 4096 -ub 1024`, `GGML_CUDA_ALLREDUCE=internal`, `GGML_CUDA_GRAPH_MAX=0`. Receipts in rig-glm's research notes
+(`local/research/glm53-mmq-deep-2026-10-02/notes.md`, legs a to d).
+
+**The cache: q8_0 K, V and indexer.** Against the f16 cache on the same library, so the cache type is the only
+difference; the floor is that f16 cache's own `-ub 512` reordering at the same depth; the gate is the
+practical-equivalence one (KLD at most 1.10x the floor, same top within 0.25 points).
+
+| depth | f16 floor (KLD / same top) | q8_0 K/V/idx | ratio | same top |
+|---|---|---|---|---|
+| 2k (32 chunks) | 0.012685 / 96.209 % | 0.011520 / 96.453 % | 0.908 | +0.244 |
+| 16k (4 chunks) | 0.012742 / 96.749 % | 0.007469 / 97.354 % | 0.586 | +0.605 |
+
+Decode, f16 against q8_0, `rig engine ab`, 3 pairs of 3 reps: **-0.68 % at d65536** (95 % CI -1.19 % to -0.16 %) and
+**-0.85 % at d262144** (95 % CI -2.86 % to +1.16 %, inside noise).
+
+**Three slots in one shared pool.** rig renders `-np 3 -c 524288 --kv-unified`: under `--kv-unified` every sequence's
+context is the whole pool and the compute buffer scales with it, so a pool of `slots x context.model` does not load
+(`-np 3 -c 1572864`: an 18,221 MiB compute-buffer cudaMalloc fails on card 0; `-np 2 -c 1048576`: 9.6 GiB fails),
+and the one 524,288-cell pool shared by three does. Loaded with four sessions decoding at once, worst free is
+14,547 MiB at three slots and 14,305 MiB at four. One session alone on the three-slot server, the same 12 short
+prompts as the one-slot baseline: **152.25 tok/s** (min 132.48, acceptance 0.6256) against 142.18 (acceptance 0.626),
+1.07x, unpaired and 3 hours apart on a box that swings; superseded by the paired 1.008 on the freeze, below. Three
+concurrent sessions of ~20K-token prompts each decoding up to 2,048 tokens: 92 s wall, 32.1 tok/s a
+session, acceptance 0.611. Decode-only MTP lost acceptance even on short prompts (0.905x short, 0.788x at a 99K-token
+turn) and the windowed MTP draft is refused at load for this model's recurrent-plus-indexer memory, so neither ships.
+
+**A host deadlock at 9-16 token ubatches past ~8k of depth, which the served shape does not reach.**
+`llama-perplexity -b 9 -ub 9 -c 16384` never finishes on this engine: one `ggml_cuda_ar_kernel` spins on card 0 for
+a peer that never arrives, card 1 has no kernel, and the host sits inside card 0's `cudaGraphLaunch` from the meta
+backend's capture replay, so it never launches card 1's graph. It needs the internal all-reduce AND the capture
+replay together (`GGML_META_CAPTURE_LEGACY=1`, `GGML_CUDA_ALLREDUCE=none`, `=nccl` and `-sm layer` each pass), at 9
+or more tokens a ubatch, past 2k and by 8k of depth, on the 46-layer model (the 5-layer proxy passes); the cache
+type, the LL kernel and the L2 issuer are each ruled out. Served on rig's own argv it does not occur: three
+concurrent ~20K-token sessions (9-token MTP verify batches every step), and one prompt of 17 x 1024 + 9, 12 and 16
+tokens sent three times each (the identical tail graph captured and replayed), all complete. The working reading is
+host run-ahead: perplexity queues ~900 replays with no host sync, a server syncs every step. The fix is the first
+engine lever after the v1 freeze; v1 ships without a mitigation.
+
+**The freeze engine adds MMQ's L2 prefetch (0020175b4, Oct 3, 12:28-1:16 AM CT).** While a chunk of an IQ3_XXS or Q8_0
+weight is computed, MMQ asks L2 for the next chunk's rows; only the issue time of loads moves. Same box and shape,
+against 737ee4450's library:
+
+- `test-backend-ops` with the prefetch on, CUDA0 against the CPU backend: 170 of 170 IQ3_XXS and Q8_0 cases pass
+  (MUL_MAT 11 and 47, MUL_MAT_ID 37 and 75).
+- Logits at 2k x 8 chunks, against 737ee4450's base: the prefetch on, off, and as committed with no env each read
+  KLD 0, same top 99.988 %, PPL ratio 1.000439. That is exactly what 737ee4450 reads against its own base, and what a
+  clean rebuild of 737ee4450 in the same tree reads, so the 99.988 % is the instrument at that shape, not a library
+  difference.
+- Prefill, `rig engine ab`, 3 pairs of 3 reps, off against on: **+6.15 % at pp512** (95 % CI +5.94 % to +6.36 %) and
+  **+3.52 % at pp4096** (+2.90 % to +4.14 %). Decode tg128 +0.05 % (-0.60 % to +0.70 %), inside noise.
+- As committed, no env against `GGML_CUDA_MMQ_L2_PF=0`, 3 pairs: pp512 **+5.81 %** (95 % CI +5.00 % to +6.62 %), so the
+  prefetch is on when unset. The freeze is 009073391, which is 0020175b4 and its TORAD.md row.
+
+**Served on the freeze library, on a box that swings (Oct 3, 1:18-1:45 AM CT).** rig's rendered argv, one session at a
+time, the 12 short requests. Every run reads acceptance 0.6256, so the token streams are the same. The box's own speed
+moved between two levels with nothing changed: 737ee4450 read 152.25 tok/s at 11:44 PM CT and 121.1 and 121.27 at
+1:21-1:27 AM CT, and the freeze library read 138.67 (it changed level mid-run), about 120, then about 152. Within a run,
+each request sits at its run's level from the first request. Only runs back to back compare, so these are paired.
+
+| order | library, env | slots | tok/s |
+|---|---|---|---|
+| 1 | 737ee4450 | 3 | 121.10 |
+| 2 | freeze, `GGML_CUDA_MMQ_L2_PF=0` | 3 | 121.05 |
+| 3 | freeze, default | 3 | 119.82 |
+| 4 | 737ee4450 | 3 | 121.27 |
+| 5 | freeze, default | 3 | 119.88 |
+| 6 | freeze, `GGML_CUDA_MMQ_L2_PF=0` | 3 | 121.48 |
+| 7 | freeze, `GGML_CUDA_MMQ_L2_PF=0` | 3 | 122.56 |
+| 8 | freeze, default | 3 | 152.63 |
+| 9 | freeze, default | 1 | 150.95 |
+| 10 | freeze, default | 3 | 152.82 |
+| 11 | freeze, default | 3 | 152.77 |
+| 12 | freeze, default | 1 | 152.08 |
+
+- **The prefetch, default against PF=0 on one library, 3 pairs in ABBA order:** -1.02 % and -1.32 % at the low level,
+  then +24.5 % where the box moved up between the two runs. The first two pairs sit at one level, with 737ee4450 between
+  them reading like PF=0, and put the default about 1 % under PF=0 in served decode. MMQ is not on the 3-token verify path
+  (`ggml-cuda.cu:2772` dense, `:2881` MUL_MAT_ID: mmvq takes up to 8 tokens), so the mechanism is unknown. Under
+  rig-orchestrator's rule (only a paired 95 % CI wholly below zero turns it off) the prefetch stays on. The first
+  post-freeze measurement is a paired served A/B on a box that holds one level.
+- **Slots, np3 one session at a time against np1, ABBA, all at the high level:** 1.012 and 1.005, so 1.008
+  (np3 152.82 and 152.77 against np1 150.95 and 152.08). The 1.07 above compared
+  runs 3 hours apart across this swing and is superseded. The bar is 0.95, and slots = 3 holds.

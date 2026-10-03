@@ -52,6 +52,11 @@ export function offerQuery(
     geo?: string | undefined;
     diskGb: number;
     gpus?: number | undefined;
+    /** only hosts that rent a full virtual machine: a vast CONTAINER cannot run docker (no NET_ADMIN for its
+     *  iptables chain, no mount privilege for its overlayfs), which the driver-only gate and `rig image` both need */
+    vm?: boolean | undefined;
+    /** only hosts that download at this speed or faster, in Mb/s; never lower than the shared query's own floor */
+    minDownMbps?: number | undefined;
   },
 ): string {
   const cardClass = config.cards[gpu] ?? config.cards.default;
@@ -61,11 +66,21 @@ export function offerQuery(
   const parts = [
     `gpu_name=${gpu}`,
     `num_gpus=${gpus}`,
-    config.rental.query,
+    withDownFloor(config.rental.query, options.minDownMbps),
     `disk_space>=${options.diskGb}`,
     `gpu_mem_bw>=${cardClass.min_bandwidth}`,
     `dph_total<=${maxDph}`,
   ];
   if (options.geo) parts.push(`geolocation=${options.geo}`);
+  if (options.vm) parts.push("vms_enabled=true");
   return parts.join(" ");
+}
+
+/** the shared query with its inet_down term raised to `floor`; a floor under the term's own leaves it, and a query with
+ *  no such term gets one. The term is replaced rather than repeated so the query never carries two answers for one field. */
+function withDownFloor(query: string, floor: number | undefined): string {
+  if (floor === undefined) return query;
+  const term = /inet_down>=(\d+(?:\.\d+)?)/.exec(query);
+  if (!term) return `${query} inet_down>=${floor}`;
+  return Number(term[1]) >= floor ? query : query.replace(term[0], `inet_down>=${floor}`);
 }

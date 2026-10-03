@@ -13,10 +13,16 @@ function command(lock?: string, fails = false) {
       asked.push(options);
       return fails
         ? fail(ExitCode.Failure, "the driver-only gate failed (exit 1)")
-        : ok({ base: options.base, prebuilt: null, log: "/r/local/logs/e2e-driver-only.log" });
+        : ok({
+            base: options.base,
+            prebuilt: null,
+            log: "/r/local/logs/e2e-driver-only.log",
+            receipt: "/r/local/release/e2e-54d558e.json",
+          });
     },
   } as unknown as DriverOnlyGate;
-  return { asked, log: new FakeLog(), cmd: e2eCommand(gate, lock, new FakeLog()) };
+  const log = new FakeLog();
+  return { asked, log, cmd: e2eCommand(gate, lock, log) };
 }
 
 describe("e2e", () => {
@@ -77,6 +83,11 @@ describe("e2e", () => {
     const { asked, cmd } = command("/run/gate.lock");
     await cmd.run(parseArgs(["/m/pack.gguf"]));
     expect(asked[0]?.lock).toBe("/run/gate.lock");
+  });
+  test("a pass names the receipt `rig tag` reads", async () => {
+    const { log, cmd } = command();
+    await cmd.run(parseArgs(["/m/pack.gguf"]));
+    expect(log.lines.join("\n")).toContain("receipt /r/local/release/e2e-54d558e.json");
   });
   test("a failed gate is its exit code", async () => {
     const { cmd } = command(undefined, true);

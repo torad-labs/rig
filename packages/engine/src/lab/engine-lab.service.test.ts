@@ -19,8 +19,15 @@ function setup() {
     };
   });
   p.fs.put(`${TREE}/bin/libggml-cuda.so.0`, "tree's library");
+  tools(p, `${TREE}/bin`);
   p.fs.put("/libs/new/libggml-cuda.so.0", "relinked library");
   return { p, lab };
+}
+
+/** the executables a build carries, as the real directory holds them: the lab names a tool it cannot find */
+function tools(p: ReturnType<typeof fakePorts>, dir: string) {
+  for (const tool of ["llama-bench", "llama-perplexity", "test-backend-ops"])
+    p.fs.put(`${dir}/${tool}`, "elf");
 }
 
 const target = (over: Partial<LabTarget> = {}): LabTarget => ({
@@ -91,6 +98,7 @@ describe("an installed build", () => {
   test("a tree without bin/ holds its executables and libraries itself (local/engine-builds/<sha7>-sm<cap>)", async () => {
     const { p, lab } = setup();
     p.fs.put("/r/local/engine-builds/abc1234-sm120/libggml-cuda.so.0", "the prebuilt's library");
+    tools(p, "/r/local/engine-builds/abc1234-sm120");
     p.shell.on(/^\S*test-backend-ops /, (_cmd, opts) => ({
       code: 0,
       stdout: `  1/1 tests passed ${opts?.env?.LD_LIBRARY_PATH}\n`,
@@ -106,6 +114,29 @@ describe("an installed build", () => {
       "/r/local/engine-builds/abc1234-sm120/libggml-cuda.so.0",
     );
     expect(p.shell.calls.at(-1)?.[0]).toBe("/r/local/engine-builds/abc1234-sm120/test-backend-ops");
+  });
+});
+
+describe("a build with no llama-perplexity", () => {
+  test("the KL legs name the missing tool and what carries it, before ldd is asked about a file that is not there", async () => {
+    const { p, lab } = setup();
+    const dir = "/r/local/engine-lab/base-7656925";
+    p.fs.put(`${dir}/libggml-cuda.so.0`, "an installed build");
+    p.fs.put(`${dir}/llama-bench`, "elf");
+    const report = await lab.identity({
+      target: target({ tree: dir, cards: [0] }),
+      model: "/m.gguf",
+      text: "/wiki.txt",
+      tag: "base",
+      ctx: 2048,
+      chunks: 8,
+      extra: [],
+      run: "i1",
+    });
+    expect(!report.ok && report.message).toBe(
+      `${dir}/llama-perplexity is not there: a build holds the targets of the day it was published and none added since (install a newer published build, or rig build --compile)`,
+    );
+    expect(p.shell.calls.filter((cmd) => cmd[0] === "ldd")).toEqual([]);
   });
 });
 
@@ -200,6 +231,72 @@ describe("EngineLab.ab", () => {
     expect(order.slice(4)).toEqual(["a", "b"]);
     expect(more.ok && more.value.change.n).toBe(3);
     expect(more.ok && more.value.libs.b.path).toBe("/libs/new/libggml-cuda.so.0");
+  });
+
+  test("a side's args reach its own bench and no other: the KV cache type, one engine, one library", async () => {
+    const { p, lab } = setup();
+    const argvs: string[][] = [];
+    // -o jsonl is on the bench argv and not on the ldd one, which also names llama-bench
+    p.shell.on(/-o jsonl/, (cmd) => {
+      argvs.push(cmd.slice(1));
+      const quantized = cmd.includes("q8_0");
+      return {
+        code: 0,
+        stdout: `{"samples_ts": [1, ${quantized ? 90 : 100}, ${quantized ? 90 : 100}]}\n`,
+        stderr: "",
+      };
+    });
+    const report = await lab.ab({
+      target: target(),
+      model: "/m.gguf",
+      a: { env: {}, args: ["-ctk", "f16", "-ctv", "f16"] },
+      b: { env: {}, args: ["-ctk", "q8_0", "-ctv", "q8_0"] },
+      pairs: 2,
+      first: 1,
+      reps: 3,
+      extra: ["-p", "0", "-n", "128", "-d", "65536"],
+      run: "ab-args",
+    });
+    // pair 1 runs a then b, pair 2 b then a; each side's args follow the run's own, never the other side's
+    const tail = (argv: string[]) => argv.slice(argv.indexOf("-d")).join(" ");
+    expect(argvs.map(tail)).toEqual([
+      "-d 65536 -ctk f16 -ctv f16",
+      "-d 65536 -ctk q8_0 -ctv q8_0",
+      "-d 65536 -ctk q8_0 -ctv q8_0",
+      "-d 65536 -ctk f16 -ctv f16",
+    ]);
+    expect(report.ok).toBe(true);
+    if (!report.ok) return;
+    expect(report.value.args).toEqual({
+      a: ["-ctk", "f16", "-ctv", "f16"],
+      b: ["-ctk", "q8_0", "-ctv", "q8_0"],
+    });
+    for (const pair of report.value.pairs) expect(pair.change).toBeCloseTo(-0.1, 12);
+  });
+
+  test("a side with no args runs the run's own and reports none", async () => {
+    const { p, lab } = setup();
+    const argvs: string[][] = [];
+    p.shell.on(/-o jsonl/, (cmd) => {
+      argvs.push([...cmd]);
+      return { code: 0, stdout: `{"samples_ts": [1, 100, 100]}\n`, stderr: "" };
+    });
+    const report = await lab.ab({
+      target: target(),
+      model: "/m.gguf",
+      a: { env: {} },
+      b: { lib: "/libs/new", env: {} },
+      pairs: 1,
+      first: 1,
+      reps: 3,
+      extra: ["-p", "4096"],
+      run: "ab-no-args",
+    });
+    expect(argvs.map((argv) => argv.slice(-2))).toEqual([
+      ["-p", "4096"],
+      ["-p", "4096"],
+    ]);
+    expect(report.ok && report.value.args).toEqual({ a: [], b: [] });
   });
 
   test("refuses a pair whose two sides resolve a different CUDA runtime", async () => {

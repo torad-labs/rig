@@ -1,8 +1,10 @@
 // `rig build --prebuilt`: the pin's prebuilt engine, built in tools/prebuilt/Dockerfile's image so its floor is that
 // image's (Ubuntu 22.04, glibc 2.35) and not whatever the building machine runs. `rig build --portable` runs inside
 // the container as the calling user, with its own local/ (local/prebuilt/, so no build tree mixes with the host's),
-// capped at 14 GiB and 6 CPUs: the engine's largest CUDA objects need ~13 GiB to compile. The card is handed in
-// only for that build to read its compute capability. --sha builds a fork commit other than the pin (a rental image
+// capped at 14 GiB and 6 CPUs: the engine's largest CUDA objects need ~13 GiB to compile. The container gets no card:
+// the host's nvidia-smi gives the card's compute capability, handed in as --cap, because a compile never uses the card
+// and so must not hold one (a lease over a build kept a card idle for every build). Its symbol check finds no
+// libcuda.so.1 there and uses the toolkit's stub (build-publisher.ts). --sha builds a fork commit other than the pin (a rental image
 // ahead of it) through a copy of engine.toml naming that commit and no published prebuilt; the pin is unchanged.
 // The tarball it reports is what `rig e2e --prebuilt` gates before it is published.
 import { join } from "node:path";
@@ -82,9 +84,16 @@ export class BuildPrebuilt {
     log.info(`building torad-labs/llama.cpp @ ${sha.slice(0, 7)} with --portable in ${image}`);
     const run = await containers.run(
       image,
-      ["/rig/dist/rig", "build", "--gpu", "0", "--portable", "--jobs", `${options.jobs}`],
+      [
+        "/rig/dist/rig",
+        "build",
+        "--cap",
+        card.computeCap,
+        "--portable",
+        "--jobs",
+        `${options.jobs}`,
+      ],
       {
-        gpu: options.gpu,
         asCaller: true,
         limits: LIMITS,
         env: { HOME: "/tmp", RIG_ROOT: "/rig" },

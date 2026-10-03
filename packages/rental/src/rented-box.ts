@@ -1,9 +1,11 @@
 // The rented box as rig sees it over ssh: the same layout as here under remote_dir, the
 // compiled rig shipped in a payload, and the head brought up with rig's own commands. Every
-// remote command line lives in this file; the service asks for what it wants done.
+// remote command line lives in this file (the idle sampler's shell text, in box-sampler.ts); the service asks for what it
+// wants done.
 import { basename, dirname } from "node:path";
 import type { RunResult, Ssh, SshTarget } from "@rig/core";
 import { type Layout, layoutAt } from "@rig/core";
+import { SAMPLER_PATHS, samplerScript, windowRead } from "./box-sampler.ts";
 
 /** where a template box's on-start logs (box-template.ts) */
 const TEMPLATE_LOGS = "/var/log/rig";
@@ -21,10 +23,61 @@ export class RentedBox {
     this.rigBinary = this.layout.binary;
   }
 
-  /** ssh answers at all: vast installs sshd after the container starts */
-  async reachable(timeoutMs: number): Promise<boolean> {
+  /** null when ssh answers (vast installs sshd after the container starts), else the last thing ssh said, so a
+   *  box that refuses the key reads differently from one that has not booted */
+  async unreachable(timeoutMs: number): Promise<string | null> {
     const probe = await this.ssh.run(this.target, "true", { timeoutMs });
-    return probe.code === 0;
+    if (probe.code === 0) return null;
+    return probe.stderr.trim().split("\n").at(-1)?.slice(0, 160) || `exit ${probe.code}`;
+  }
+
+  /** The card on the box: its utilization now, its peak over the last `windowSeconds` as a sampler on the box saw it, and
+   *  what the box received over the same window.
+   *  A utilization is a point sample, and work that runs between two reads is invisible to a read: 2026-10-02 a box in use
+   *  by runs of a few minutes was destroyed after six reads of under 10 %. So the box keeps a sampler, one line every 5
+   *  seconds into a file, and each read asks for the peak over the window since the last read. The read starts the
+   *  sampler when it is not running (a rebooted box has none), by a pid file, writing the script beside it by rename so a
+   *  running copy is never rewritten in place; a sampler of the first generation, which wrote no download column, is
+   *  retired by its own pid file. `now` is the busiest card's percent; null when nvidia-smi gave no number
+   *  (and "unreachable" when ssh itself did not answer: the command always exits 0 once a shell ran it, so any other exit
+   *  is the transport). `window` is null when the sampler has no sample in the window yet, `downloadKBps` the average
+   *  received over the window, null when no sample in it carries the column. */
+  async cardUtilization(
+    timeoutMs: number,
+    windowSeconds: number,
+  ): Promise<
+    { now: number; window: number | null; downloadKBps: number | null } | "unreachable" | null
+  > {
+    const probe = await this.ssh.run(
+      this.target,
+      [
+        'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null; echo "rc=$?"',
+        `S=${SAMPLER_PATHS.script}; P=${SAMPLER_PATHS.pid}; F=${SAMPLER_PATHS.firstPid}`,
+        `[ -f $F ] && { kill "$(cat $F)" 2>/dev/null; rm -f $F; }`,
+        `cat > $S.new <<'RIG_SAMPLER'`,
+        ...samplerScript(),
+        "RIG_SAMPLER",
+        "mv $S.new $S",
+        'kill -0 "$(cat $P 2>/dev/null)" 2>/dev/null || { nohup setsid sh $S >/dev/null 2>&1 < /dev/null & } >/dev/null 2>&1',
+        windowRead(SAMPLER_PATHS.samples, windowSeconds),
+        "exit 0",
+      ].join("\n"),
+      { timeoutMs },
+    );
+    if (probe.code !== 0) return "unreachable";
+    if (!/^rc=0$/m.test(probe.stdout)) return null;
+    const percents = probe.stdout
+      .split("\n")
+      .filter((line) => /^\d+$/.test(line.trim()))
+      .map(Number);
+    if (percents.length === 0) return null;
+    const window = /^window=(\d+)$/m.exec(probe.stdout)?.[1];
+    const download = /^download=(\d+)$/m.exec(probe.stdout)?.[1];
+    return {
+      now: Math.max(...percents),
+      window: window === undefined ? null : Number(window),
+      downloadKBps: download === undefined ? null : Number(download),
+    };
   }
 
   /** `rig <args>` on the box, the compiled binary from the payload */

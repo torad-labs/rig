@@ -1,18 +1,24 @@
 import { describe, expect, test } from "bun:test";
+import { basename } from "node:path";
 import { layoutAt } from "@rig/core";
 import { fakePorts, repoRoot } from "@rig/testing";
 import { loadEngine } from "../engine.ts";
 import { DriverOnlyGate } from "./driver-only-gate.service.ts";
+import { readReceipt, receiptPaths } from "./e2e-receipt.ts";
 
 const engineToml = await Bun.file(`${repoRoot}/engine/engine.toml`).text();
 const sha256 = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex");
 const STAGE = `/r/local/e2e-driver-only-${process.pid}`;
 const TRACKED = ["heads/h/head.toml", "LICENSE", "README.md", "engine/engine.toml"];
+const COMMIT = "54d558e0a1b2c3d4e5f60718293a4b5c6d7e8f90";
 
-/** the machine as the gate sees it: git lists the tracked files, tar copies them (dist/rig among them) into the
- *  staged checkout and packs it, and the container answers `run` (by default the checks pass) */
-async function setup() {
+/** the machine as the gate sees it: git lists the tracked files (and, unless `changed`, sees no change in the checkout
+ *  at COMMIT), tar copies them (dist/rig among them) into the staged checkout and packs it, and the container answers
+ *  `run` (by default the checks pass) */
+async function setup(changed = "") {
   const p = fakePorts();
+  p.shell.on(/^git -C \/r rev-parse HEAD$/, { code: 0, stdout: `${COMMIT}\n`, stderr: "" });
+  p.shell.on(/^git -C \/r status --porcelain$/, { code: 0, stdout: changed, stderr: "" });
   const layout = layoutAt("/r");
   p.fs.put("/r/engine/engine.toml", engineToml);
   p.fs.put("/r/install.sh", "#!/bin/sh\n");
@@ -59,7 +65,7 @@ describe("e2e: the driver-only gate", () => {
     const r = await gate.run({ pack: "/m/pack.gguf", gpu: 1, base: "ubuntu:22.04" });
     expect(r.ok).toBe(true);
     // the binary built from this checkout, and only the files git tracks, as release.yml's checkout holds them
-    expect(p.shell.calls[0]).toEqual(["bun", "run", "build"]);
+    expect(p.shell.calls.find((c) => c[0] === "bun")).toEqual(["bun", "run", "build"]);
     expect(listed).toEqual([...TRACKED, "dist/rig"]);
     expect(staged.toml).toBe(engineToml);
     expect(staged.release).toEqual([
@@ -169,5 +175,74 @@ describe("e2e: the driver-only gate", () => {
       { "/run/gate.lock": "/gate.lock" },
     ]);
     expect(await p.fs.exists(STAGE)).toBe(false);
+  });
+  test("a pass on the published pin, in a checkout with no change git sees, records the receipt `rig tag` reads", async () => {
+    const { p, gate } = await setup();
+    const r = await gate.run({ pack: "/m/pack.gguf", gpu: 0, base: "ubuntu:22.04" });
+    const paths = receiptPaths(layoutAt("/r"), COMMIT);
+    expect(r.ok && r.value.receipt).toBe(paths.receipt);
+    // The gate runs on a rented box now, so the receipt is carried to the machine that tags. It names
+    // its log BESIDE itself rather than by the path it had on the box, which would not exist here.
+    expect(JSON.parse(p.fs.text(paths.receipt)!).log).toBe(basename(paths.log));
+    // and a read resolves it against the receipt's own directory, so a reader gets a usable path
+    expect(await readReceipt(p.fs, layoutAt("/r"), COMMIT)).toEqual({
+      commit: COMMIT,
+      base: "ubuntu:22.04",
+      head: null,
+      passed: new Date(p.clock.now()).toISOString(),
+      log: paths.log,
+    });
+    // the run's own log, kept: the next run overwrites local/logs/e2e-driver-only.log
+    expect(p.fs.text(paths.log)).toContain("== PASS");
+  });
+  test("a receipt and its log carried together read as a pass wherever they land; one with an absolute log still reads as it did", async () => {
+    const { p, gate } = await setup();
+    expect((await gate.run({ pack: "/m/pack.gguf", gpu: 0, base: "ubuntu:22.04" })).ok).toBe(true);
+    const here = receiptPaths(layoutAt("/r"), COMMIT);
+
+    // the pair moved to another machine's tree, as a pull from a box puts them
+    const there = receiptPaths(layoutAt("/elsewhere"), COMMIT);
+    p.fs.put(there.receipt, p.fs.text(here.receipt)!);
+    p.fs.put(there.log, p.fs.text(here.log)!);
+    expect((await readReceipt(p.fs, layoutAt("/elsewhere"), COMMIT))?.log).toBe(there.log);
+
+    // a receipt whose log is absolute, as every receipt before this change was
+    p.fs.put(
+      there.receipt,
+      JSON.stringify({ ...JSON.parse(p.fs.text(here.receipt)!), log: here.log }),
+    );
+    expect((await readReceipt(p.fs, layoutAt("/elsewhere"), COMMIT))?.log).toBe(here.log);
+
+    // and a relative log that is not beside the receipt resolves to where it would be, so the reader
+    // refuses by a path on this machine rather than by one from the box
+    await p.fs.remove(there.log);
+    p.fs.put(there.receipt, p.fs.text(here.receipt)!);
+    const named = await readReceipt(p.fs, layoutAt("/elsewhere"), COMMIT);
+    expect(named?.log).toBe(there.log);
+    expect(await p.fs.exists(named!.log)).toBe(false);
+  });
+  test("no receipt from a local --prebuilt, which is not what a user fetches, or from a checkout with changes git sees", async () => {
+    const local = await setup();
+    const name = `engine-sm120-${local.engine.sha7}.tar.gz`;
+    local.p.fs.put(`/p/${name}`, "a local build");
+    const prebuilt = await local.gate.run({
+      pack: "/m/pack.gguf",
+      prebuilt: `/p/${name}`,
+      gpu: 0,
+      base: "ubuntu:22.04",
+    });
+    expect(prebuilt.ok && prebuilt.value.receipt).toBeNull();
+    expect(await local.p.fs.exists(receiptPaths(layoutAt("/r"), COMMIT).receipt)).toBe(false);
+    const dirty = await setup(" M apps/cli/src/main.ts\n");
+    const changed = await dirty.gate.run({ pack: "/m/pack.gguf", gpu: 0, base: "ubuntu:22.04" });
+    expect(changed.ok && changed.value.receipt).toBeNull();
+    expect(await dirty.p.fs.exists(receiptPaths(layoutAt("/r"), COMMIT).receipt)).toBe(false);
+  });
+  test("a run on the published pin that fails takes back the commit's receipt", async () => {
+    const { p, gate } = await setup();
+    expect((await gate.run({ pack: "/m/pack.gguf", gpu: 0, base: "ubuntu:22.04" })).ok).toBe(true);
+    p.containers.on(/^bash -c/, { code: 1, stdout: "== rig build\n", stderr: "" });
+    expect((await gate.run({ pack: "/m/pack.gguf", gpu: 0, base: "ubuntu:22.04" })).ok).toBe(false);
+    expect(await readReceipt(p.fs, layoutAt("/r"), COMMIT)).toBeNull();
   });
 });

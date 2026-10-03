@@ -20,7 +20,7 @@ export interface Offer {
 }
 /** a box from a stock image that rig ships itself to, or from a template whose image and on-start bring the head up */
 export type CreateOptions = { diskGb: number; label: string } & (
-  | { image: string }
+  | { image: string; onstart?: string }
   | { templateHash: string }
 );
 export interface Instance {
@@ -30,6 +30,9 @@ export interface Instance {
   dph: number;
   sshHost?: string;
   sshPort?: number;
+  /** the host's own address for port 22, beside vast's proxy above. A VM's sshd answers here while the proxy
+   *  refuses it (vast box 53930876, 13 minutes after `running`). */
+  directSsh?: { host: string; port: number };
   /** the card's utilization in percent as the market last sampled it; absent while it has none */
   gpuUtil?: number;
   /** the image it runs, as created: name:tag, or a digest */

@@ -92,6 +92,31 @@ describe("pushImage", () => {
     expect(order).toEqual(["manifests", "tags"]);
   });
 
+  test("a bucket that refuses a write is a named failure, not a thrown error, and no tag is written", async () => {
+    // what the real endpoint did to a push with credentials it did not know (S3Error "UnknownError", thrown
+    // out of the CLI as a stack trace with no mention of the bucket): the rehearsal of 2026-10-02
+    const p = machine();
+    const s = store(p);
+    const refusing = {
+      exists: s.exists,
+      put: async (key: string) => {
+        throw Object.assign(new Error("an unexpected error has occurred"), {
+          name: "S3Error",
+          code: "UnknownError",
+          path: key,
+        });
+      },
+    };
+    const r = await pushImage(p, refusing, REGISTRY, PULL_KEY, "i", "glm-sm120-x", WORK);
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.message).toContain("rig-images");
+    expect(!r.ok && r.message).toContain("S3Error");
+    expect(!r.ok && r.message).toContain("UnknownError");
+    expect(!r.ok && r.message).toContain("rig/blobs/sha256/");
+    expect([...objects(p).keys()]).toEqual([]);
+    expect(await p.fs.exists(WORK)).toBe(false);
+  });
+
   test("a registry that does not serve back what was written fails the push, by what it served", async () => {
     const p = machine();
     p.http.on(/manifests/, () => ({ status: 401, text: "", headers: {} }));

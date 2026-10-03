@@ -70,7 +70,13 @@ export class VastAiRental implements Rental {
     const source =
       "templateHash" in options
         ? ["--template_hash", options.templateHash]
-        : ["--image", options.image, "--ssh", "--direct"];
+        : [
+            "--image",
+            options.image,
+            "--ssh",
+            "--direct",
+            ...(options.onstart ? ["--onstart-cmd", options.onstart] : []),
+          ];
     const created = await this.json<{ success?: boolean; new_contract?: number }>(
       "create",
       "instance",
@@ -93,6 +99,7 @@ export class VastAiRental implements Rental {
       label: String(raw.label ?? ""),
       dph: Number(raw.dph_total ?? 0),
       ...(raw.ssh_host ? { sshHost: String(raw.ssh_host), sshPort: Number(raw.ssh_port) } : {}),
+      ...directSsh(raw),
       ...(typeof raw.gpu_util === "number" ? { gpuUtil: raw.gpu_util } : {}),
       ...(raw.image_uuid ? { image: String(raw.image_uuid) } : {}),
     };
@@ -164,4 +171,15 @@ export class VastAiRental implements Rental {
         `vastai destroy instance ${id}: ${result.stderr.trim() || result.stdout.trim()}`,
       );
   }
+}
+
+/** the host's own ssh endpoint: the instance's public address and the host port mapped to its port 22,
+ *  both of which vast's listing carries beside the proxy's ssh_host/ssh_port. Absent when either is. */
+function directSsh(raw: Record<string, unknown>): Pick<Instance, "directSsh"> {
+  const mapped = (raw.ports as Record<string, Array<{ HostPort?: string }>> | undefined)?.[
+    "22/tcp"
+  ];
+  const port = Number(mapped?.[0]?.HostPort);
+  const host = raw.public_ipaddr ? String(raw.public_ipaddr).trim() : "";
+  return host && Number.isInteger(port) && port > 0 ? { directSsh: { host, port } } : {};
 }

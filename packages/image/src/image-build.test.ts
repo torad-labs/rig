@@ -4,7 +4,13 @@ import type { Engine } from "@rig/engine";
 import type { Head } from "@rig/head";
 import { type FakePorts, fakePorts, PULL_KEY, REGISTRY, serveRegistry } from "@rig/testing";
 import { IMAGES, renderDockerfile } from "./dockerfile.ts";
-import { BuildImage, type BuildImageOptions, SMOKE_MODEL } from "./image-build.service.ts";
+import {
+  BuildImage,
+  type BuildImageOptions,
+  type BuildOptions,
+  type ImageReport,
+  SMOKE_MODEL,
+} from "./image-build.service.ts";
 import { registryCredentials } from "./registry-config.ts";
 
 const layout = layoutAt("/r");
@@ -101,12 +107,38 @@ const CREDENTIALS = async () => ({
   secretAccessKey: "secret",
   pullKey: PULL_KEY,
 });
+const service = (p: FakePorts) => new BuildImage(p, layout, engine, PACKAGES, CREDENTIALS);
+const DIR = "/r/local/images/glm-sm120";
+const TAR = `${DIR}/built.tar`;
+const RECEIPT = `${DIR}/image.json`;
+/** the one-shot form: built, proven on this machine's card, optionally pushed */
 const build = (p: FakePorts, options: Partial<BuildImageOptions> = {}) =>
-  new BuildImage(p, layout, engine, PACKAGES, CREDENTIALS).run(head, {
-    gpu: 0,
-    push: false,
-    ...options,
-  });
+  service(p).run(head, { gpu: 0, push: false, ...options });
+/** the build half: no card asked for, the image kept as a tarball with its ID */
+const buildOnly = (p: FakePorts, options: Partial<BuildOptions> = {}) =>
+  service(p).build(head, { cap: "120", out: TAR, ...options });
+const prove = (p: FakePorts, receipt = RECEIPT, gpu = 0) =>
+  service(p).prove(head, { receipt, gpu });
+const pushProven = (p: FakePorts, receipt: string) => service(p).pushProven(head, { receipt });
+/** the machine with the card: a checkout of the PUBLIC repo at a commit of its own, no export rules, no
+ *  gitleaks, no bun, and the receipt carried to it */
+function cardMachine(receipt: ImageReport | Record<string, unknown>): FakePorts {
+  const p = machine();
+  p.fs.files.delete("/r/public-export.toml");
+  p.shell.tools.clear();
+  p.git.heads.set("/r", "9999999fed");
+  p.fs.put(RECEIPT, JSON.stringify(receipt));
+  return p;
+}
+/** a build here, then its receipt on a machine with a card, then that proof: what --push-proven pushes */
+async function provenReceipt(): Promise<ImageReport> {
+  const built = await buildOnly(machine());
+  if (!built.ok) throw new Error(built.message);
+  const on = cardMachine(built.value);
+  const proof = await prove(on);
+  if (!proof.ok) throw new Error(proof.message);
+  return proof.value;
+}
 const pushedTags = (p: FakePorts) =>
   [...(p.objectStores.buckets.get(REGISTRY.bucket)?.keys() ?? [])].filter((key) =>
     key.includes("/tags/"),
@@ -152,7 +184,13 @@ describe("rig image", () => {
   test("it is proven on the card before anything else: prepare needs nothing, build finds the sm's engine, it decodes on CUDA", async () => {
     const p = machine();
     p.gpu.card(1);
-    await build(p, { gpu: 1 });
+    const r = await build(p, { gpu: 1 });
+    // the one-shot form is a build and a proof on this machine's card, and records the proof as --prove does
+    expect(r.ok && r.value.proven).toEqual({
+      card: "NVIDIA GeForce RTX 5080",
+      sm: "120",
+      at: new Date(p.clock.now()).toISOString(),
+    });
     expect(p.containers.runs.map((run) => run.cmd.slice(0, 2).join(" "))).toEqual([
       "rig prepare",
       "rig build",
@@ -187,6 +225,223 @@ describe("rig image", () => {
     expect(p.objectStores.opened[0]).toMatchObject({ bucket: "rig-images", accessKeyId: "id" });
     const recorded = JSON.parse(text(p, "/r/local/images/glm-sm120/image.json"));
     expect(recorded).toEqual(r.ok ? r.value : null);
+  });
+
+  // The rules live in the private repo and the card is on a rented box, and a registry credential never
+  // goes to one, so three machines each do the part that is theirs: --build here makes the image under
+  // the public rules and keeps it as a tarball with its config digest (docker's image ID) and the private
+  // commit; --prove on the box with the card checks the loaded image IS that ID, runs it on a card of its
+  // sm and writes down which card; --push-proven here pushes the image a `docker load` of the tarball put
+  // back, refusing anything that is not the ID a card proved.
+  test("--build makes the image with no card and keeps it with the ID a proof must find", async () => {
+    const p = machine();
+    p.gpu.cards.clear(); // the machine with the rules has no card to offer
+    const r = await buildOnly(p);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(p.containers.saved).toContainEqual({ image: r.value.image, tarball: TAR });
+    // the config blob the fake layout holds is "{}", so the ID is its digest and nothing else
+    const config = `sha256:${new Bun.CryptoHasher("sha256").update("{}").digest("hex")}`;
+    expect(r.value).toMatchObject({
+      id: config,
+      commit: "abc1234def",
+      cap: "120",
+      head: "glm",
+      engine: SHA,
+      pushed: false,
+      digest: null,
+    });
+    expect(r.value.proven).toBeUndefined();
+    expect(JSON.parse(text(p, RECEIPT))).toEqual(r.value);
+    // built under the rules (the context is the public one), proven on nothing, pushed nowhere
+    expect(p.containers.builds).toHaveLength(1);
+    expect(p.containers.runs).toEqual([]);
+    expect(pushedTags(p)).toEqual([]);
+  });
+
+  test("--build refuses an sm the engine is not measured on before anything is staged", async () => {
+    const p = machine();
+    const r = await buildOnly(p, { cap: "89" });
+    expect(!r.ok && r.code).toBe(ExitCode.Unsupported);
+    expect(p.git.exported).toEqual([]);
+    expect(p.containers.saved).toEqual([]);
+  });
+
+  test("--prove checks the loaded image against the receipt, runs it on the card, and writes down which card and when", async () => {
+    const built = await buildOnly(machine());
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const on = cardMachine(built.value);
+    on.gpu.card(1);
+    const r = await prove(on, RECEIPT, 1);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const proof = {
+      card: "NVIDIA GeForce RTX 5080",
+      sm: "120",
+      at: new Date(on.clock.now()).toISOString(),
+    };
+    expect(r.value.proven).toEqual(proof);
+    // the same image, the same ID, now with the proof; nothing built, nothing pushed, no export rule read
+    expect(r.value).toEqual({ ...built.value, proven: proof });
+    expect(JSON.parse(text(on, RECEIPT))).toEqual(r.value);
+    expect(on.containers.builds).toEqual([]);
+    expect(pushedTags(on)).toEqual([]);
+    expect(on.containers.runs.map((run) => run.cmd.slice(0, 2).join(" "))).toEqual([
+      "rig prepare",
+      "rig build",
+      "/opt/rig/local/engine-builds/a786bcd-sm120/llama-bench --list-devices",
+      "/opt/rig/local/engine-builds/a786bcd-sm120/llama-bench -m",
+    ]);
+    expect(on.containers.runs.every((run) => run.options?.gpu === 1)).toBe(true);
+    // the image that ran is the one the ID was read from, by name
+    expect(on.containers.runs.every((run) => run.image === built.value.image)).toBe(true);
+  });
+
+  test("--prove refuses what is not the receipt's image on a card of its sm, and records no proof", async () => {
+    const built = await buildOnly(machine());
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const at = async (change: Record<string, unknown>, tweak?: (on: FakePorts) => void) => {
+      const on = cardMachine({ ...built.value, ...change });
+      tweak?.(on);
+      const r = await prove(on);
+      return { r, on, message: r.ok ? "" : r.message, receipt: JSON.parse(text(on, RECEIPT)) };
+    };
+    const unproven = (x: { on: FakePorts; receipt: { proven?: unknown } }) => {
+      expect(x.receipt.proven).toBeUndefined();
+      expect(x.on.containers.runs).toEqual([]);
+    };
+
+    // the image loaded here is not the one the receipt names
+    const other = await at({ id: `sha256:${"0".repeat(64)}` });
+    expect(other.message).toContain("is not the image the receipt names");
+    expect(other.message).toContain("0000000");
+    unproven(other);
+
+    // a card of another sm proves nothing about this image: refused before the image is even read
+    const sm = await at({}, (on) => on.gpu.card(0, { computeCap: "90", name: "NVIDIA H100" }));
+    expect(sm.message).toContain("sm_90");
+    expect(sm.message).toContain("sm_120");
+    expect(sm.on.containers.saved).toEqual([]);
+    unproven(sm);
+
+    const none = await at({}, (on) => on.gpu.cards.clear());
+    expect(none.message).toContain("no CUDA card");
+    unproven(none);
+
+    const head_ = await at({ head: "bonsai-2-27b" });
+    expect(head_.message).toContain("bonsai-2-27b");
+    unproven(head_);
+
+    // the engine this checkout pins is not the one baked in: the bench path it runs would be another build's
+    const pin = await at({ engine: "b".repeat(40) });
+    expect(pin.message).toContain("bbbbbbb");
+    unproven(pin);
+
+    const noId = await at({ id: undefined });
+    expect(noId.message).toContain("--build");
+    unproven(noId);
+
+    // a decode that fails writes no proof
+    const cpu = await at({}, (on) =>
+      on.containers.on(/--list-devices/, { code: 0, stdout: "Available devices:\n", stderr: "" }),
+    );
+    expect(cpu.message).toContain("sees no CUDA device");
+    expect(cpu.receipt.proven).toBeUndefined();
+
+    const absent = machine();
+    const gone = await prove(absent);
+    expect(!gone.ok && gone.message).toContain("image.json");
+  });
+
+  test("--push-proven pushes the image the receipt names, with no card and no build", async () => {
+    const proven = await provenReceipt();
+    const fresh = machine(); // this machine: the image loaded, nothing built here, no card asked for
+    fresh.fs.put(RECEIPT, JSON.stringify(proven));
+    fresh.gpu.cards.clear();
+    const r = await pushProven(fresh, RECEIPT);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.pushed).toBe(true);
+    expect(r.value.digest).toMatch(/^registry\.example\/rig@sha256:[0-9a-f]{64}$/);
+    expect(r.value.image).toBe(proven.image);
+    expect(r.value.proven).toEqual(proven.proven);
+    expect(pushedTags(fresh)).toEqual([`rig/tags/${proven.image.split(":")[1]}`]);
+    expect(fresh.containers.builds).toEqual([]);
+    expect(fresh.containers.runs).toEqual([]);
+    expect(JSON.parse(text(fresh, RECEIPT)).digest).toBe(r.value.digest);
+  });
+
+  test("--push-proven refuses an image no card proved: no proof, a proof for another sm, another ID, head or commit, no ID at all", async () => {
+    const proven = await provenReceipt();
+    const receipt = RECEIPT;
+    const at = async (change: Record<string, unknown>) => {
+      const m = machine();
+      m.fs.put(receipt, JSON.stringify({ ...proven, ...change }));
+      const r = await pushProven(m, receipt);
+      return { message: r.ok ? "" : r.message, tags: pushedTags(m) };
+    };
+
+    // built here and never carried to a card: the receipt --build wrote is not a proof
+    const unproven = await at({ proven: undefined });
+    expect(unproven.message).toContain("no card has proved");
+    expect(unproven.message).toContain("--prove");
+    expect(unproven.tags).toEqual([]);
+    const elsewhere = await at({ proven: { ...proven.proven, sm: "90" } });
+    expect(elsewhere.message).toContain("sm_90");
+    expect(elsewhere.message).toContain("sm_120");
+    expect(elsewhere.tags).toEqual([]);
+
+    // the image here is not the one proven there: the one refusal the whole path exists for
+    const other = await at({ id: `sha256:${"0".repeat(64)}` });
+    expect(other.message).toContain("is not the image proven on a card");
+    expect(other.message).toContain("0000000");
+    expect(other.tags).toEqual([]);
+
+    // and it is the LOADED image that is read, not the receipt against itself: the receipt is left
+    // alone and this machine's image under that name is a different one, which must still refuse
+    const swapped = machine();
+    swapped.fs.put(receipt, JSON.stringify(proven));
+    swapped.shell.on(/^tar -xf/, (cmd) => {
+      const into = cmd[cmd.indexOf("-C") + 1]!;
+      const blob = (content: string) => {
+        const digest = `sha256:${new Bun.CryptoHasher("sha256").update(content).digest("hex")}`;
+        swapped.fs.put(`${into}/blobs/sha256/${digest.slice(7)}`, content);
+        return { digest, size: content.length };
+      };
+      const manifest = JSON.stringify({
+        config: { mediaType: "c", ...blob('{"another":"image"}') },
+        layers: [{ mediaType: "application/vnd.oci.image.layer.v1.tar", ...blob("layer") }],
+      });
+      swapped.fs.put(`${into}/index.json`, JSON.stringify({ manifests: [blob(manifest)] }));
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const loaded = await pushProven(swapped, receipt);
+    expect(!loaded.ok && loaded.message).toContain("is not the image proven on a card");
+    expect(!loaded.ok && loaded.message).toContain(proven.id!.slice(0, 14));
+    expect(pushedTags(swapped)).toEqual([]);
+
+    const head_ = await at({ head: "bonsai-2-27b" });
+    expect(head_.message).toContain("bonsai-2-27b");
+    expect(head_.tags).toEqual([]);
+
+    const commit = await at({ commit: "f".repeat(40) });
+    expect(commit.message).toContain("fffffff");
+    expect(commit.tags).toEqual([]);
+
+    const sm = await at({ cap: "90" });
+    expect(sm.message).toContain("sm_90");
+    expect(sm.tags).toEqual([]);
+
+    const none = await at({ id: undefined });
+    expect(none.message).toContain("--build");
+    expect(none.tags).toEqual([]);
+
+    const missing = machine();
+    const gone = await pushProven(missing, RECEIPT);
+    expect(!gone.ok && gone.message).toContain("image.json");
+    expect(pushedTags(missing)).toEqual([]);
   });
 
   test("the credentials are read for a push only, the environment's before the keyring's", async () => {

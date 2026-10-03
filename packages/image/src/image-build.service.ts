@@ -8,8 +8,14 @@
 // engine decodes on it. The tag names the head, the sm, the rig commit and the context's hash, so a
 // changed input is a new tag and no host serves a stale layer under an old name. --push writes it
 // into registry.toml's bucket (oci-push.ts), where the registry serves it behind the pull key.
-import { basename, join, relative } from "node:path";
+//
+// Three machines each hold one of the three things an image needs, so the work also runs in three
+// parts, each refusing to take the next on trust: --build where the public rules live (this repo, no
+// card), --prove where the card is (any checkout, no rules, no credential), --push-proven where the
+// registry credential is. What passes between them is the image as a tarball and its receipt, image.json.
+import { basename, dirname, join, relative } from "node:path";
 import type {
+  Clock,
   Containers,
   FileSystem,
   Git,
@@ -34,7 +40,12 @@ import {
   rawHits,
 } from "./public-rules.ts";
 import { imageDir } from "./published.ts";
-import { loadRegistryConfig, type RegistryCredentials } from "./registry-config.ts";
+import {
+  loadRegistryConfig,
+  type RegistryConfig,
+  type RegistryCredentials,
+} from "./registry-config.ts";
+import { readLayout, saveImage } from "./saved-image.ts";
 
 export const IMAGE_SOURCE = "https://github.com/torad-labs/rig";
 
@@ -59,6 +70,7 @@ export const SMOKE_MODEL = {
 } as const;
 
 export interface BuildImageDeps {
+  clock: Clock;
   shell: Shell;
   fs: FileSystem;
   git: Git;
@@ -70,13 +82,48 @@ export interface BuildImageDeps {
   log: Log;
 }
 
-/** what --push writes and reads back with, from the environment (main.ts): never in a file */
+/** `rig image <head>`: built, proven on a card of this machine, and with --push published, in one run. The
+ *  push's credentials come from the environment (main.ts): never from a file. */
 export interface BuildImageOptions {
   /** the card the image is proven on, by nvidia-smi index; its sm is the image's */
   gpu: number;
   /** the engine tarball to bake, instead of the one found under local/ */
   fromTarball?: string | undefined;
   push: boolean;
+}
+
+/** `rig image <head> --cap N --build FILE`: the image for an sm, with no card on this machine */
+export interface BuildOptions {
+  /** the sm the image is for, as `rig build --cap` names it */
+  cap: string;
+  /** the engine tarball to bake, instead of the one found under local/ */
+  fromTarball?: string | undefined;
+  /** where the image is kept, as `docker save` writes it; the ID in the receipt is read out of that
+   *  very file, so the tarball carried to another machine and the receipt cannot disagree */
+  out: string;
+}
+
+/** `rig image <head> --prove RECEIPT`: the card proof of an image a `docker load` put on this machine */
+export interface ProveOptions {
+  /** the image.json a --build run wrote, carried here beside the tarball; the proof is written back to it */
+  receipt: string;
+  /** the card the image is proven on, by nvidia-smi index */
+  gpu: number;
+}
+
+/** `rig image <head> --push-proven`: a push of an image proven on another machine's card */
+export interface PushProvenOptions {
+  /** the image.json a --prove run wrote, carried back beside the tarball */
+  receipt: string;
+}
+
+/** which card ran the image and when: written by the run that proved it, required by the one that pushes */
+export interface Proof {
+  card: string;
+  /** the card's compute capability: the image's sm */
+  sm: string;
+  /** ISO time of the proof */
+  at: string;
 }
 
 export interface ImageReport {
@@ -88,6 +135,11 @@ export interface ImageReport {
   commit: string;
   engine: string;
   pushed: boolean;
+  /** the config digest of the image — docker's image ID, preserved by save and load. Written by --build;
+   *  what --prove and --push-proven require the loaded image to be. */
+  id?: string;
+  /** set by the run that proved the image on a card; --push-proven refuses a receipt without it */
+  proven?: Proof;
 }
 
 export class BuildImage {
@@ -116,8 +168,6 @@ export class BuildImage {
         ExitCode.Failure,
         "--push writes the registry's bucket and reads the image back: the keyring's rig-registry entries (r2-access-key-id, r2-secret-access-key, pull), or RIG_R2_ACCESS_KEY_ID, RIG_R2_SECRET_ACCESS_KEY and RIG_REGISTRY_PULL_KEY in the environment",
       );
-    const commit = await deps.git.revParse(this.layout.root, "HEAD");
-    if (!commit) return fail(ExitCode.Failure, `${this.layout.root} has no commit to build from`);
     const card = await deps.gpu.query(options.gpu);
     if (!card)
       return fail(
@@ -130,7 +180,171 @@ export class BuildImage {
         ExitCode.Unsupported,
         `sm_${cap} (${card.name}) is not a card the engine's kernels are measured on`,
       );
-    const tarball = await this.engineTarball(cap, options.fromTarball);
+    const assembled = await this.assemble(head, cap, options.fromTarball, registry.value);
+    if (!assembled.ok) return assembled;
+    const { image, tag, name, dir, commit } = assembled.value;
+
+    const proven = await this.proveOnCard(image, head, cap, options.gpu);
+    if (!proven.ok) return proven;
+
+    const report: ImageReport = {
+      image,
+      digest: null,
+      head: head.name,
+      cap,
+      commit,
+      engine: engine.fork.sha,
+      pushed: false,
+      proven: this.proof(card),
+    };
+    if (options.push && registry.value && accessKeyId && secretAccessKey && pullKey) {
+      const { endpoint, bucket } = registry.value;
+      const store = deps.objectStores.open({ endpoint, bucket, accessKeyId, secretAccessKey });
+      deps.log.info(`pushing ${image} into ${bucket}`);
+      const pushed = await pushImage(
+        deps,
+        store,
+        registry.value,
+        pullKey,
+        image,
+        tag,
+        join(dir, "push"),
+      );
+      if (!pushed.ok) return pushed;
+      report.pushed = true;
+      report.digest = `${name}@${pushed.value}`;
+      deps.log.info(`pushed ${report.digest}, served back by ${registry.value.host}`);
+    }
+    await deps.fs.writeText(join(dir, "image.json"), `${JSON.stringify(report, null, 2)}\n`);
+    return ok(report);
+  }
+
+  /** The build half, for the machine that has the public rules and no card: the image for an sm, kept
+   *  as a tarball with the ID read out of that file and the private commit it was built from. The
+   *  receipt it writes carries no proof; `prove` adds that on a machine with a card of this sm. */
+  async build(head: Head, options: BuildOptions): Promise<Result<ImageReport>> {
+    const { deps, engine } = this;
+    const { cap } = options;
+    if (!engine.supports(cap))
+      return fail(
+        ExitCode.Unsupported,
+        `sm_${cap} is not a card the engine's kernels are measured on, so there is no image to build for it`,
+      );
+    const registry = await loadRegistryConfig(deps.fs, this.layout.root);
+    if (!registry.ok) return registry;
+    const assembled = await this.assemble(head, cap, options.fromTarball, registry.value);
+    if (!assembled.ok) return assembled;
+    const { image, dir, commit } = assembled.value;
+    const kept = await this.keep(image, options.out, join(dir, "save"));
+    if (!kept.ok) return kept;
+    const report: ImageReport = {
+      image,
+      digest: null,
+      head: head.name,
+      cap,
+      commit,
+      engine: engine.fork.sha,
+      pushed: false,
+      id: kept.value,
+    };
+    await deps.fs.writeText(join(dir, "image.json"), `${JSON.stringify(report, null, 2)}\n`);
+    deps.log.info(
+      `${options.out} holds ${image}, image ID ${kept.value}: carry it and ${join(dir, "image.json")} to a machine with an sm_${cap} card and run --prove there`,
+    );
+    return ok(report);
+  }
+
+  /** The proof half, for the machine with the card: any checkout of the head, no export rules and no
+   *  credential. The image must be the one the receipt names, a `docker load` of the tarball --build
+   *  kept, and the card must be of its sm; then it runs as a rented box will run it, and the card and
+   *  the time are written into the receipt. The cheap refusals come before the image is read. */
+  async prove(head: Head, options: ProveOptions): Promise<Result<ImageReport>> {
+    const { deps, engine } = this;
+    const { receipt: path } = options;
+    const read = await this.readReceipt(path, head);
+    if (!read.ok) return read;
+    const { image, id, cap } = read.value;
+    if (!id)
+      return fail(
+        ExitCode.Failure,
+        `${path} records no image ID, so nothing here can be shown to be the image it names: run rig image --cap N --build FILE where the public rules are`,
+      );
+    if (read.value.engine !== engine.fork.sha)
+      return fail(
+        ExitCode.Failure,
+        `${image} bakes torad-labs/llama.cpp @ ${read.value.engine?.slice(0, 7)} and this checkout pins ${engine.sha7}: prove it from a checkout of the same pin`,
+      );
+    const card = await deps.gpu.query(options.gpu);
+    if (!card)
+      return fail(
+        ExitCode.Failure,
+        `no CUDA card at nvidia-smi index ${options.gpu}: an image is proven on a card of its sm`,
+      );
+    if (card.computeCap !== cap)
+      return fail(
+        ExitCode.Failure,
+        `${image} is the sm_${cap} image and ${card.name} is sm_${card.computeCap}: a proof on another sm says nothing about it`,
+      );
+
+    const dir = imageDir(this.layout, head.name, cap);
+    const loaded = await this.keep(image, join(dir, "loaded.tar"), join(dir, "proven"));
+    await deps.fs.remove(join(dir, "loaded.tar"));
+    if (!loaded.ok) return loaded;
+    if (loaded.value !== id)
+      return fail(
+        ExitCode.Failure,
+        `${image} here is ${loaded.value}, which is not the image the receipt names: ${path} says ${id}. Load the tarball --build kept.`,
+      );
+
+    const proven = await this.proveOnCard(image, head, cap, options.gpu);
+    if (!proven.ok) return proven;
+    const report: ImageReport = { ...read.value, proven: this.proof(card) };
+    await deps.fs.writeText(path, `${JSON.stringify(report, null, 2)}\n`);
+    deps.log.info(`${path} records ${image} proven on ${card.name} (sm_${cap})`);
+    return ok(report);
+  }
+
+  private proof(card: { name: string; computeCap: string }): Proof {
+    return {
+      card: card.name,
+      sm: card.computeCap,
+      at: new Date(this.deps.clock.now()).toISOString(),
+    };
+  }
+
+  /** the receipt at `path`, parsed, and known to be this head's and to name an image and an sm */
+  private async readReceipt(path: string, head: Head): Promise<Result<ImageReport>> {
+    const { fs } = this.deps;
+    if (!(await fs.exists(path)))
+      return fail(
+        ExitCode.Failure,
+        `${path} does not exist: it is the image.json a --build run wrote, carried here beside the tarball`,
+      );
+    let receipt: Partial<ImageReport>;
+    try {
+      receipt = JSON.parse(await fs.readText(path)) as Partial<ImageReport>;
+    } catch (error) {
+      return fail(ExitCode.Failure, `${path} does not parse: ${(error as Error).message}`);
+    }
+    if (!receipt.image || !receipt.cap)
+      return fail(ExitCode.Failure, `${path} names no image and sm`);
+    if (receipt.head !== head.name)
+      return fail(ExitCode.Failure, `${path} is ${receipt.head}'s image, not ${head.name}'s`);
+    return ok(receipt as ImageReport);
+  }
+
+  /** the image for `cap` built under the public rules from this checkout's HEAD: the context staged and
+   *  scanned, the CLI compiled, the engine baked, `docker build`. Nothing is run and nothing is pushed. */
+  private async assemble(
+    head: Head,
+    cap: string,
+    fromTarball: string | undefined,
+    registry: RegistryConfig | null,
+  ): Promise<Result<{ image: string; tag: string; name: string; dir: string; commit: string }>> {
+    const { deps, engine } = this;
+    const commit = await deps.git.revParse(this.layout.root, "HEAD");
+    if (!commit) return fail(ExitCode.Failure, `${this.layout.root} has no commit to build from`);
+    const tarball = await this.engineTarball(cap, fromTarball);
     if (!tarball.ok) return tarball;
 
     const rules = await loadPublicRules(deps.fs, this.layout.root);
@@ -171,7 +385,7 @@ export class BuildImage {
 
     const hash = await this.contextHash(context);
     const tag = `${head.name}-sm${cap}-${commit.slice(0, 7)}-${hash.slice(0, 8)}`;
-    const name = registry.value ? `${registry.value.host}/${registry.value.repository}` : "rig";
+    const name = registry ? `${registry.host}/${registry.repository}` : "rig";
     const image = `${name}:${tag}`;
     const log = join(this.layout.logsDir, `image-${head.name}-sm${cap}.log`);
     await deps.fs.mkdirp(this.layout.logsDir);
@@ -188,39 +402,118 @@ export class BuildImage {
     );
     if (built.code !== 0)
       return fail(ExitCode.Failure, `the image did not build: ${lastLines(built.stderr)} (${log})`);
+    return ok({ image, tag, name, dir, commit });
+  }
 
-    const proven = await this.prove(image, head, cap, options.gpu);
-    if (!proven.ok) return proven;
+  /** The push half of a proof made on another machine's card. The card rule sends `rig image` to a
+   *  rented box and a registry credential never goes to one, so the halves run apart: there --prove
+   *  checks the loaded image against the receipt and runs it, here `docker load` puts it back and this
+   *  pushes it. The prove-before-push gate holds across the gap because what goes out is required to
+   *  BE the image a card proved — same ID, same head, same rig commit, an sm a card of that sm ran.
+   *  No card is read and nothing is built: this machine has neither to offer. */
+  async pushProven(head: Head, options: PushProvenOptions): Promise<Result<ImageReport>> {
+    const { deps, engine } = this;
+    const registry = await loadRegistryConfig(deps.fs, this.layout.root);
+    if (!registry.ok) return registry;
+    if (!registry.value)
+      return fail(
+        ExitCode.Failure,
+        "no registry.toml in this checkout: an image has nowhere to be pushed",
+      );
+    const read = await this.readReceipt(options.receipt, head);
+    if (!read.ok) return read;
+    const receipt = read.value;
+    const { image, id, cap, proven } = receipt;
+    if (!id)
+      return fail(
+        ExitCode.Failure,
+        `${options.receipt} records no image ID, so nothing here can be shown to be the image that was proven: re-run rig image --cap N --build FILE where the public rules are, then --prove on the card`,
+      );
+    if (!proven)
+      return fail(
+        ExitCode.Failure,
+        `${options.receipt} records no proof: no card has proved ${image}. Carry it and its tarball to a machine with an sm_${cap} card and run --prove there.`,
+      );
+    if (proven.sm !== cap)
+      return fail(
+        ExitCode.Failure,
+        `${options.receipt} records ${image} (sm_${cap}) proven on ${proven.card}, which is sm_${proven.sm}: a proof on another sm says nothing about it`,
+      );
+    const commit = await deps.git.revParse(this.layout.root, "HEAD");
+    if (!commit) return fail(ExitCode.Failure, `${this.layout.root} has no commit to push from`);
+    if (receipt.commit !== commit)
+      return fail(
+        ExitCode.Failure,
+        `${image} was built from rig ${receipt.commit?.slice(0, 7)} and this checkout is ${commit.slice(0, 7)}: push from the commit the image was built from`,
+      );
+    if (!engine.supports(cap))
+      return fail(
+        ExitCode.Unsupported,
+        `sm_${cap} is not a card the engine's kernels are measured on, so its image is not one to publish`,
+      );
 
+    const { accessKeyId, secretAccessKey, pullKey } = await this.credentials();
+    if (!(accessKeyId && secretAccessKey && pullKey))
+      return fail(
+        ExitCode.Failure,
+        "a push writes the registry's bucket and reads the image back: the keyring's rig-registry entries (r2-access-key-id, r2-secret-access-key, pull), or RIG_R2_ACCESS_KEY_ID, RIG_R2_SECRET_ACCESS_KEY and RIG_REGISTRY_PULL_KEY in the environment",
+      );
+
+    const dir = imageDir(this.layout, head.name, cap);
+    const here = await this.keep(image, join(dir, "loaded.tar"), join(dir, "proven"));
+    await deps.fs.remove(join(dir, "loaded.tar"));
+    if (!here.ok) return here;
+    if (here.value !== id)
+      return fail(
+        ExitCode.Failure,
+        `${image} here is ${here.value}, which is not the image proven on a card: ${options.receipt} names ${id}. Load the tarball --build kept.`,
+      );
+
+    const tag = image.slice(image.lastIndexOf(":") + 1);
+    const { endpoint, bucket } = registry.value;
+    const store = deps.objectStores.open({ endpoint, bucket, accessKeyId, secretAccessKey });
+    deps.log.info(`pushing ${image}, proven on sm_${cap} as ${id}, into ${bucket}`);
+    const pushed = await pushImage(
+      deps,
+      store,
+      registry.value,
+      pullKey,
+      image,
+      tag,
+      join(dir, "push"),
+    );
+    if (!pushed.ok) return pushed;
+    const name = `${registry.value.host}/${registry.value.repository}`;
     const report: ImageReport = {
       image,
-      digest: null,
+      digest: `${name}@${pushed.value}`,
       head: head.name,
       cap,
       commit,
-      engine: engine.fork.sha,
-      pushed: false,
+      engine: receipt.engine ?? engine.fork.sha,
+      pushed: true,
+      id,
+      proven,
     };
-    if (options.push && registry.value && accessKeyId && secretAccessKey && pullKey) {
-      const { endpoint, bucket } = registry.value;
-      const store = deps.objectStores.open({ endpoint, bucket, accessKeyId, secretAccessKey });
-      deps.log.info(`pushing ${image} into ${bucket}`);
-      const pushed = await pushImage(
-        deps,
-        store,
-        registry.value,
-        pullKey,
-        image,
-        tag,
-        join(dir, "push"),
-      );
-      if (!pushed.ok) return pushed;
-      report.pushed = true;
-      report.digest = `${name}@${pushed.value}`;
-      deps.log.info(`pushed ${report.digest}, served back by ${registry.value.host}`);
-    }
-    await deps.fs.writeText(join(dir, "image.json"), `${JSON.stringify(report, null, 2)}\n`);
+    await deps.fs.writeText(options.receipt, `${JSON.stringify(report, null, 2)}\n`);
+    deps.log.info(`pushed ${report.digest}, served back by ${registry.value.host}`);
     return ok(report);
+  }
+
+  /** `image` saved at `tarball`, and the ID read out of that file: the config digest, which covers the
+   *  layer diff_ids, the entrypoint and the environment, and which save and load both preserve */
+  private async keep(image: string, tarball: string, work: string): Promise<Result<string>> {
+    const { fs } = this.deps;
+    await fs.mkdirp(dirname(tarball));
+    const saved = await saveImage(this.deps, image, tarball);
+    if (!saved.ok) return saved;
+    await fs.remove(work);
+    try {
+      const read = await readLayout(this.deps, tarball, work);
+      return read.ok ? ok(read.value.manifest.config.digest) : read;
+    } finally {
+      await fs.remove(work);
+    }
   }
 
   /** the tarball to bake: the one named, else a build of this pin for this sm under local/ (the
@@ -353,7 +646,12 @@ export class BuildImage {
 
   /** the image on the card, as a rented box will run it: prepare needs nothing it lacks, the
    *  engine is built for the card's sm, and it decodes there */
-  private async prove(image: string, head: Head, cap: string, gpu: number): Promise<Result<void>> {
+  private async proveOnCard(
+    image: string,
+    head: Head,
+    cap: string,
+    gpu: number,
+  ): Promise<Result<void>> {
     const { containers, log } = this.deps;
     const on = { gpu };
     const prepare = await containers.run(image, ["rig", "prepare", head.name, "--json"], on);

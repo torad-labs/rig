@@ -94,6 +94,27 @@ test("every flag a command reads is one its usage names, so main's refusal never
   expect(files).toBeGreaterThanOrEqual(11);
 });
 
+test("a quoted value of engine arguments is the flag's value: `-gpu 1` arrives as two words, never as one with a space", () => {
+  // rig engine ab's documented form, as a shell hands it over
+  const args = parseArgs([
+    "ab",
+    "--b-args",
+    "-ctk q8_0 -ctv q8_0",
+    "--a-args",
+    "-fa on",
+    "--",
+    "-p",
+    "0",
+  ]);
+  expect(args.flags["b-args"]).toBe("-ctk q8_0 -ctv q8_0");
+  expect(args.flags["a-args"]).toBe("-fa on");
+  expect(args.dashed).toEqual([]);
+  expect(args.positionals).toEqual(["ab", "-p", "0"]);
+  // a lone single-dash word is still the mistyped flag main refuses, value or not
+  const typo = parseArgs(["up", "h", "--restart", "-gpu", "1"]);
+  expect([typo.flags.restart, typo.dashed]).toEqual([true, ["-gpu"]]);
+});
+
 test("a flag never takes a single-dash word as its value, and a boolean flag refuses any value but true or false", () => {
   const args = parseArgs(["up", "bonsai-2-27b", "--restart", "-gpu", "1"]);
   expect(args.dashed).toEqual(["-gpu"]);

@@ -35,10 +35,12 @@ export interface LabTarget {
   cards: number[];
 }
 
-/** a library and switches one side of an A/B runs with, over the target's */
+/** a library, switches and llama-bench arguments one side of an A/B runs with, over the target's and the run's own
+ *  (`args` is how two sides of ONE engine differ in a runtime setting: -ctk q8_0 against -ctk f16) */
 export interface LabSide {
   lib?: string;
   env: Record<string, string>;
+  args?: string[];
 }
 
 /** the libggml-cuda a tool loads under a side: the path the loader resolves and the first 12 hex of its sha256,
@@ -94,6 +96,8 @@ export interface AbPair {
 export interface AbReport {
   dir: string;
   libs: { a: LoadedLib; b: LoadedLib };
+  /** the arguments each side added to the run's own */
+  args: { a: string[]; b: string[] };
   /** every pair in the run's directory, an earlier invocation's included (--first continues a run) */
   pairs: AbPair[];
   change: PairedChange;
@@ -321,8 +325,13 @@ export class EngineLab {
           `runtime -- an engine directory unpacked from a raw tarball by hand carries none, where one ` +
           `installed by rig carries the archives its publisher unpacked.`,
       );
-    log.info(`a: libggml-cuda ${libA.value.sha} ${envText(req.a.env)}`);
-    log.info(`b: libggml-cuda ${libB.value.sha} ${envText(req.b.env)}`);
+    const args = { a: req.a.args ?? [], b: req.b.args ?? [] };
+    log.info(
+      `a: libggml-cuda ${libA.value.sha} ${envText(req.a.env)} ${argsText(args.a)}`.trimEnd(),
+    );
+    log.info(
+      `b: libggml-cuda ${libB.value.sha} ${envText(req.b.env)} ${argsText(args.b)}`.trimEnd(),
+    );
     for (let pair = req.first; pair < req.first + req.pairs; pair++) {
       const order = pair % 2 === 1 ? (["a", "b"] as const) : (["b", "a"] as const);
       const rates: string[] = [];
@@ -336,6 +345,7 @@ export class EngineLab {
           "-o",
           "jsonl",
           ...req.extra,
+          ...args[side],
         ];
         const result = await shell.run(argv, { env: this.env(target, sides[side]), cwd: dir });
         if (result.code !== 0)
@@ -355,6 +365,7 @@ export class EngineLab {
     return ok({
       dir,
       libs: { a: libA.value, b: libB.value },
+      args,
       pairs: pairs.value,
       change: pairedChange(pairs.value.map((pair) => pair.change)),
     });
@@ -449,26 +460,35 @@ export class EngineLab {
     };
   }
 
-  /** the libggml-cuda `tool` loads under the side, by ldd: a library asked for and not the one loaded fails */
+  /** the libggml-cuda `tool` loads under the side, by ldd: a library asked for and not the one loaded fails.
+   *  A tool the build does not carry is named first: a published tarball holds the targets of the day it was
+   *  published and none added since (engine-sm120-32e695e.tar.gz has no llama-perplexity), and a leg over it
+   *  otherwise fails at the run or inside ldd, neither of which says which build is short of what. */
   private async loaded(
     target: Located,
     side: Partial<LabSide>,
     tool: string,
   ): Promise<Result<LoadedLib>> {
     const { shell, hasher } = this.ports;
-    const ldd = await shell.run(["ldd", this.bin(target, tool)], { env: this.env(target, side) });
-    const path = ldd.stdout.match(new RegExp(`${LIB.replaceAll(".", "\\.")} => (\\S+)`))?.[1];
-    if (ldd.code !== 0 || !path)
+    const path = this.bin(target, tool);
+    if (!(await this.ports.fs.exists(path)))
       return fail(
         ExitCode.Failure,
-        `ldd ${this.bin(target, tool)} finds no ${LIB}: ${tail(ldd.stderr || ldd.stdout)}`,
+        `${path} is not there: a build holds the targets of the day it was published and none added since (install a newer published build, or rig build --compile)`,
+      );
+    const ldd = await shell.run(["ldd", path], { env: this.env(target, side) });
+    const loaded = ldd.stdout.match(new RegExp(`${LIB.replaceAll(".", "\\.")} => (\\S+)`))?.[1];
+    if (ldd.code !== 0 || !loaded)
+      return fail(
+        ExitCode.Failure,
+        `ldd ${path} finds no ${LIB}: ${tail(ldd.stderr || ldd.stdout)}`,
       );
     const asked = side.lib ?? target.lib;
-    if (asked && dirname(path) !== asked.replace(/\/+$/, ""))
-      return fail(ExitCode.Failure, `${tool} loads ${path}, not ${join(asked, LIB)}`);
+    if (asked && dirname(loaded) !== asked.replace(/\/+$/, ""))
+      return fail(ExitCode.Failure, `${tool} loads ${loaded}, not ${join(asked, LIB)}`);
     return ok({
-      path,
-      sha: (await hasher.sha256File(path)).slice(0, 12),
+      path: loaded,
+      sha: (await hasher.sha256File(loaded)).slice(0, 12),
       runtime: runtimeOf(ldd.stdout),
     });
   }
@@ -555,5 +575,7 @@ const envText = (env: Record<string, string>) =>
   Object.entries(env)
     .map(([k, v]) => `${k}=${v}`)
     .join(" ") || "(no switches)";
+
+const argsText = (args: string[]) => (args.length > 0 ? `args ${args.join(" ")}` : "");
 
 const tail = (text: string) => text.trim().split("\n").slice(-3).join(" | ");

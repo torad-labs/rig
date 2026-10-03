@@ -3,20 +3,15 @@
 // blobs first, then a Docker schema-2 manifest (the form every Docker a rented host runs pulls),
 // then the tag, so a tag never names a manifest whose blobs are not there. Then read back through
 // the registry with the pull key: the tag's digest and every blob's size, as a pull will see them.
-import { join } from "node:path";
 import type { Containers, FileSystem, Http, ObjectStore, Shell } from "@rig/core";
 import { ExitCode, fail, ok, type Result } from "@rig/core";
 import { type RegistryConfig, servedDigest } from "./registry-config.ts";
+import { type Descriptor, readSavedImage } from "./saved-image.ts";
 
 export const MANIFEST_TYPE = "application/vnd.docker.distribution.manifest.v2+json";
 const CONFIG_TYPE = "application/vnd.docker.container.image.v1+json";
 const LAYER_TYPE = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 
-interface Descriptor {
-  mediaType: string;
-  digest: string;
-  size: number;
-}
 export interface PushDeps {
   containers: Containers;
   shell: Shell;
@@ -34,31 +29,12 @@ export async function pushImage(
   tag: string,
   work: string,
 ): Promise<Result<string>> {
-  const { fs, shell } = deps;
+  const { fs } = deps;
   await fs.remove(work);
-  await fs.mkdirp(join(work, "layout"));
   try {
-    const tarball = join(work, "image.tar");
-    const saved = await deps.containers.save(image, tarball);
-    if (saved.code !== 0)
-      return fail(ExitCode.Failure, `docker save ${image}: ${saved.stderr.trim()}`);
-    const untar = await shell.run(["tar", "-xf", tarball, "-C", join(work, "layout")], {
-      timeoutMs: 600_000,
-    });
-    if (untar.code !== 0)
-      return fail(ExitCode.Failure, `unpacking the saved image: ${untar.stderr.trim()}`);
-    await fs.remove(tarball);
-
-    const blob = (digest: string) => join(work, "layout", "blobs", ...digest.split(":"));
-    const index = JSON.parse(await fs.readText(join(work, "layout", "index.json"))) as {
-      manifests: Descriptor[];
-    };
-    const saving = index.manifests[0];
-    if (!saving) return fail(ExitCode.Failure, "the saved image lists no manifest");
-    const manifest = JSON.parse(await fs.readText(blob(saving.digest))) as {
-      config: Descriptor;
-      layers: Descriptor[];
-    };
+    const saved = await readSavedImage(deps, image, work);
+    if (!saved.ok) return saved;
+    const { manifest, blob } = saved.value;
     const key = (kind: string, digest: string) =>
       `${registry.repository}/${kind}/${digest.replace(":", "/")}`;
     const upload = async (digest: string, from: { file: string } | { bytes: Uint8Array }) => {
@@ -99,6 +75,17 @@ export async function pushImage(
       ...layers,
     ]);
     return served.ok ? ok(digest) : served;
+  } catch (error) {
+    // the bucket's own refusal (a key it does not accept, a write it rejects) arrives as a throw carrying its
+    // name, code and path: said by name, with the bucket, rather than left to end the CLI as a stack trace
+    const refused = error as Error & { code?: unknown; path?: unknown };
+    const detail = [refused.name, refused.code, refused.path].filter(
+      (part) => typeof part === "string" && part !== "",
+    );
+    return fail(
+      ExitCode.Failure,
+      `the push into ${registry.bucket} failed: ${refused.message}${detail.length > 0 ? ` (${detail.join(" ")})` : ""}`,
+    );
   } finally {
     await fs.remove(work);
   }

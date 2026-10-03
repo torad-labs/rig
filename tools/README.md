@@ -11,7 +11,7 @@ head's evidence cites (`bench-head.ts`, `glm53-verify.ts`). A tool imports rig's
 (`@rig/core`, `@rig/head`, …, declared in `package.json`) and resolves the repo root as
 `resolve(import.meta.dir, "..")`. `prebuilt/Dockerfile` is the image `rig build --prebuilt` makes
 the prebuilt engine a release publishes in: `rig build --portable` inside it (CUDA 13.3 on Ubuntu
-22.04, pinned by digest), so the tarball's floor is glibc 2.35 whatever machine builds it. `rig e2e`
+22.04, pinned by digest, with no card: the build never uses one), so the tarball's floor is glibc 2.35 whatever machine builds it. `rig e2e`
 is the gate it passes before it is published: this checkout packed and installed in a fresh
 ubuntu:22.04 container (`--base` another image) that has one card and only the driver, then `rig
 prepare`, `rig build` and a decode, and with `--head` the head's `rig fetch` and `rig derive` as a

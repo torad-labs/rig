@@ -8,6 +8,45 @@ const listing = (ids: number[]) => ({
   stderr: "",
 });
 
+describe("VastAiRental.show: the host's own ssh endpoint", () => {
+  // the shape read off box 53930876 (a KVM VM), with a documentation address: the proxy at ssh8.vast.ai refused for
+  // 13 minutes while the host's own address and the port mapped to 22 answered the first time it was tried
+  const row = {
+    id: 1000,
+    actual_status: "running",
+    label: "rig",
+    ssh_host: "ssh8.vast.ai",
+    ssh_port: 33272,
+    public_ipaddr: "203.0.113.47",
+    ports: { "22/tcp": [{ HostIp: "0.0.0.0", HostPort: "40174" }] },
+  };
+  const show = async (raw: Record<string, unknown>) => {
+    const shell = new FakeShell();
+    shell.on(/^vastai show instance 1000 --raw$/, {
+      code: 0,
+      stdout: JSON.stringify(raw),
+      stderr: "",
+    });
+    return new VastAiRental(shell).show(1000);
+  };
+  test("the public address and the host port mapped to 22 are carried beside the proxy's", async () => {
+    expect(await show(row)).toMatchObject({
+      sshHost: "ssh8.vast.ai",
+      sshPort: 33272,
+      directSsh: { host: "203.0.113.47", port: 40174 },
+    });
+  });
+  test("an instance that maps no port 22, or has no public address, has none", async () => {
+    const { ports: _ports, ...unmapped } = row;
+    expect((await show(unmapped))?.directSsh).toBeUndefined();
+    const { public_ipaddr: _ip, ...unaddressed } = row;
+    expect((await show(unaddressed))?.directSsh).toBeUndefined();
+    expect(
+      (await show({ ...row, ports: { "22/tcp": [{ HostPort: "nope" }] } }))?.directSsh,
+    ).toBeUndefined();
+  });
+});
+
 describe("VastAiRental.show", () => {
   test("a failed show falls back to the listing: its row when listed, null when the listing confirms the instance is gone, thrown when the listing fails too", async () => {
     const shell = new FakeShell();
@@ -87,12 +126,20 @@ describe("VastAiRental.searchOffers and create", () => {
     });
     await vast.create(7, { templateHash: "a79f7a77", diskGb: 160, label: "rig" });
     await vast.create(7, { image: "nvidia/cuda:13", diskGb: 40, label: "rig" });
+    // a KVM box's on-start repairs the key vast wrote; it travels as one argument, whatever it contains
+    await vast.create(7, {
+      image: "docker.io/vastai/kvm:x",
+      diskGb: 50,
+      label: "rig",
+      onstart: "a; b",
+    });
     const creates = shell.calls
       .filter((call) => call[1] === "create")
       .map((call) => call.join(" "));
     expect(creates).toEqual([
       "vastai create instance 7 --template_hash a79f7a77 --disk 160 --label rig --cancel-unavail --raw",
       "vastai create instance 7 --image nvidia/cuda:13 --ssh --direct --disk 40 --label rig --cancel-unavail --raw",
+      "vastai create instance 7 --image docker.io/vastai/kvm:x --ssh --direct --onstart-cmd a; b --disk 50 --label rig --cancel-unavail --raw",
     ]);
   });
 });

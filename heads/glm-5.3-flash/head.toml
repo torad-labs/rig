@@ -68,8 +68,16 @@ bytes = 43225116416
 # GGML_CUDA_KDA_CHUNKED_LEGACY=1. On the cards: pp32768 +6.0 % before 647703131, then 647703131 +21.4 % at pp4096 and
 # +17.2 % at pp32768 over its own LEGACY switch; decode flat; served at n_max 2, 154.7 tok/s decode. The sparse gather's
 # 32-head tile (258292bd8) and its switch-over (78a8e96b8) come after it and are not in it: the next rental measures them.
+# 009073391 is 3d40ae99c and what came after on the same line (TORAD.md has each row), the v1 freeze: the sparse gather's
+# 32-head tile (258292bd8) and its opt-in switch-over (78a8e96b8), the lightning indexer on octets of lanes (92690b613),
+# the top-k prefilter behind penalties (c8fc02a36), a malformed UTF-8 byte read as U+FFFD (b915c5e6f), a sparse launch of
+# a q8_0 K dequantizing only the cells it reads (24ba034fa), -ctki for the indexer's cache (d5fb3b1b8), routed IQ3_XXS
+# experts at 9-16 tokens on the vector kernel (737ee4450), and MMQ's L2 prefetch of the next chunk's weights (0020175b4).
+# Rental 2a ran its legs on 737ee4450's library (evidence.md): the q8_0 cache, three slots, and 737ee4450's own KLD at
+# 0.919 to 0.978 of the gap MMQ already had. 0020175b4 reads the same logits to the printed digit, +6.15 % at pp512 and
+# +3.52 % at pp4096, decode inside noise.
 [engine]
-sha = "3d40ae99ca0b9becce1b91134ad2bdd5f8aadf26"
+sha = "009073391c9718aef0870d209e22502f8ccca3cc"
 
 [speculative]
 type = "draft-mtp"             # the pack's own NextN block (glm5next.nextn_predict_layers = 1)
@@ -79,8 +87,15 @@ n_max = 2                      # as qualified; the validation rental measured 1-
 model = 524288                 # the window served: half the trained 1,048,576, as qualified (a 436,077-token prompt answered)
 advertise = 491520             # what one conversation is told it may use (15/16 of the window, bonsai's margin for the reply)
 
-# f16 K and V (the engine's default) and the recurrent state in the engine's own format, as qualified:
-# no [cache] section. No [sizing]: the one profile is served as measured.
+# The attention and indexer caches in q8_0, the recurrent state in the engine's own format. Measured on the real pack on two
+# RTX PRO 6000 (rental 2a, Oct 2, evidence.md), against the f16 cache on the same library: KLD 0.011520 at 2k and 0.007469 at
+# 16k, inside that f16 cache's own -ub 512 reordering (0.012685 and 0.012742), same top better at both; decode -0.68 % at
+# d65536 and inside noise at d262144. Three slots share the pool with 14.2 GiB a card spare.
+[cache]
+k = "q8_0"
+v = "q8_0"                     # under MLA absorption V is a view of the K cache, so it follows K
+idx = "q8_0"                   # the DSA layers' lightning-indexer keys (-ctki, engine d5fb3b1b8)
+# No [sizing]: the one profile is served as measured.
 
 # Both cards of one kind, the model split across them. min_vram_mib: the validation rental's peak,
 # 90,817 MiB on the second card, and a GiB of margin; only the 96 GB class clears it.
@@ -88,7 +103,8 @@ advertise = 491520             # what one conversation is told it may use (15/16
 devices = 2
 min_vram_mib = 92000
 split = "tensor"               # 1.31x the layer split's served speed at n_max 2 (134.5 against 102.6 tok/s), its logits not separable from the layer split's own batch-shape floor (evidence.md)
-slots = 1
+slots = 3                      # one 524,288-cell pool shared under --kv-unified: 14,547 MiB a card spare under 4 sessions, and one session
+                               # alone at 3 slots decodes 1.008x the one-slot speed, paired on the freeze library (evidence.md)
 ctx = 524288
 cuda_graphs = 0                # no cap: under -sm tensor the default cap of 8 evicts every graph before its reuse (evidence.md)
 
@@ -104,5 +120,5 @@ args = [
 
 [client]                       # facts whatever sits in front of this head must know
 rejects_reasoning_effort = false  # the template maps low and high, and anything else to max
-slot_pinning = false              # one slot
+slot_pinning = false              # the server picks a slot; pinning is unmeasured at 3 slots
 any_model_id = true               # llama-server serves the loaded model for any model id

@@ -332,7 +332,9 @@ export class BuildEngine {
     const bundle = portable ? await this.portableRuntime(buildTree) : ok([]);
     if (!bundle.ok) return bundle;
     const provenance = { cap, native, source: "compiled" } as const;
-    return this.publisher.publishOutput(buildTree, dir, provenance, bundle.value);
+    // the stub of libcuda cmake linked the engine against, for a machine with no driver to check it on
+    const driverStub = await this.cmakeCache(buildTree, "CUDA_cuda_driver_LIBRARY");
+    return this.publisher.publishOutput(buildTree, dir, provenance, bundle.value, driverStub);
   }
 
   /** where the compiler cmake configured with keeps each PORTABLE_RUNTIME library */

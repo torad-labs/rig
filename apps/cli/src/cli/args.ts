@@ -33,8 +33,14 @@ export function parseArgs(argv: readonly string[]): Args {
       continue;
     }
     const next = argv[i + 1];
-    // a single-dash word is never a value (`--restart -gpu 1`): it stays a token main refuses by name
-    if (next !== undefined && !next.startsWith("--") && !/^-[A-Za-z]/.test(next)) {
+    // a single-dash word is never a value (`--restart -gpu 1`): it stays a token main refuses by name. One holding a
+    // space was quoted on purpose (`--b-args '-ctk q8_0 -ctv q8_0'`), and a mistyped flag never arrives that way:
+    // the shell hands `-gpu 1` over as two words
+    if (
+      next !== undefined &&
+      !next.startsWith("--") &&
+      (!/^-[A-Za-z]/.test(next) || /\s/.test(next))
+    ) {
       flags[arg.slice(2)] = next;
       i++;
     } else {

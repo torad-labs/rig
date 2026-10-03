@@ -32,7 +32,7 @@ async function setup() {
 }
 
 describe("build --prebuilt", () => {
-  test("builds the pin with --portable in tools/prebuilt's image, as the caller, capped at 14 GiB and 6 CPUs", async () => {
+  test("builds the pin with --portable in tools/prebuilt's image with no card, as the caller, capped at 14 GiB and 6 CPUs", async () => {
     const { p, uc, engine } = await setup();
     const r = await uc.run({ gpu: 1, jobs: 6 });
     const image = `rig-prebuilt:${sha256(DOCKERFILE).slice(0, 12)}`;
@@ -41,9 +41,10 @@ describe("build --prebuilt", () => {
     expect(p.containers.runs).toEqual([
       {
         image,
-        cmd: ["/rig/dist/rig", "build", "--gpu", "0", "--portable", "--jobs", "6"],
+        // the card's compute capability comes from the host's query, and the container is handed no device: a compile
+        // does not use the card, so it must not hold one (a leased card sat idle through every build)
+        cmd: ["/rig/dist/rig", "build", "--cap", "120", "--portable", "--jobs", "6"],
         options: {
-          gpu: 1,
           asCaller: true,
           limits: { memory: "14g", cpus: 6 },
           env: { HOME: "/tmp", RIG_ROOT: "/rig" },
@@ -53,10 +54,25 @@ describe("build --prebuilt", () => {
         },
       },
     ]);
+    expect(p.containers.runs[0]?.options).not.toHaveProperty("gpu");
     expect(r.ok && r.value.tarball).toBe(
       `/r/local/prebuilt/engine-builds/engine-sm120-${engine.sha7}.tar.gz`,
     );
     expect(await p.fs.exists("/r/local/prebuilt/engine.toml")).toBe(false);
+  });
+  test("--gpu names the card whose compute capability the build targets, and a card nvidia-smi does not list is a failure before any image", async () => {
+    const { p, uc } = await setup();
+    p.gpu.card(0, { name: "NVIDIA RTX PRO 6000", computeCap: "120" });
+    expect((await uc.run({ gpu: 0, jobs: 6 })).ok).toBe(true);
+    expect(p.containers.runs[0]?.cmd.slice(0, 4)).toEqual([
+      "/rig/dist/rig",
+      "build",
+      "--cap",
+      "120",
+    ]);
+    const none = await uc.run({ gpu: 7, jobs: 6 });
+    expect(!none.ok && none.message).toContain("no CUDA card at nvidia-smi index 7");
+    expect(p.containers.runs).toHaveLength(1);
   });
   test("--sha builds that commit through a copy of engine.toml naming it, without the pin's [[prebuilt]]", async () => {
     const { p, uc } = await setup();
