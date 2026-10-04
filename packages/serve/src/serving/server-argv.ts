@@ -13,7 +13,7 @@ import {
   cacheArgv,
   draftArgv,
   type Profile,
-  profileCudaGraphs,
+  profileEngineEnv,
   type SplitMode,
 } from "@rig/head";
 
@@ -62,18 +62,19 @@ export function serverArgv(head: Head, binDir: string, g: ServeGeometry): string
   ];
 }
 
-/** the cards by nvidia-smi's numbering, which CUDA follows under PCI_BUS_ID, the profile's CUDA graph cap, and under a
- *  tensor split the engine's own all-reduce, the one the whole-evaluation CUDA graph is captured over and every tensor
- *  figure of the GLM head was measured with (the Linux default asks for NCCL first, which a portable build does not carry) */
+/** the cards by nvidia-smi's numbering, which CUDA follows under PCI_BUS_ID, the profile's engine switches (its CUDA
+ *  graph cap, profileEngineEnv), and under a tensor split the engine's own all-reduce, the one the whole-evaluation CUDA
+ *  graph is captured over and every tensor figure of the GLM head was measured with (the Linux default asks for NCCL
+ *  first, which a portable build does not carry) */
 export function serverEnv(
   binDir: string,
   gpus: readonly number[],
-  profile: Pick<Profile, "cuda_graphs" | "split">,
+  profile: Pick<Profile, "cuda_graphs" | "l2_issue" | "split">,
 ): Record<string, string> {
   return {
     CUDA_DEVICE_ORDER: "PCI_BUS_ID",
     CUDA_VISIBLE_DEVICES: gpus.join(","),
-    GGML_CUDA_GRAPH_MAX: String(profileCudaGraphs(profile)), // the CUDA graphs a context keeps: what [sizing] charges a profile for
+    ...profileEngineEnv(profile),
     ...(profile.split === "tensor" ? { GGML_CUDA_ALLREDUCE: "internal" } : {}),
     LD_LIBRARY_PATH: binDir,
   };

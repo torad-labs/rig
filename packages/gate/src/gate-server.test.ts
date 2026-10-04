@@ -21,7 +21,7 @@ async function setup(toml = headToml) {
         gpu: 1,
         binDir: "/r/local/engine-builds/60feea0-sm120",
         cache: { k: "q4_0", v: "q4_0", s: "q8_0" },
-        cudaGraphs: 8,
+        engineEnv: { GGML_CUDA_GRAPH_MAX: "8", GGML_CUDA_L2_ISSUE_LEGACY: "1" },
       },
       8098,
       "/r/local/gate-runs/run",
@@ -173,7 +173,8 @@ describe("gate server", () => {
       env: {
         CUDA_DEVICE_ORDER: "PCI_BUS_ID",
         CUDA_VISIBLE_DEVICES: "1",
-        GGML_CUDA_GRAPH_MAX: "8",
+        GGML_CUDA_GRAPH_MAX: "8", // the card's profile's engine switches, as serve sets them
+        GGML_CUDA_L2_ISSUE_LEGACY: "1",
         LD_LIBRARY_PATH: "/r/local/engine-builds/60feea0-sm120",
       },
       stdoutPath: "/r/local/gate-runs/run/server-one.log",

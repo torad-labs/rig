@@ -92,5 +92,7 @@ describe("the hard stop", () => {
       exit: 1,
       said: "vast not read: stop again",
     });
-  });
+    // about 120 python3 and sh processes, the never-ending token alone 100 pages: 5,011 ms at load 43 against bun's
+    // default 5,000 (rig-glm, Oct 3)
+  }, 60_000);
 });

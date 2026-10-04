@@ -1,5 +1,5 @@
 {
-  "engine": "32e695ecfb38171a71d2a24a236b2a1c683b6ebd",
+  "engine": "4131f11fc006be12dcce3b6f5d90506b95226479",
   "aliases": {
     "-m": ["--model", "-m"],
     "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],
@@ -26,38 +26,11 @@
     "-ctkd": ["--cache-type-k-draft", "--spec-draft-type-k", "-ctkd"],
     "-ctvd": ["--cache-type-v-draft", "--spec-draft-type-v", "-ctvd"],
     "-sm": ["--split-mode", "-sm"],
-    "-ts": ["--tensor-split", "-ts"]
+    "-ts": ["--tensor-split", "-ts"],
+    "-ctki": ["--cache-type-idx", "-ctki"]
   },
   "engines": {
-    "32e695ecfb38171a71d2a24a236b2a1c683b6ebd": {
-      "-m": ["--model", "-m"],
-      "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],
-      "--jinja": ["--jinja", "--no-jinja"],
-      "-fa": ["--flash-attn", "-fa"],
-      "-c": ["--ctx-size", "-c"],
-      "-np": ["--parallel", "-np"],
-      "--kv-unified": ["--kv-unified", "--no-kv-unified", "-kvu", "-no-kvu"],
-      "--cache-ram": ["--cache-ram", "-cram"],
-      "--no-cache-idle-slots": ["--cache-idle-slots", "--no-cache-idle-slots"],
-      "--metrics": ["--metrics"],
-      "--host": ["--host"],
-      "--port": ["--port"],
-      "--spec-type": ["--spec-type"],
-      "--spec-draft-n-max": ["--spec-draft-n-max"],
-      "--spec-draft-p-min": ["--draft-p-min", "--spec-draft-p-min"],
-      "--spec-draft-chain-p-min": ["--spec-draft-chain-p-min"],
-      "-md": ["--model-draft", "--spec-draft-model", "-md"],
-      "-ngld": ["--gpu-layers-draft", "--n-gpu-layers-draft", "--spec-draft-ngl", "-ngld"],
-      "--cache-type-k": ["--cache-type-k", "-ctk"],
-      "--cache-type-v": ["--cache-type-v", "-ctv"],
-      "-cts": ["--cache-type-s", "-cts"],
-      "--kv-mean-center": ["--kv-mean-center"],
-      "-ctkd": ["--cache-type-k-draft", "--spec-draft-type-k", "-ctkd"],
-      "-ctvd": ["--cache-type-v-draft", "--spec-draft-type-v", "-ctvd"],
-      "-sm": ["--split-mode", "-sm"],
-      "-ts": ["--tensor-split", "-ts"]
-    },
-    "42f3b1be0ab2ef79410084bde97eb4a4ff4e1c94": {
+    "4131f11fc006be12dcce3b6f5d90506b95226479": {
       "-m": ["--model", "-m"],
       "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],
       "--jinja": ["--jinja", "--no-jinja"],

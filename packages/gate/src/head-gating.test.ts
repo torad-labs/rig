@@ -140,6 +140,23 @@ describe("gates.toml", () => {
     expect(!refused.ok && refused.message).toContain("REFUSING on GPU 1's profile");
     expect(!refused.ok && refused.message).toContain("no CUDA flash attention for K/V q4_1/q4_1");
   });
+  test("the gate card carries the engine switches of the profile serve would give it", async () => {
+    const { p, head, engine } = await setup();
+    const card = await claimGateCard(p, engine, head, 1); // 16,303 MiB: the 5080 profile
+    expect(card.ok && card.value.engineEnv).toEqual({ GGML_CUDA_GRAPH_MAX: "8" });
+    putHead(
+      p.fs,
+      "/r",
+      headToml.replace("ctx = 294912\n", "ctx = 294912\nl2_issue = false\ncuda_graphs = 4\n"),
+    );
+    const off = await loadHead(p.fs, layoutAt("/r"), "bonsai-2-27b");
+    if (!off.ok) throw new Error(off.message);
+    const switched = await claimGateCard(p, engine, off.value, 1);
+    expect(switched.ok && switched.value.engineEnv).toEqual({
+      GGML_CUDA_GRAPH_MAX: "4",
+      GGML_CUDA_L2_ISSUE_LEGACY: "1",
+    });
+  });
   test("the head's gates parse", async () => {
     const { p, head } = await setup();
     const g = await loadGates(p.fs, head);
@@ -404,7 +421,7 @@ describe("gate", () => {
       cap: "120",
       cache: profileCache(head, {}),
       profile: 16000,
-      cudaGraphs: 8,
+      engineEnv: { GGML_CUDA_GRAPH_MAX: "8" },
     };
     expect(runProvenance(head, engine, card, null)).toMatchObject({
       engine: engine.sha7,

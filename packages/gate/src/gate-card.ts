@@ -10,12 +10,11 @@ import { type Engine, isBuilt } from "@rig/engine";
 import type { Head } from "@rig/head";
 import {
   type CacheFormats,
-  CUDA_GRAPHS_MAX,
   cacheRefusal,
   describeProfile,
   pickProfile,
   profileCache,
-  profileCudaGraphs,
+  profileEngineEnv,
 } from "@rig/head";
 
 export interface GateCard {
@@ -28,8 +27,9 @@ export interface GateCard {
   cache: CacheFormats;
   /** that profile's min_vram_mib, or null when the card fits none */
   profile: number | null;
-  /** the CUDA graphs a leg's context keeps (GGML_CUDA_GRAPH_MAX), that profile's cap as serve passes it */
-  cudaGraphs: number;
+  /** the engine switches of that profile as serve sets them (profileEngineEnv), its CUDA graph cap among them; with no
+   *  profile, the defaults */
+  engineEnv: Record<string, string>;
 }
 
 export interface GateCardDeps {
@@ -90,6 +90,6 @@ export async function claimGateCard(
     cap: card.computeCap,
     cache,
     profile: placed.ok ? placed.value.profile.min_vram_mib : null,
-    cudaGraphs: placed.ok ? profileCudaGraphs(placed.value.profile) : CUDA_GRAPHS_MAX,
+    engineEnv: profileEngineEnv(placed.ok ? placed.value.profile : {}),
   });
 }

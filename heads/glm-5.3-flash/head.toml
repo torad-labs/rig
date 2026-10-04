@@ -87,8 +87,9 @@ bytes = 43225116416
 # (GGML_CUDA_COUNT_INFLIGHT, a diagnostic, off unless set). 37167fec9's in-flight bound is not in it. Served on rental 4
 # (2x RTX PRO 6000, Oct 3) by rig's rendered np3 serve: three ~30K sessions leave 14,042 MiB free, the np3 stress and
 # np1 tail repros pass, and served decode is 0.9990 of 009073391's (4 ABBA pairs, 95 % CI 0.9904 to 1.0076).
-[engine]
-sha = "42f3b1be0ab2ef79410084bde97eb4a4ff4e1c94"
+# Since Oct 4, 2026 this head serves engine.toml's own pin and its published build, and carries no [engine] of its own
+# until a GLM change moves it past that pin again. The pin is 4131f11fc: 42f3b1be0 with a change to the PQ2_0
+# tensor-core kernel only (fork PR #89), which this IQ3_XXS pack never runs.
 
 [speculative]
 type = "draft-mtp"             # the pack's own NextN block (glm5next.nextn_predict_layers = 1)

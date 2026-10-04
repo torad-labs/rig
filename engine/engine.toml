@@ -240,12 +240,22 @@
 # each at a tie, |dlogprob| p99 0.080 and max 0.144; drafted four, each at a tie, p99 0.089, max 0.227; without n_probs
 # the same tokens and drafting; the swapped-out conversation token for token, its first token in 1.08 s; plain decode on
 # the 245K question with n_probs 5 94.3 -> 107.5 tok/s (gate-verdict22.py, GATE PASS, 2026-09-27).
+# 4131f11 (fork main after PRs #70-#89, 165 commits past 32e695e) is what moved it past 32e695e, for every head: GLM-5.3
+# Flash's two-card work (heads/glm-5.3-flash/head.toml has its evidence) and the decode changes every model runs (TORAD.md).
+# It is 42f3b1be0 with 8c78ba9ca's PQ2_0 tile counter taken out (19778d22a), which against its parent build cost Bonsai pp4
+# 3.3 % and tg128 0.9 % on a 5090, 2.3 % and 2.5 % on a 5080. Bonsai against 32e695e, llama-bench pp4 / tg128 at depth 0:
+# a 5090 496.8 / 163.4 -> 502.6 / 166.3 with the engine's L2 issuer off, as its profile serves it (l2_issue), a 5080
+# 361.5 / 106.7 -> 370.0 / 108.8 (heads/bonsai-2-27b/evidence.md). The prebuilt's code against 32e695e's (RTX 5090, the
+# same four questions, one slot) is held to engine-10's G1 bars: plain four first differences, each at a tie, |dlogprob|
+# p99 0.0575 and max 0.0915; drafted four, each at a tie, p99 0.0723, max 0.1726; without n_probs the same tokens and
+# drafting; the swapped-out conversation token for token. Those legs are byte-identical to 42f3b1be0's, and the tarball's
+# logits equal 19778d22a's at 4-token batches (gate-verdict-42f3b1b.py, GATE PASS, 2026-10-04).
 # ORDER: publish the build (rig build) BEFORE merging a pin move. The unit's ExecStartPre verify refuses
 # to start a head whose pin has no complete build, so a restart in the gap is an outage: 2026-09-21
 # 00:38, four refused starts, 90 s down, while 60493a5-sm120 was still compiling.
 [fork]
 repo = "https://github.com/torad-labs/llama.cpp.git"
-sha = "32e695ecfb38171a71d2a24a236b2a1c683b6ebd"
+sha = "4131f11fc006be12dcce3b6f5d90506b95226479"
 base = "prism-b10685-7dffb15"   # PrismML's llama.cpp (ggml-org b10685 + the ternary kernels) this branch sits on
 
 # Compute capabilities with a measured run behind them — anything else is refused by prepare and
@@ -307,6 +317,6 @@ libs = ["libcublas.so.13", "libcublasLt.so.13"]
 # sha, so a rebuild of the same commit is a new release, engine-<sha7>-<n>.
 [[prebuilt]]
 cap = "120"
-url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-32e695e/engine-sm120-32e695e.tar.gz"
-sha256 = "9df73c20b9b70695b2c39fb592aeae7ee1ab6c4af5db134ae16b321e990b1c21"
+url = "https://github.com/torad-labs/llama.cpp/releases/download/engine-4131f11/engine-sm120-4131f11.tar.gz"
+sha256 = "32f6fedaebd512a0912dd8cc75240f3a5d82525ded2ac1795abd01b5207dd0f7"
 glibc = "2.35"                 # scripts/prebuilt/Dockerfile's Ubuntu 22.04; its ELF files need GLIBC_2.34 at most

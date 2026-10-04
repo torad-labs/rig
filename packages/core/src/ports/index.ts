@@ -32,7 +32,7 @@ export type { Bucket, ObjectStore, ObjectStores } from "./object-store.ts";
 export type { CreateOptions, Instance, Offer, Rental, TemplateSpec } from "./rental.ts";
 export type { Secrets } from "./secrets.ts";
 export type { Process, RunOptions, RunResult, Shell, SpawnOptions } from "./shell.ts";
-export type { Ssh, SshTarget } from "./ssh.ts";
+export type { Ssh, SshResult, SshTarget } from "./ssh.ts";
 export type { Systemd } from "./systemd.ts";
 
 export interface Ports {

@@ -315,7 +315,13 @@ export class RentGpu {
     if (!box.ok) return box;
     const remote = this.remote(config.value, box.value);
 
-    const shipped = await this.shipPayload(remote, head, options.private ?? false);
+    const shipped = await this.shipPayload(
+      config.value,
+      box.value,
+      head,
+      options.private ?? false,
+      false,
+    );
     if (!shipped.ok) return shipped;
     const engine = await this.engineSource(remote, pick.value.offer);
 
@@ -410,8 +416,15 @@ export class RentGpu {
       ...(options.vm ? { onstart: VM_ONSTART, vm: true } : {}),
     });
     if (!box.ok) return box;
-    const shipped = await this.shipPayload(this.remote(config.value, box.value), null, false);
-    if (!shipped.ok) return shipped;
+    // the box bills from here and serves nothing a person waits on: a failure destroys it, a throw included
+    const shipped = await this.shipPayload(
+      config.value,
+      box.value,
+      null,
+      false,
+      options.vm ?? false,
+    ).catch((error: unknown) => fail(ExitCode.Failure, (error as Error).message));
+    if (!shipped.ok) return this.downAfter(box.value, shipped.message);
 
     const offer = pick.value.offer;
     const idleMinutes = idleBudget(config.value, box.value);
@@ -1093,8 +1106,8 @@ export class RentGpu {
     }
   }
 
-  /** the instance created and recorded, then waited for: running, with an ssh endpoint that
-   *  answers; a box that never gets there is destroyed, not left billing */
+  /** the instance created, then provisioned; a box that never gets there is destroyed, not left billing, and so is one
+   *  whose provisioning throws */
   private async createBox(
     config: VastConfig,
     /** the head the box is for; null for a lab box, which serves none */
@@ -1162,6 +1175,23 @@ export class RentGpu {
       ...(localPort !== undefined ? { localPort } : {}),
       stopAt: createdAt + maxHours * 3_600_000,
     };
+    try {
+      return await this.provision(config, box, head, maxHours, options);
+    } catch (error) {
+      return this.downAfter(box, `instance ${instanceId}: ${(error as Error).message}`);
+    }
+  }
+
+  /** a created box recorded, its reaper and hard stop armed, and waited for: running, with an ssh endpoint that answers;
+   *  a box that never gets there is destroyed, not left billing */
+  private async provision(
+    config: VastConfig,
+    box: BoxState,
+    head: Head | null,
+    maxHours: number,
+    options: { vm?: boolean | undefined; idleMinutes?: number | undefined },
+  ): Promise<Result<ReachableBox>> {
+    const { instanceId } = box;
     await this.state.saveBox(box);
     // the box bills from here, so the reaper and the hard stop are installed and armed here and not after
     // provisioning: a box whose provisioning dies, or whose `up` is killed, otherwise bills with nothing watching
@@ -1202,6 +1232,7 @@ export class RentGpu {
     const said = await this.waitSsh(
       this.remote(config, reachable),
       options.vm ? VM_SSH_ATTEMPTS : SSH_ATTEMPTS,
+      options.vm ? { instanceId, knownHosts: this.state.files(reachable).knownHosts } : undefined,
     );
     if (said !== null) {
       const outcome = await this.abandon(reachable, "ssh never answered");
@@ -1212,13 +1243,17 @@ export class RentGpu {
     return ok(reachable);
   }
 
-  /** rig, the head and the engine pin, as one tarball; the head's private [derive] assets only
-   *  with --private */
+  /** rig, the head and the engine pin, as one tarball; the head's private [derive] assets only with --private. With
+   *  `relearnHostKey` (a VM) the box's host key may change once before the payload lands: a VM's first boot regenerates
+   *  its keys after sshd first answered (VM 54084522, Oct 3), so the key ssh recorded then is refused by the payload.
+   *  Once the payload has landed, a changed key is refused as ever. */
   private async shipPayload(
-    remote: RentedBox,
+    config: VastConfig,
+    box: ReachableBox,
     /** null for a lab box: rig and the pin only, nothing of any head */
     head: Head | null,
     shipPrivate: boolean,
+    relearnHostKey: boolean,
   ): Promise<Result<void>> {
     const payload = this.state.path("payload.tar.gz");
     const held = head === null || shipPrivate ? [] : privateAssets(head);
@@ -1242,8 +1277,31 @@ export class RentGpu {
       { timeoutMs: 300_000 },
     );
     if (tar.code !== 0) return fail(ExitCode.Failure, `tar: ${tar.stderr.trim()}`);
-    await remote.receivePayload(payload);
-    return ok(undefined);
+    const remote = this.remote(config, box);
+    const { knownHosts } = this.state.files(box);
+    if ((await remote.receivePayload(payload)) === "landed") return ok(undefined);
+    if (!relearnHostKey)
+      return fail(
+        ExitCode.Failure,
+        `box ${box.instanceId} answered with a host key other than the one ssh recorded for it (${knownHosts}): refused`,
+      );
+    // this box's own known_hosts forgotten, and the key learned again from sshd's next answer (accept-new); the
+    // payload's own first command then checks it a second time
+    this.deps.log.warn(
+      `box ${box.instanceId}'s host key changed after ssh first answered (a VM's first boot regenerates its keys): learning it once more into ${knownHosts}`,
+    );
+    await this.deps.fs.remove(knownHosts);
+    const said = await this.waitSsh(remote, VM_SSH_ATTEMPTS);
+    if (said !== null)
+      return fail(
+        ExitCode.Failure,
+        `box ${box.instanceId}'s host key changed, and ssh never answered again (last ssh said: ${said})`,
+      );
+    if ((await remote.receivePayload(payload)) === "landed") return ok(undefined);
+    return fail(
+      ExitCode.Failure,
+      `box ${box.instanceId}'s host key changed again after rig relearned it (${knownHosts}): refused`,
+    );
   }
 
   /** how the box gets its engine: the pin's prebuilt for this sm, installed as on any machine
@@ -1543,12 +1601,26 @@ export class RentGpu {
     return null;
   }
 
-  /** null once ssh answers, else what it last said after the whole wait */
-  private async waitSsh(remote: RentedBox, attempts: number): Promise<string | null> {
-    let said: string | null = "never tried";
+  /** null once ssh lets rig in, else what it said last. With `relearn` (a VM's own known_hosts), a host key that changes
+   *  before ssh has let rig in once is learned again from the next answer: an answer that did not log in recorded the
+   *  key, and a VM's first boot can regenerate its keys after it (VM 54112003, Oct 4). Nothing was trusted yet, so this
+   *  is accept-new's first answer, not a change of a key rig used. */
+  private async waitSsh(
+    remote: RentedBox,
+    attempts: number,
+    relearn?: { instanceId: number; knownHosts: string },
+  ): Promise<string | null> {
+    let said = "never tried";
     for (let attempt = 0; attempt < attempts; attempt++) {
-      said = await remote.unreachable(20_000);
-      if (said === null) return null;
+      const probe = await remote.unreachable(20_000);
+      if (probe === null) return null;
+      said = probe.said;
+      if (probe.hostKeyChanged && relearn) {
+        this.deps.log.warn(
+          `box ${relearn.instanceId}'s host key changed before ssh let rig in (a VM's first boot regenerates its keys): learning it again into ${relearn.knownHosts}`,
+        );
+        await this.deps.fs.remove(relearn.knownHosts);
+      }
       await this.deps.clock.sleep(5000);
     }
     return said;
@@ -1560,6 +1632,18 @@ export class RentGpu {
     this.deps.log.error(`instance ${box.instanceId} ${why}; destroying it`);
     const gone = await this.destroy(box);
     return gone.ok ? `destroyed ${box.instanceId}` : gone.message;
+  }
+
+  /** a failure after the box was created: the box destroyed by `destroy`, the step `down --box` takes for it, and the
+   *  failure told with what became of the box. A destroy that throws leaves the box's reaper and hard stop armed. */
+  private async downAfter(box: BoxState, failure: string): Promise<Result<never>> {
+    let outcome: string;
+    try {
+      outcome = await this.abandon(box, failure);
+    } catch (error) {
+      outcome = `the destroy failed (${(error as Error).message}): box ${box.instanceId} may be billing, its idle timer and hard stop still armed`;
+    }
+    return fail(ExitCode.Failure, `${failure}; ${outcome}`);
   }
 }
 

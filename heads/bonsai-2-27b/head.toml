@@ -144,6 +144,7 @@ slots = 8
 ctx = 786432
 runtime_mib = 335              # a rented 5090, CUDA graphs off (engine d0f8bae, 2026-09-27): 335 over the charge at 4 × 294,912
                                # under four concurrent requests, 109 at its own 8 × 786,432 under eight
+l2_issue = false               # the engine's L2 issuer: off, pp4 +1.2 % and tg128 +1.5 % on a 5090; on the 5080 it gains as much (evidence.md, "L2 issuer")
 [[profiles]]
 min_vram_mib = 16000           # 5080 (16 GiB): 1.125 windows + the MTP head (1.625 windows undrafted: at 425,984 the head's charge is what no longer fits; 327,680 OOMed on the
                                # head's 388 MiB compute buffer under the f16 mask, 2026-09-20)

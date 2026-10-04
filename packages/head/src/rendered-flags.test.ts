@@ -127,11 +127,13 @@ describe("rendered flags", () => {
   // Proving the check above CAN fail is the point. It was found by -ctki against the GLM head's pin before that pin
   // declared it (the head named idx while it pinned 3d40ae99c, and the check named -ctki); a pin that declares it
   // turns that case green, so the undeclared arm is a flag no engine declares. Both arms, so the gate is not green by
-  // always answering the same way, and on the head's real pin, so a manifest block that declared everything would fail.
+  // always answering the same way, and on the engine the head serves on (its own [engine], else the default pin), so a
+  // manifest block that declared everything would fail.
   test("a flag the head's own engine does not declare is named, one it declares is not, and an unknown engine declares nothing", async () => {
-    const glm = /\[engine\][^[]*?sha = "([0-9a-f]{40})"/s.exec(
+    const glm = headPinAndFlags(
       await Bun.file(`${root}/heads/glm-5.3-flash/head.toml`).text(),
-    )![1]!;
+      pin,
+    ).sha;
     expect(undeclared(["-m", "--no-engine-declares-this"], glm)).toEqual([
       "--no-engine-declares-this",
     ]);

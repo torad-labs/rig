@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { Offer } from "@rig/core";
+import type { Offer, SshResult, SshTarget } from "@rig/core";
 import { layoutAt, ok } from "@rig/core";
 import { loadEngine } from "@rig/engine";
 import { loadHead } from "@rig/head";
-import { fakePorts, putHead, repoRoot } from "@rig/testing";
+import { FakeSsh, fakePorts, type InMemoryFileSystem, putHead, repoRoot } from "@rig/testing";
 import { headDiskGb, headPackBytes } from "./box-template.ts";
 import { type LiveGate, RentGpu, VM_ONSTART } from "./gpu-rental.service.ts";
 import { loadVastConfig, offerQuery } from "./rental-config.ts";
@@ -879,6 +879,184 @@ describe("vast lab", () => {
     const gone = await dead.uc.lab({ gpu: "RTX_5090", vm: true });
     expect(!gone.ok && gone.message).toContain("ssh never answered");
     expect(dead.p.rental.instances.size).toBe(0);
+  });
+  // VM 54084522 (Oct 3, 7:40 PM CT): sshd answered rig's first probe, the VM's first boot then regenerated its host
+  // keys, and the payload's scp was refused for a changed key; lab threw and left the VM billing.
+  describe("a host key that changes", () => {
+    const knownHosts = "/r/local/rented-box/boxes/1000/known_hosts";
+    /** what OpenSSH 10 says, exit 255, to a host whose key is not the one its known_hosts holds (measured against a
+     *  local sshd with rig's ssh options, Oct 3) */
+    const refusal = (t: SshTarget) =>
+      `Host key for [${t.host}]:${t.port} has changed and you have requested strict checking.\nHost key verification failed.`;
+    /** a box's sshd as accept-new meets it through this box's known_hosts: the first answer records its key, and an
+     *  answer with another key is refused. `onCommand` sees each command before it is answered; the box regenerating
+     *  its keys is a test setting `key` there */
+    class KeyedSsh extends FakeSsh {
+      key = "key-1";
+      constructor(
+        private readonly fs: InMemoryFileSystem,
+        private readonly onCommand: (cmd: string, ssh: KeyedSsh) => void,
+      ) {
+        super();
+      }
+      private async admits(t: SshTarget): Promise<boolean> {
+        const known = (await this.fs.exists(t.knownHosts))
+          ? (await this.fs.readText(t.knownHosts)).trim()
+          : "";
+        if (known === "") await this.fs.writeText(t.knownHosts, this.key);
+        return known === "" || known === this.key;
+      }
+      override async run(t: SshTarget, cmd: string): Promise<SshResult> {
+        this.onCommand(cmd, this);
+        if (await this.admits(t)) return super.run(t, cmd);
+        this.calls.push(`REFUSED ${cmd}`);
+        return { code: 255, stdout: "", stderr: refusal(t), hostKeyChanged: true };
+      }
+      override async push(t: SshTarget, local: string, remote: string) {
+        this.onCommand(`push ${remote}`, this);
+        if (!(await this.admits(t))) throw new Error(`scp ${local} -> ${remote}: ${refusal(t)}`);
+        return super.push(t, local, remote);
+      }
+    }
+    /** a lab box whose sshd takes a new key at each of its first `rotations` commands that are not a probe: one is a
+     *  VM's first boot, which lands after sshd first answered */
+    async function boxRotating(rotations: number, at = (cmd: string) => cmd !== "true") {
+      const t = await setup();
+      t.p.rental.offers = [rtx5090];
+      let rotated = 0;
+      const ssh = new KeyedSsh(t.p.fs, (cmd, box) => {
+        if (at(cmd) && rotated < rotations) box.key = `key-${++rotated + 1}`;
+      });
+      return { ...t, ssh, uc: new RentGpu({ ...t.deps, ssh }, t.layout, ok(engine)) };
+    }
+
+    test("a VM's key that changes once before its payload is relearned in this box's known_hosts alone, and the payload lands", async () => {
+      // the key changing before the payload's first command, and between it and the copy (VM 54084522's scp)
+      for (const at of [undefined, (cmd: string) => cmd.startsWith("push ")]) {
+        const { p, ssh, uc } = await boxRotating(1, at);
+        p.fs.put("/home/u/.ssh/known_hosts", "github.com ssh-ed25519 AAAAOTHER\n");
+        const r = await uc.lab({ gpu: "RTX_5090", vm: true });
+        expect(r.ok && r.value.kind).toBe("lab");
+        expect(ssh.pushed).toEqual([
+          ["/r/local/rented-box/payload.tar.gz", "/workspace/rig/payload.tar.gz"],
+        ]);
+        expect(ssh.calls.filter((c) => c.startsWith("tar -C /workspace/rig "))).toHaveLength(1);
+        expect(p.fs.text(knownHosts)).toBe("key-2");
+        expect(p.fs.text("/home/u/.ssh/known_hosts")).toBe("github.com ssh-ed25519 AAAAOTHER\n");
+        expect(p.rental.ops).not.toContain("destroy 1000");
+        expect(p.log.lines.join("\n")).toContain("box 1000's host key changed");
+      }
+    });
+    // VM 54112003 (Oct 4, 1:23 AM CT): sshd answered a probe that did not log in, which recorded its key, the first
+    // boot then regenerated the keys, and every probe after it read "Host key verification failed." until the wait ran
+    // out and the VM was destroyed. Before ssh has let rig in once, nothing was trusted yet: a VM's key is learned again
+    // from its next answer. A container's is not, as after the first answer.
+    async function boxAnsweringBeforeLogin(vm: boolean) {
+      const t = await setup();
+      t.p.rental.offers = [rtx5090];
+      let probes = 0;
+      const ssh = new (class extends KeyedSsh {
+        override async run(target: SshTarget, cmd: string): Promise<SshResult> {
+          // the first probe meets sshd before the image's keys are in place: its key recorded, the login refused
+          if (cmd === "true" && ++probes === 1) {
+            const answered = await super.run(target, cmd);
+            this.key = "key-2";
+            return answered.code === 0
+              ? { code: 255, stdout: "", stderr: "root@box: Permission denied (publickey)." }
+              : answered;
+          }
+          return super.run(target, cmd);
+        }
+      })(t.p.fs, () => {});
+      const uc = new RentGpu({ ...t.deps, ssh }, t.layout, ok(engine));
+      return { ...t, ssh, uc, lab: () => uc.lab({ gpu: "RTX_5090", vm }) };
+    }
+    test("a VM's key that changes before ssh first let rig in is learned again from its next answer, and the payload lands", async () => {
+      const { p, ssh, lab } = await boxAnsweringBeforeLogin(true);
+      const r = await lab();
+      expect(r.ok && r.value.kind).toBe("lab");
+      expect(p.fs.text(knownHosts)).toBe("key-2");
+      expect(ssh.calls).toContain("REFUSED true");
+      expect(ssh.pushed).toHaveLength(1);
+      expect(p.log.lines.join("\n")).toContain("before ssh let rig in");
+    });
+    test("a container's key that changes before ssh first let rig in is refused until the wait ends, and the box destroyed", async () => {
+      const { p, ssh, lab } = await boxAnsweringBeforeLogin(false);
+      const r = await lab();
+      expect(!r.ok && r.message).toContain("ssh never answered");
+      expect(!r.ok && r.message).toContain("Host key verification failed.");
+      expect(ssh.pushed).toEqual([]);
+      expect(p.rental.instances.size).toBe(0);
+    });
+    test("a VM's key that changes again after rig relearned it is refused, and the VM destroyed", async () => {
+      const { p, ssh, uc } = await boxRotating(2);
+      const r = await uc.lab({ gpu: "RTX_5090", vm: true });
+      expect(!r.ok && r.message).toContain("changed again after rig relearned it");
+      expect(!r.ok && r.message).toContain("destroyed 1000");
+      expect(ssh.pushed).toEqual([]);
+      expect(p.rental.instances.size).toBe(0);
+    });
+    test("a container's key is never relearned: a change before its payload is refused, and the box destroyed", async () => {
+      const { p, ssh, uc } = await boxRotating(1);
+      const r = await uc.lab({ gpu: "RTX_5090" });
+      expect(!r.ok && r.message).toContain(
+        "answered with a host key other than the one ssh recorded",
+      );
+      expect(!r.ok && r.message).toContain("destroyed 1000");
+      expect(ssh.pushed).toEqual([]);
+      expect(p.rental.instances.size).toBe(0);
+    });
+    test("once the payload has landed a changed key is refused: the idle check reads the box unreachable and relearns nothing", async () => {
+      const { p, ssh, uc } = await boxRotating(1);
+      expect((await uc.lab({ gpu: "RTX_5090", vm: true })).ok).toBe(true);
+      ssh.key = "key-3";
+      // vast lists no card sample for a VM, so the box's own reading is the evidence
+      const { gpuUtil: _, ...listed } = p.rental.instances.get(1000)!;
+      p.rental.instances.set(1000, listed);
+      expect((await uc.idleCheck()).ok).toBe(true);
+      expect(p.log.lines.join("\n")).toContain("box unreachable over ssh");
+      expect(ssh.calls.at(-1)).toStartWith("REFUSED ");
+      expect(p.fs.text(knownHosts)).toBe("key-2");
+    });
+    test("a failure after create destroys the box the way down --box does, and reports both", async () => {
+      const copyFails = class extends FakeSsh {
+        override async push(): Promise<void> {
+          throw new Error("scp: Connection closed");
+        }
+      };
+      const t = await setup();
+      t.p.rental.offers = [rtx5090];
+      const uc = new RentGpu({ ...t.deps, ssh: new copyFails() }, t.layout, ok(engine));
+      const r = await uc.lab({ gpu: "RTX_5090", vm: true });
+      expect(!r.ok && r.message).toContain("scp: Connection closed");
+      expect(!r.ok && r.message).toContain("destroyed 1000");
+      expect(t.p.rental.instances.size).toBe(0);
+      expect(await t.p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(false);
+      expect(t.p.systemd.ops).toContain("disable rig-vast-idle-1000.timer");
+
+      // a destroy vast does not carry out is told beside the failure, and the box's cost control stays armed
+      const kept = await setup();
+      kept.p.rental.offers = [rtx5090];
+      kept.p.rental.destroy = async (id: number) => {
+        kept.p.rental.ops.push(`destroy ${id}`);
+      };
+      const stuck = new RentGpu({ ...kept.deps, ssh: new copyFails() }, kept.layout, ok(engine));
+      const left = await stuck.lab({ gpu: "RTX_5090" });
+      expect(!left.ok && left.message).toContain("scp: Connection closed");
+      expect(!left.ok && left.message).toContain("box 1000 is STILL listed after destroy");
+      expect(await kept.p.systemd.isActive("rig-vast-idle-1000.timer")).toBe(true);
+
+      // and a throw while the box is still coming up, before rig has reached it
+      const early = await setup();
+      early.p.rental.offers = [rtx5090];
+      early.p.rental.show = async () => {
+        throw new Error("vast answered 429");
+      };
+      const r429 = await early.uc.lab({ gpu: "RTX_5090", vm: true });
+      expect(!r429.ok && r429.message).toContain("vast answered 429");
+      expect(!r429.ok && r429.message).toContain("destroyed 1000");
+      expect(early.p.rental.instances.size).toBe(0);
+    });
   });
   test("an unmeasured card is refused unless --allow-arch, none beside a one-box rig's box, and a box that never answers is destroyed", async () => {
     const { p, uc } = await setup();

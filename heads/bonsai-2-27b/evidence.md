@@ -868,3 +868,29 @@ The community's gains come from models that do not fit one card, from aggregate 
 the P2P driver patch, which a rented container cannot install. Decision: more GPUs buy slots and
 windows for this pack, never single-stream speed; the box was replaced by one RTX PRO 6000 (96 GiB,
 the 90000 MiB tier). Brain #720 (2026-05-08) and #1190 carry the research.
+
+## L2 issuer and the PQ2_0 tile counter (engine 19778d2, 2026-10-04)
+
+Engine 42f3b1b, GLM's pin, decoded this pack slower than 32e695e. A bisect on a rented RTX 5090 and a rented RTX 5080 found
+two causes. Each figure below is llama-bench `-p 4 -n 128 -r 5`, q4_0 K/V, f16 state, depth 0. The arms ran forward and
+then reverse, and each figure is the mean of the two runs.
+
+- **The PQ2_0 tile counter (`8c78ba9ca`)** cost pp4 3.3 % and tg128 0.9 % on the 5090, and pp4 2.3 % and tg128 2.5 % on
+  the 5080, against its parent build `7a626684d`. Its switch did not recover it. Engine `19778d22a` takes it out.
+- **The paced L2 issuer (`345065068`)** depends on the card. On the 5090 it costs pp4 1.2 % and tg128 1.5 % on 19778d2;
+  on the 5080 it gains pp4 2.4 % and tg128 1.0 %. The 5090 profile serves with it off (`l2_issue = false`, which sets
+  `GGML_CUDA_L2_ISSUE_LEGACY=1`); every other profile keeps the engine's default. The H100 and RTX PRO 6000 profiles are
+  unmeasured.
+
+| card | build | pp4 tok/s | tg128 tok/s |
+|---|---|---|---|
+| 5090 | 32e695e | 496.8 | 163.4 |
+| 5090 | 42f3b1b | 474.7 | 156.3 |
+| 5090 | 19778d2 | 496.8 | 163.8 |
+| 5090 | 19778d2, issuer off | 502.6 | 166.3 |
+| 5080 | 32e695e | 361.5 | 106.7 |
+| 5080 | 42f3b1b | 355.3 | 104.6 |
+| 5080 | 19778d2 | 370.0 | 108.8 |
+| 5080 | 19778d2, issuer off | 361.3 | 107.7 |
+
+The logs are in rig's research notes (engine-42f3b1b-gate-2026-10-04, arms 9 and 10).

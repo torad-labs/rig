@@ -45,6 +45,17 @@ describe("argv", () => {
       LD_LIBRARY_PATH: `${root}/local/engine-builds/${engine.sha7}-sm120`,
     });
   });
+  test("the 5090 profile serves with the engine's L2 issuer off, where it measured slower; the 5080's keeps the engine's own", async () => {
+    const { p, head, uc } = await setup();
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 });
+    const r = await uc.plan(head, { devices: [1], cacheRam: 8192 });
+    expect(r.ok && r.value.env).toMatchObject({
+      GGML_CUDA_GRAPH_MAX: "8",
+      GGML_CUDA_L2_ISSUE_LEGACY: "1",
+    });
+    const local = await uc.plan(head, { devices: [0], cacheRam: 8192 });
+    expect(local.ok && local.value.env).not.toHaveProperty("GGML_CUDA_L2_ISSUE_LEGACY");
+  });
   test("--slots 1 on the 5080 profile is one slot with the model's window, not the profile's shared pool", async () => {
     const { head, uc } = await setup();
     const r = await uc.plan(head, { devices: [0], cacheRam: 8192, slots: 1 });
@@ -252,7 +263,7 @@ describe("draft cutoffs", () => {
 });
 
 describe("glm-5.3-flash", () => {
-  test("on two 96 GB cards: the qualified command line, split by tensor over both, on the head's own engine commit", async () => {
+  test("on two 96 GB cards: the qualified command line, split by tensor over both, on the engine the head serves on", async () => {
     const p = fakePorts();
     const layout = layoutAt(root);
     const glm = await Bun.file(`${repoRoot}/heads/glm-5.3-flash/head.toml`).text();
@@ -261,7 +272,8 @@ describe("glm-5.3-flash", () => {
     const head = await loadHead(p.fs, layout, "glm-5.3-flash");
     const pin = await loadEngine(p.fs, layout);
     if (!head.ok || !pin.ok) throw new Error("fixture");
-    const engine = headEngine(pin.value, head.value.engine!, layout);
+    // as main.ts picks it: the head's own [engine] when it names one, else the default pin
+    const engine = head.value.engine ? headEngine(pin.value, head.value.engine, layout) : pin;
     if (!engine.ok) throw new Error(engine.message);
     for (const index of [0, 1])
       p.gpu.card(index, {
@@ -273,7 +285,7 @@ describe("glm-5.3-flash", () => {
       cacheRam: 8192,
     });
     if (!r.ok) throw new Error(r.message);
-    const bin = `${root}/local/engine-builds/42f3b1b-sm120`;
+    const bin = `${root}/local/engine-builds/4131f11-sm120`;
     expect(r.value.argv).toEqual([
       `${bin}/llama-server`,
       "-m",

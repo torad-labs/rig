@@ -27,7 +27,7 @@ export class GateServer implements GateLegs {
   constructor(
     private readonly deps: GateServerDeps,
     private readonly head: Head,
-    private readonly card: Pick<GateCard, "gpu" | "binDir" | "cache" | "cudaGraphs">,
+    private readonly card: Pick<GateCard, "gpu" | "binDir" | "cache" | "engineEnv">,
     private readonly port: number,
     private readonly runDir: string,
   ) {}
@@ -78,7 +78,7 @@ export class GateServer implements GateLegs {
       env: {
         CUDA_DEVICE_ORDER: "PCI_BUS_ID",
         CUDA_VISIBLE_DEVICES: String(this.card.gpu),
-        GGML_CUDA_GRAPH_MAX: String(this.card.cudaGraphs), // as served (serverEnv)
+        ...this.card.engineEnv, // as served (serverEnv)
         LD_LIBRARY_PATH: this.card.binDir,
       },
       stdoutPath: log,

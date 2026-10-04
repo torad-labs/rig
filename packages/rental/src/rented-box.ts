@@ -24,11 +24,15 @@ export class RentedBox {
   }
 
   /** null when ssh answers (vast installs sshd after the container starts), else the last thing ssh said, so a
-   *  box that refuses the key reads differently from one that has not booted */
-  async unreachable(timeoutMs: number): Promise<string | null> {
+   *  box that refuses the key reads differently from one that has not booted, and whether its host key was not the
+   *  one this box's known_hosts holds */
+  async unreachable(timeoutMs: number): Promise<{ said: string; hostKeyChanged: boolean } | null> {
     const probe = await this.ssh.run(this.target, "true", { timeoutMs });
     if (probe.code === 0) return null;
-    return probe.stderr.trim().split("\n").at(-1)?.slice(0, 160) || `exit ${probe.code}`;
+    return {
+      said: probe.stderr.trim().split("\n").at(-1)?.slice(0, 160) || `exit ${probe.code}`,
+      hostKeyChanged: probe.hostKeyChanged === true,
+    };
   }
 
   /** The card on the box: its utilization now, its peak over the last `windowSeconds` as a sampler on the box saw it, and
@@ -111,18 +115,36 @@ export class RentedBox {
     return { free: Number(free) || 0, present: Number(present) || 0 };
   }
 
-  /** the payload tarball (dist/rig, the head, the engine pin) unpacked under remote_dir */
-  async receivePayload(localTarball: string): Promise<void> {
+  /** the payload tarball (dist/rig, the head, the engine pin) unpacked under remote_dir: "landed", or "host-key-changed"
+   *  when ssh refused the box's key at a step, for the caller to decide whether the key may be relearned. Any other
+   *  failure throws. */
+  async receivePayload(localTarball: string): Promise<"landed" | "host-key-changed"> {
     const remoteTarball = `${this.remoteDir}/payload.tar.gz`;
-    await this.ssh.run(
+    const made = await this.ssh.run(
       this.target,
       `mkdir -p ${this.layout.engineBuildsDir} ${this.layout.logsDir}`,
     );
-    await this.ssh.push(this.target, localTarball, remoteTarball);
-    await this.ssh.run(
+    if (made.hostKeyChanged) return "host-key-changed";
+    if (made.code !== 0)
+      throw new Error(`mkdir on the box (exit ${made.code}): ${made.stderr.trim()}`);
+    try {
+      await this.ssh.push(this.target, localTarball, remoteTarball);
+    } catch (error) {
+      // a copy refused for the key says so only in scp's words, so the transport is asked
+      if ((await this.ssh.run(this.target, "true", { timeoutMs: 20_000 })).hostKeyChanged)
+        return "host-key-changed";
+      throw error;
+    }
+    const unpacked = await this.ssh.run(
       this.target,
       `tar -C ${this.remoteDir} -xzf ${remoteTarball} && rm ${remoteTarball} && chmod +x ${this.rigBinary}`,
     );
+    if (unpacked.hostKeyChanged) return "host-key-changed";
+    if (unpacked.code !== 0)
+      throw new Error(
+        `unpacking the payload on the box (exit ${unpacked.code}): ${unpacked.stderr.trim()}`,
+      );
+    return "landed";
   }
 
   /** where a build tarball of this name lives on the box */
