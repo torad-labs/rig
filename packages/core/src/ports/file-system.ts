@@ -17,6 +17,9 @@ export interface FileSystem {
   /** the file replaced by one rename from a sibling: a reader that may look at any moment (systemd
    *  on a daemon-reload another process triggers) sees the old text or the new, never a partial one */
   replaceText(path: string, text: string): Promise<void>;
+  /** `text` written at `path` only when nothing is there, in one step another writer cannot split (O_EXCL): true when
+   *  this call wrote it, false when something was already there */
+  claim(path: string, text: string): Promise<boolean>;
   writeBytes(path: string, bytes: Uint8Array): Promise<void>;
   /** write `bytes` at `offset` inside an existing file, leaving the rest untouched */
   writeAt(path: string, offset: number, bytes: Uint8Array): Promise<void>;

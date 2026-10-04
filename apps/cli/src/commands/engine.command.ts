@@ -16,7 +16,7 @@ import { type Args, flagBool, flagInt, flagStr, UsageError } from "../cli/args.t
 import { type Command, printJson } from "../cli/command.ts";
 
 const USAGE =
-  "engine test --ops OP,OP [--legacy K=V,...] [--filter CASE] | ident --model GGUF --text FILE --tag NAME [--ref KLD] [--ctx N] [--chunks N] | kld --model GGUF --text FILE --base KLD --tag NAME [--ctx N] [--chunks N] | ab --model GGUF [--a-lib DIR] [--a-env K=V,...] [--a-args 'ARGS'] [--b-lib DIR] [--b-env K=V,...] [--b-args 'ARGS'] [--pairs N] [--first N] [--reps N] | profile --model GGUF --tag NAME [--top N] | relink --head PATH,... [--jobs N]; each with --tree NAME|DIR [--run NAME] [--json], and all but relink with --gpu 0,1 [--lib DIR] [--env K=V,...] [--eta MIN] [--max-hold MIN] [--held]; the engine tool's own arguments after --   an engine change measured on a cmake tree (local/engine-build-trees/<name>), its evidence in local/engine-lab/<run>/: test-backend-ops per card, by default and under --legacy's switches; ident: the KLD base file byte for byte against --ref; kld: the KL divergence from --base; ab: llama-bench in back-to-back pairs of a and b, the order alternating, with the change's 95 % interval (--a-args and --b-args are llama-bench arguments one side adds to the ones after --, how two sides of one engine differ in a runtime setting: --b-args '-ctk q8_0 -ctv q8_0'); profile: llama-bench under nsys, each kernel billed its own time; relink: the tree's libggml-cuda with --head's paths as HEAD has them, into <run>/lib (a peer's uncommitted edit left out). A run holds its cards once through the machine's card lease (--held: already under it)";
+  "engine test --ops OP,OP [--legacy K=V,...] [--filter CASE] | ident --model GGUF --text FILE --tag NAME [--ref KLD] [--ctx N] [--chunks N] | kld --model GGUF --text FILE --base KLD --tag NAME [--ctx N] [--chunks N] | ab --model GGUF [--a-lib DIR] [--a-env K=V,...] [--a-args 'ARGS'] [--b-lib DIR] [--b-env K=V,...] [--b-args 'ARGS'] [--pairs N] [--first N] [--reps N] [--median] | profile --model GGUF --tag NAME [--top N] | relink --head PATH,... [--jobs N]; each with --tree NAME|DIR [--run NAME] [--json], and all but relink with --gpu 0,1 [--lib DIR] [--env K=V,...] [--eta MIN] [--max-hold MIN] [--held]; the engine tool's own arguments after --   an engine change measured on a cmake tree (local/engine-build-trees/<name>), its evidence in local/engine-lab/<run>/: test-backend-ops per card, by default and under --legacy's switches; ident: the KLD base file byte for byte against --ref; kld: the KL divergence from --base; ab: llama-bench in back-to-back pairs of a and b, the order alternating, with the change's 95 % interval, each arm's rate the mean of its repetitions after the first or with --median their median (--a-args and --b-args are llama-bench arguments one side adds to the ones after --, how two sides of one engine differ in a runtime setting: --b-args '-ctk q8_0 -ctv q8_0'); profile: llama-bench under nsys, each kernel billed its own time; relink: the tree's libggml-cuda with --head's paths as HEAD has them, into <run>/lib (a peer's uncommitted edit left out). A run holds its cards once through the machine's card lease (--held: already under it)";
 const FORM = USAGE.split("   ")[0] ?? USAGE;
 
 const COMMON = ["tree", "run", "json"];
@@ -51,6 +51,7 @@ const SUBCOMMANDS: Record<
       "pairs",
       "first",
       "reps",
+      "median",
     ],
     etaMin: 10,
     maxHoldMin: 120,
@@ -190,6 +191,7 @@ export function engineLabCommand(wiring: EngineLabWiring): Command {
             reps: positive(args, "reps") ?? 3,
             extra,
             run,
+            stat: flagBool(args, "median") ? "median" : "mean",
           });
           return show(log, args, result, describeAb);
         }
@@ -266,6 +268,7 @@ function describeAb(report: AbReport): string[] {
   const c = report.change;
   return [
     `a: libggml-cuda ${report.libs.a.sha}${sideArgs(report.args.a)}, b: libggml-cuda ${report.libs.b.sha}${sideArgs(report.args.b)} (${report.dir})`,
+    ...(report.stat === "median" ? ["each arm the median of its repetitions after the first"] : []),
     ...report.pairs.map(
       (pair) =>
         `pair ${pair.pair}: a ${pair.a.toFixed(1)}, b ${pair.b.toFixed(1)} t/s, ${pct(pair.change)}`,

@@ -86,6 +86,11 @@ export class InMemoryFileSystem implements FileSystem {
     this.replaced.push(path);
     this.put(path, text);
   }
+  async claim(path: string, text: string) {
+    if (this.files.has(path) || this.dirs.has(path)) return false;
+    this.put(path, text);
+    return true;
+  }
   async writeBytes(path: string, bytes: Uint8Array) {
     this.files.set(path, bytes);
     this.dirs.add(dirOf(path));

@@ -6,6 +6,10 @@ const card = v.strictObject({
   min_bandwidth: v.pipe(v.number(), v.minValue(0)),
   max_dph: v.pipe(v.number(), v.minValue(0)),
 });
+/** a box's hard stop, in hours after its create: from a quarter hour, so its timer is armed long before it is due (a
+ *  timer started past its date never fires), to a week, a date systemd's calendar reads */
+export const MAX_HOURS = { floor: 0.25, ceiling: 168 } as const;
+
 export const VastSchema = v.strictObject({
   rental: v.strictObject({
     image: v.string(),
@@ -14,6 +18,11 @@ export const VastSchema = v.strictObject({
     local_port: v.pipe(v.number(), v.integer(), v.minValue(1024), v.maxValue(65535)),
     idle_minutes: v.pipe(v.number(), v.integer(), v.minValue(1)),
     stopped_hours: v.pipe(v.number(), v.integer(), v.minValue(1)),
+    /** a box's hard stop, in hours after its create: absent from a vast.toml written before boxes had one */
+    max_hours: v.optional(
+      v.pipe(v.number(), v.minValue(MAX_HOURS.floor), v.maxValue(MAX_HOURS.ceiling)),
+      12,
+    ),
     remote_dir: v.pipe(v.string(), v.startsWith("/")),
     query: v.string(),
   }),

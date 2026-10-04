@@ -76,8 +76,19 @@ bytes = 43225116416
 # Rental 2a ran its legs on 737ee4450's library (evidence.md): the q8_0 cache, three slots, and 737ee4450's own KLD at
 # 0.919 to 0.978 of the gap MMQ already had. 0020175b4 reads the same logits to the printed digit, +6.15 % at pp512 and
 # +3.52 % at pp4096, decode inside noise.
+# 42f3b1be0 (fork main after PRs #87 and #88; TORAD.md has each row) is what moved it past 009073391: under -sm tensor one
+# host thread launched a captured evaluation's replay on each card in turn, and a replay holding more work than a card's
+# launch queue blocked it inside card 0's cudaGraphLaunch until card 1 reached the first all-reduce, which card 1 never
+# did, its launch behind that thread. One perplexity chunk at -b 9 -ub 9 on two RTX PRO 6000 stopped at 8k and 16k on
+# 0090733. e09841eff launches every other card from its own thread: 16k finishes, PPL 2.6523, and the KLD against 0090733
+# is 0.000000 at 2k and 16k, at -ub 1024 and -ub 9. 471feb45d and 1b2c4f07a take that thread's wake off decode: tg64
+# -0.03 % at depth 0 and -0.02 % at depth 16384 against the switch GGML_META_CAPTURE_THREADS=0, both intervals across
+# zero. With them: 310ddcf8e (the internal all-reduce refuses CUDA_LAUNCH_BLOCKING=1, which hung it) and 12569c3b0
+# (GGML_CUDA_COUNT_INFLIGHT, a diagnostic, off unless set). 37167fec9's in-flight bound is not in it. Served on rental 4
+# (2x RTX PRO 6000, Oct 3) by rig's rendered np3 serve: three ~30K sessions leave 14,042 MiB free, the np3 stress and
+# np1 tail repros pass, and served decode is 0.9990 of 009073391's (4 ABBA pairs, 95 % CI 0.9904 to 1.0076).
 [engine]
-sha = "009073391c9718aef0870d209e22502f8ccca3cc"
+sha = "42f3b1be0ab2ef79410084bde97eb4a4ff4e1c94"
 
 [speculative]
 type = "draft-mtp"             # the pack's own NextN block (glm5next.nextn_predict_layers = 1)

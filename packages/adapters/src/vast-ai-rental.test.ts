@@ -2,10 +2,47 @@ import { describe, expect, test } from "bun:test";
 import { FakeShell } from "@rig/testing";
 import { VastAiRental } from "./vast-ai-rental.ts";
 
-const listing = (ids: number[]) => ({
+/** one page of `vastai show instances-v1 --raw`: an object, its rows under "instances" and the next page's token */
+const listing = (ids: number[], nextToken: string | null = null) => ({
   code: 0,
-  stdout: JSON.stringify(ids.map((id) => ({ id, actual_status: "running", label: "rig" }))),
+  stdout: JSON.stringify({
+    success: true,
+    instances: ids.map((id) => ({ id, actual_status: "running", label: "rig" })),
+    next_token: nextToken,
+    total_instances: ids.length,
+  }),
   stderr: "",
+});
+
+describe("VastAiRental.list", () => {
+  test("every page of instances-v1, followed by its token: a box on the second page is listed", async () => {
+    // instances-v1 pages 25 at a time, and its -a gathers pages only for its tables: under --raw it returns the
+    // first page with the next one's token (vastai 1.0.12, cli/commands/instances.py:1270)
+    const shell = new FakeShell();
+    const vast = new VastAiRental(shell);
+    shell.on(/^vastai show instances-v1 --raw$/, listing([51000001, 54000001], "page-2"));
+    shell.on(/^vastai show instances-v1 --next-token page-2 --raw$/, listing([54030694]));
+    expect((await vast.list()).map((instance) => instance.id)).toEqual([
+      51000001, 54000001, 54030694,
+    ]);
+    expect(shell.calls.map((call) => call.join(" "))).toEqual([
+      "vastai show instances-v1 --raw",
+      "vastai show instances-v1 --next-token page-2 --raw",
+    ]);
+  });
+  test("a listing that is not instances-v1's object, or whose tokens never end, is not read as a listing", async () => {
+    const shell = new FakeShell();
+    const vast = new VastAiRental(shell);
+    // the old command's bare array
+    shell.on(/^vastai show instances-v1 --raw$/, {
+      code: 0,
+      stdout: JSON.stringify([{ id: 1000 }]),
+      stderr: "",
+    });
+    await expect(vast.list()).rejects.toThrow("no instances");
+    shell.on(/^vastai show instances-v1/, listing([1000], "again"));
+    await expect(vast.list()).rejects.toThrow("pages");
+  });
 });
 
 describe("VastAiRental.show: the host's own ssh endpoint", () => {
@@ -75,17 +112,24 @@ describe("VastAiRental.show", () => {
       stdout: "",
       stderr: "429 Too Many Requests",
     });
-    shell.on(/^vastai show instances --raw$/, {
+    shell.on(/^vastai show instances-v1 --raw$/, {
       code: 0,
-      stdout: JSON.stringify([{ id: 1000, actual_status: "running", label: "rig", gpu_util: 97 }]),
+      stdout: JSON.stringify({
+        instances: [{ id: 1000, actual_status: "running", label: "rig", gpu_util: 97 }],
+        next_token: null,
+      }),
       stderr: "",
     });
     expect(await vast.show(1000)).toMatchObject({ id: 1000, status: "running", gpuUtil: 97 });
     // the listing unreadable too (an expired key): nothing confirms the box is gone
-    shell.on(/^vastai show instances --raw$/, { code: 1, stdout: "", stderr: "401 Unauthorized" });
+    shell.on(/^vastai show instances-v1 --raw$/, {
+      code: 1,
+      stdout: "",
+      stderr: "401 Unauthorized",
+    });
     await expect(vast.show(1000)).rejects.toThrow("401 Unauthorized");
     // destroyed: show fails and the listing has no such box
-    shell.on(/^vastai show instances --raw$/, listing([56]));
+    shell.on(/^vastai show instances-v1 --raw$/, listing([56]));
     expect(await vast.show(1000)).toBeNull();
   });
 });
@@ -107,12 +151,13 @@ describe("VastAiRental.searchOffers and create", () => {
           dph_total: 0.261,
           inet_down_cost: 0.0027,
           storage_total_cost: 0.0741,
+          machine_id: 56409,
         },
       ]),
       stderr: "",
     });
     expect(await vast.searchOffers("num_gpus=2", 160)).toMatchObject([
-      { id: 50138870, dph: 0.261, downCostPerGb: 0.0027, storagePerHour: 0.0741 },
+      { id: 50138870, dph: 0.261, downCostPerGb: 0.0027, storagePerHour: 0.0741, machineId: 56409 },
     ]);
   });
 

@@ -3,11 +3,13 @@
 // its boxes (reliability) and downloads fast enough for the pack. vast applies a template's filters only to a search in
 // its console; a rent by offer id ignores them, so rig asks the market with them itself.
 // The all-in cost is pick-offer.sh's (box3, 2026-09-29), moved here: the hours at the offer's price with its disk, the
-// boot included (the image, the pack's download at the host's own speed, its hash and load), and the pack's gigabytes
+// boot included (the image, the pack's download at the rate rig measured on the host or its region, else the one it
+// declares (download-rates.ts), its hash and load), and the pack's gigabytes
 // at the host's download price, which is 17 times apart between hosts (0.003 to 0.051 $/GB): box 53422109 billed 135
 // GB at 0.051, $6.86, before it served anything. The cheapest by the hour is not the cheapest box.
 import type { Offer } from "@rig/core";
 import type { Head } from "@rig/head";
+import type { DownloadRate } from "./download-rates.ts";
 
 /** a host whose boxes stay up; the rentals so far all came from 0.97 and over */
 export const MIN_RELIABILITY = 0.97;
@@ -30,7 +32,15 @@ export interface OfferEstimate {
   minutesToServe: number;
   /** the session of `hours` after it, the boot and the pack's download, in dollars */
   dollars: number;
+  /** the download rate the boot was priced at: the host's measured pull where rig has one, else its declaration */
+  rate: DownloadRate;
 }
+
+/** what the host declares, the rate an offer is ranked on when rig has measured nothing there */
+export const declaredRate = (offer: Offer): DownloadRate => ({
+  mbps: offer.downMbps,
+  source: "declared",
+});
 
 /** the market query for the head's template: its filters as vast's search spells them */
 export function templateQuery(
@@ -54,21 +64,31 @@ export function templateQuery(
   return parts.join(" ");
 }
 
-/** what one offer costs to serve the pack for `hours`, and how long it takes to first serve */
-export function estimateOffer(offer: Offer, packBytes: number, hours: number): OfferEstimate {
-  const downloadSeconds = (packBytes * 8) / (Math.max(offer.downMbps, 1) * 1e6);
+/** what one offer costs to serve the pack for `hours`, and how long it takes to first serve, the pack pulled at `rate` */
+export function estimateOffer(
+  offer: Offer,
+  packBytes: number,
+  hours: number,
+  rate: DownloadRate = declaredRate(offer),
+): OfferEstimate {
+  const downloadSeconds = (packBytes * 8) / (Math.max(rate.mbps, 1) * 1e6);
   const reread = offer.ramGiB * 2 ** 30 < packBytes * 1.1 ? packBytes / DISK_BYTES_PER_SECOND : 0;
   const bootSeconds =
     START_SECONDS + downloadSeconds + packBytes / HASH_BYTES_PER_SECOND + LOAD_SECONDS + reread;
   const billedHours = hours + bootSeconds / 3600;
   // dph is priced with the box's disk already (Rental.searchOffers)
   const dollars = offer.dph * billedHours + (offer.downCostPerGb * packBytes) / 1e9;
-  return { offer, minutesToServe: bootSeconds / 60, dollars };
+  return { offer, minutesToServe: bootSeconds / 60, dollars, rate };
 }
 
 /** every offer, the cheapest all in first; a tie goes to the one that serves sooner */
-export function rankOffers(offers: Offer[], packBytes: number, hours: number): OfferEstimate[] {
+export function rankOffers(
+  offers: Offer[],
+  packBytes: number,
+  hours: number,
+  rateOf: (offer: Offer) => DownloadRate = declaredRate,
+): OfferEstimate[] {
   return offers
-    .map((offer) => estimateOffer(offer, packBytes, hours))
+    .map((offer) => estimateOffer(offer, packBytes, hours, rateOf(offer)))
     .sort((a, b) => a.dollars - b.dollars || a.minutesToServe - b.minutesToServe);
 }

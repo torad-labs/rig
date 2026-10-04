@@ -24,10 +24,16 @@ export const SAMPLER_PATHS: SamplerPaths = {
 export const rxBytes = (source = "/proc/net/dev"): string =>
   `awk '/:/ { name = $0; sub(/:.*/, "", name); gsub(/ /, "", name); rest = $0; sub(/^[^:]*:/, "", rest); split(rest, f, " "); if (name != "lo") s += f[1] } END { printf "%.0f", s }' ${source} 2>/dev/null`;
 
+/** the sampler's tick: a pull's seconds are its ticks times this */
+export const SAMPLER_TICK_SECONDS = 5;
+
 /** the script a box runs for ever: "epoch percent KB/s" a line, one per tick, the last hour kept. The percent is the
  *  busiest card's; the KB/s is what the box received over the tick, the pack being pulled, an image pushed to it, a
  *  clone, all of which leave the card and the server idle. */
-export function samplerScript(paths: SamplerPaths = SAMPLER_PATHS, tickSeconds = 5): string[] {
+export function samplerScript(
+  paths: SamplerPaths = SAMPLER_PATHS,
+  tickSeconds = SAMPLER_TICK_SECONDS,
+): string[] {
   return [
     `echo $$ > ${paths.pid}`,
     "n=0; p=; pt=",
@@ -47,7 +53,10 @@ export function samplerScript(paths: SamplerPaths = SAMPLER_PATHS, tickSeconds =
 }
 
 /** the samples of the last `windowSeconds`: `window=` the busiest card's peak, `download=` the average KB/s received
- *  (printed only when a sample in the window carries the column: the first generation's lines do not) */
-export function windowRead(samples: string, windowSeconds: number): string {
-  return `awk -v since=$(( $(date +%s) - ${windowSeconds} )) '$1 >= since { n++; if ($2 + 0 > m) m = $2 + 0; if (NF >= 3) { d += $3; dn++ } } END { if (n) print "window=" m; if (dn) printf "download=%d\\n", d / dn }' ${samples} 2>/dev/null`;
+ *  (printed only when a sample in the window carries the column: the first generation's lines do not), and `pull=` the
+ *  average KB/s over the ticks that received at least `pullKBps` and how many there were (printed only when one did).
+ *  The window's average is diluted by the ticks it spent not pulling (rental 2b's pull of the pack, 437.5 MB/s, read
+ *  218.7 in the window it ended in); the pulling ticks give the rate the host pulled at. */
+export function windowRead(samples: string, windowSeconds: number, pullKBps: number): string {
+  return `awk -v since=$(( $(date +%s) - ${windowSeconds} )) -v floor=${pullKBps} '$1 >= since { n++; if ($2 + 0 > m) m = $2 + 0; if (NF >= 3) { d += $3; dn++; if ($3 + 0 >= floor) { p += $3; pn++ } } } END { if (n) printf "window=%d\\n", m; if (dn) printf "download=%d\\n", d / dn; if (pn) printf "pull=%d %d\\n", p / pn, pn }' ${samples} 2>/dev/null`;
 }

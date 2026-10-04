@@ -273,7 +273,7 @@ describe("glm-5.3-flash", () => {
       cacheRam: 8192,
     });
     if (!r.ok) throw new Error(r.message);
-    const bin = `${root}/local/engine-builds/0090733-sm120`;
+    const bin = `${root}/local/engine-builds/42f3b1b-sm120`;
     expect(r.value.argv).toEqual([
       `${bin}/llama-server`,
       "-m",

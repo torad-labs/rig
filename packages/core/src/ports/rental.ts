@@ -17,6 +17,8 @@ export interface Offer {
   downCostPerGb: number;
   /** the disk's part of dph, in dollars an hour: what the box keeps billing once stopped */
   storagePerHour: number;
+  /** the host's machine, the same across its offers and rentals: what a measured download rate is kept by */
+  machineId: number;
 }
 /** a box from a stock image that rig ships itself to, or from a template whose image and on-start bring the head up */
 export type CreateOptions = { diskGb: number; label: string } & (

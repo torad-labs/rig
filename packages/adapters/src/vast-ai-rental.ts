@@ -5,6 +5,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CreateOptions, Instance, Offer, Rental, Shell, TemplateSpec } from "@rig/core";
 
+/** 2,500 instances at 25 a page: a token past it is the listing looping, not a listing */
+const MAX_LISTING_PAGES = 100;
+
 export class VastAiRental implements Rental {
   constructor(private readonly shell: Shell) {}
   private async json<T>(...args: string[]): Promise<T> {
@@ -62,6 +65,7 @@ export class VastAiRental implements Rental {
           downMbps: Number(row.inet_down ?? 0),
           downCostPerGb: Number(row.inet_down_cost ?? 0),
           storagePerHour: Number(row.storage_total_cost ?? 0),
+          machineId: Number(row.machine_id ?? 0),
         }),
       );
   }
@@ -116,9 +120,26 @@ export class VastAiRental implements Rental {
       return (await this.list()).find((instance) => instance.id === id) ?? null;
     }
   }
+  /** every instance, from `show instances-v1` (vastai 1.0.12 deprecates `show instances`). It pages 25 at a time, and
+   *  its -a gathers pages only for its tables: under --raw it returns the first page with the next one's token
+   *  (cli/commands/instances.py:1270), so every page is asked for by its token here. */
   async list() {
-    return (await this.json<Array<Record<string, unknown>>>("show", "instances")).map((raw) =>
-      this.toInstance(raw),
+    const rows: Array<Record<string, unknown>> = [];
+    let token: string | null = null;
+    for (let page = 1; page <= MAX_LISTING_PAGES; page++) {
+      const listed: { instances?: unknown; next_token?: string | null } = await this.json(
+        "show",
+        "instances-v1",
+        ...(token ? ["--next-token", token] : []),
+      );
+      if (!Array.isArray(listed.instances))
+        throw new Error(`vastai show instances-v1: no instances in page ${page}`);
+      rows.push(...(listed.instances as Array<Record<string, unknown>>));
+      token = listed.next_token ?? null;
+      if (!token) return rows.map((raw) => this.toInstance(raw));
+    }
+    throw new Error(
+      `vastai show instances-v1: a next page still named after ${MAX_LISTING_PAGES} pages`,
     );
   }
   /** over the REST API rather than the CLI: the registry login is a body field there, where the

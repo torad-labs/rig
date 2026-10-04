@@ -67,6 +67,20 @@ describe("readBenchRate", () => {
     const rate = readBenchRate(`{"samples_ts": [1, 2]}\n{"samples_ts": [3, 4]}`);
     expect(rate.ok).toBe(false);
   });
+  test("median: the middle of the repetitions after the first, which one slow repetition does not move", () => {
+    // a repetition at a box's low level (rental 2a read ~121 and ~152 tok/s on one box) drags the mean, not the median
+    const jsonl = `{"samples_ts": [ 90.0, 152.1, 151.7, 121.0, 152.4 ]}`;
+    const median = readBenchRate(jsonl, "median");
+    expect(median.ok && median.value.samples).toEqual([90, 152.1, 151.7, 121, 152.4]);
+    expect(median.ok && median.value.rate).toBeCloseTo(151.9, 9);
+    expect(readBenchRate(jsonl).ok && readBenchRate(jsonl, "mean")).toEqual(readBenchRate(jsonl));
+    const mean = readBenchRate(jsonl);
+    expect(mean.ok && mean.value.rate).toBeCloseTo(144.3, 6);
+    const odd = readBenchRate(`{"samples_ts": [ 2000, 2076.0, 1500.0, 2096.0 ]}`, "median");
+    expect(odd.ok && odd.value.rate).toBe(2076);
+    const one = readBenchRate(`{"samples_ts": [ 1500 ]}`, "median");
+    expect(one.ok && one.value.rate).toBe(1500);
+  });
 });
 
 describe("pairedChange", () => {

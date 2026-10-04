@@ -1,9 +1,10 @@
 # Renting a card for a head on vast.ai: what `rig vast up` asks the market for (`--gpus N` for a
-# multi-card box; the count is never written here, so a query cannot carry two). One box at a
-# time; its state lives in local/rented-box/. The image is stock CUDA devel on Ubuntu 24.04 (the box
-# builds the engine for its card unless local/rented-box/cached-builds has a cached tarball for that sm). The
-# server on the box binds loopback and is reached only through an ssh tunnel to local_port —
-# no credentials leave this machine and no vast port is mapped.
+# multi-card box; the count is never written here, so a query cannot carry two). Each box's state
+# lives in local/rented-box/boxes/<instance>/, with its own reaper, hard stop and tunnel. The image
+# is stock CUDA devel on Ubuntu 24.04 (the box builds the engine for its card unless
+# local/rented-box/cached-builds has a cached tarball for that sm). The server on the box binds
+# loopback and is reached only through an ssh tunnel to local_port (the next free port above it
+# for each further serving box) — no credentials leave this machine and no vast port is mapped.
 [rental]
 image = "nvidia/cuda:13.0.3-devel-ubuntu24.04"
 disk_gb = 40
@@ -11,6 +12,7 @@ label = "rig"
 local_port = 8100
 idle_minutes = 45              # a box nobody talks to is destroyed, not left billing overnight
 stopped_hours = 24             # a stopped box of rig's bills its disk: `rig vast sweep` destroys it after this
+max_hours = 12                 # every box is destroyed this long after create whatever it reads (--max-hours for one box)
 remote_dir = "/workspace/rig"
 query = "verified=true rentable=true reliability>0.98 cuda_max_good>=13.0 cpu_ram>=48 inet_down>=200 direct_port_count>=2"
 

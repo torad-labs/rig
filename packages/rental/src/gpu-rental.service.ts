@@ -11,6 +11,7 @@ import { basename, join } from "node:path";
 import type {
   Clock,
   FileSystem,
+  Git,
   Http,
   Instance,
   Layout,
@@ -21,7 +22,7 @@ import type {
   Ssh,
   Systemd,
 } from "@rig/core";
-import { ExitCode, fail, ok, type Result } from "@rig/core";
+import { BUILT_FROM, ExitCode, fail, ok, type Result } from "@rig/core";
 import type { Engine } from "@rig/engine";
 import {
   cacheRefusal,
@@ -37,17 +38,20 @@ import {
 import { publishedImage } from "@rig/image";
 import { type BoxState, billedCost, billedHours, RentalState } from "./box-state.ts";
 import { headDiskGb, headPackBytes } from "./box-template.ts";
-import { loadVastConfig, offerQuery, type VastConfig } from "./rental-config.ts";
+import { DownloadRates, describeRate, downloadRate } from "./download-rates.ts";
+import { loadVastConfig, MAX_HOURS, offerQuery, type VastConfig } from "./rental-config.ts";
+
+export { MAX_HOURS } from "./rental-config.ts";
+
 import { RentedBox } from "./rented-box.ts";
 import { type OfferEstimate, rankOffers, templateQuery } from "./template-offers.ts";
 import {
   IDLE_CHECK_MINUTES,
-  IDLE_SERVICE,
-  IDLE_TIMER,
   renderIdleService,
   renderIdleTimer,
+  renderStopService,
+  renderStopTimer,
   renderTunnelUnit,
-  TUNNEL_UNIT,
 } from "./units.ts";
 
 /** the card's utilization, as vast lists it, at which a box `vast up` rented is in use whatever its server says: an idle
@@ -70,9 +74,15 @@ export interface LiveGate {
   ): Promise<Result<{ dir: string; pass: boolean }>>;
 }
 
+/** what `rig --built-from` prints when bun run build compiled it: a tree id, -dirty after it when a source was not the
+ *  tree's */
+const STAMP = new RegExp(`^([0-9a-f]{40}|[0-9a-f]{64})(${BUILT_FROM.dirty})?$`);
+
 export interface RentGpuDeps {
   fs: FileSystem;
   shell: Shell;
+  /** HEAD's tree, which the dist/rig a box is shipped must have been built from */
+  git: Git;
   http: Http;
   rental: Rental;
   ssh: Ssh;
@@ -82,6 +92,8 @@ export interface RentGpuDeps {
   gate: LiveGate;
   /** how to invoke rig again, for the idle timer's unit */
   self: readonly string[];
+  /** the vast CLI by its absolute path, for the hard stop's lines that run no rig code (units.ts) */
+  vastai: string;
   home: string;
 }
 
@@ -103,6 +115,8 @@ export interface RentOptions {
   /** this box's idle budget, over vast.toml's idle_minutes: a job the server's counters cannot
    *  see (training beside it) needs longer, and the budget is still the cost cap */
   idleMinutes?: number | undefined;
+  /** this box's hard stop, in hours after its create, over vast.toml's max_hours */
+  maxHours?: number | undefined;
   /** ship the head's private [derive] assets too, so the box serves this machine's pack */
   private?: boolean;
 }
@@ -130,6 +144,11 @@ export const VM_ONSTART =
 /** `vast lab`: a card to measure on, with no head: the same offer query and idle budget as `up`, nothing private to
  *  hold back (a head's assets are not shipped at all) */
 export type LabOptions = Omit<RentOptions, "private"> & {
+  /** the head whose pack the box will pull: the offers are ranked by what the session costs all in, the pack's download
+   *  at each host's price per GB and its measured rate included, and the disk is sized to hold the pack */
+  pack?: Head | undefined;
+  /** the session's hours after the pack is pulled, priced into the ranking with --pack (1 when not given) */
+  hours?: number | undefined;
   /** rent a full virtual machine rather than a container, the one kind of box that runs docker: `rig e2e` and
    *  `rig image` both drive it, and a container box's dockerd cannot create its iptables chain or mount its
    *  overlayfs (measured on box 53914526, 2026-10-02). Takes VM_IMAGE unless `image` names another. */
@@ -149,6 +168,8 @@ export interface TemplateRentOptions {
   diskGb?: number | undefined;
   dryRun?: boolean;
   idleMinutes?: number | undefined;
+  /** the box's hard stop, in hours after its create, over vast.toml's max_hours */
+  maxHours?: number | undefined;
 }
 
 export interface RentReport {
@@ -192,19 +213,27 @@ export interface DownReport {
   cost?: number;
 }
 
+/** every box rig holds, the oldest first */
 export interface StatusReport {
-  box: BoxState | null;
+  boxes: BoxStatus[];
+}
+
+export interface BoxStatus {
+  box: BoxState;
   /** "unread" when the market could not be read: no evidence the box is gone */
   listed: boolean | "unread";
   status?: string;
-  hours?: number;
-  cost?: number;
+  hours: number;
+  cost: number;
   tunnelActive: boolean;
   healthy: boolean;
   /** whether the cost control runs; a box listed (or unread) without it has it re-armed by status */
-  idleTimer: "active" | "inactive" | "re-armed" | "none";
+  idleTimer: "active" | "inactive" | "re-armed";
   /** how the timer's last check ended: an active timer whose checks fail controls nothing */
-  idleCheck?: "ok" | "failed" | "unread";
+  idleCheck: "ok" | "failed" | "unread";
+  /** when the box is destroyed whatever it reads, and whether its timer runs (re-armed like the idle timer's); null
+   *  for a legacy box, created without one */
+  hardStop: { at: number; timer: "active" | "inactive" | "re-armed" } | null;
 }
 
 export interface IdleReport {
@@ -224,6 +253,8 @@ interface Pick {
   offer: Offer;
   query: string;
   label: string;
+  /** with a pack to price: the first offers, the cheapest all in first */
+  ranked?: OfferEstimate[];
 }
 
 /** a box with its ssh endpoint known */
@@ -242,6 +273,7 @@ const TEMPLATE_POLL_MS = 30_000;
 
 export class RentGpu {
   private readonly state: RentalState;
+  private readonly rates: DownloadRates;
 
   /** [loaded] is engine.toml as this binary read it, failed or not: down, status and idle-check
    *  never read the pin, so a checkout whose engine.toml this binary cannot read stops only up and
@@ -252,7 +284,8 @@ export class RentGpu {
     private readonly layout: Layout,
     private readonly loaded: Result<Engine>,
   ) {
-    this.state = new RentalState(deps.fs, layout);
+    this.state = new RentalState(deps.fs, layout, (message) => deps.log.warn(message));
+    this.rates = new DownloadRates(deps.fs, this.state.downloadRatesFile);
   }
 
   /** the pin; up and bench return the load failure before anything reads it */
@@ -297,19 +330,14 @@ export class RentGpu {
     if (!broughtUp.ok) return broughtUp;
     await remote.startServer(head.name);
 
-    const endpoint = await this.openTunnel(
-      config.value,
-      box.value,
-      head,
-      idleBudget(config.value, box.value),
-    );
+    const endpoint = await this.openTunnel(config.value, box.value, head);
     if ((await endpoint.waitHealthy(SERVER_HEALTHY_TIMEOUT_MS)) !== "healthy") {
       const tail = await remote.serverLogTail(30);
       const message = `the server did not become healthy through the tunnel (box ${box.value.instanceId} left running):\n${tail}`;
       return fail(ExitCode.Failure, message);
     }
-    await this.deps.fs.remove(this.state.idleFile);
-    await this.armIdleTimer();
+    await this.deps.fs.remove(this.state.files(box.value).idle);
+    await this.armIdleTimer(box.value);
 
     const serving = await endpoint.serving();
     // the answer must be the pinned pack this local head resolves to, the way head-bringup
@@ -348,19 +376,36 @@ export class RentGpu {
     const config = await loadVastConfig(this.deps.fs, this.layout);
     if (!config.ok) return config;
 
+    const { pack } = options;
+    const packGb = pack ? headDiskGb(pack) : 0;
+    if (pack && options.diskGb !== undefined && options.diskGb < packGb)
+      return fail(
+        ExitCode.Usage,
+        `--disk-gb ${options.diskGb} is smaller than ${pack.name}'s own ${packGb} GB: its pack would not fit`,
+      );
+    const diskGb = pack
+      ? (options.diskGb ?? Math.max(config.value.rental.disk_gb, packGb))
+      : options.diskGb;
+
     const ready = await this.preflight(options);
     if (!ready.ok) return ready;
 
-    const pick = await this.pickOffer(config.value, options);
+    const pick = await this.pickOffer(config.value, {
+      ...options,
+      diskGb,
+      ...(pack ? { priced: { bytes: headPackBytes(pack), hours: options.hours ?? 1 } } : {}),
+    });
     if (!pick.ok) return pick;
     if (options.dryRun) {
       this.deps.log.info("dry run: no box created");
-      return ok({ kind: "dry-run", pick: pick.value.offer, query: pick.value.query });
+      const { offer, query, ranked } = pick.value;
+      return ok({ kind: "dry-run", pick: offer, query, ...(ranked ? { ranked } : {}) });
     }
 
     const image = options.vm ? (options.image ?? VM_IMAGE) : options.image;
     const box = await this.createBox(config.value, null, pick.value.offer, {
       ...options,
+      diskGb,
       image,
       ...(options.vm ? { onstart: VM_ONSTART, vm: true } : {}),
     });
@@ -439,7 +484,10 @@ export class RentGpu {
     await this.deps.fs.mkdirp(this.state.dir);
     await this.deps.fs.writeText(this.state.path("offers.json"), JSON.stringify(offers, null, 2));
     if (offers.length === 0) return fail(ExitCode.Failure, `no offer matches: ${query}`);
-    const ranked = rankOffers(offers, packBytes, options.hours);
+    const pulls = await this.rates.all();
+    const ranked = rankOffers(offers, packBytes, options.hours, (offer) =>
+      downloadRate(offer, pulls),
+    );
     for (const each of ranked.slice(0, 5)) this.deps.log.info(`  ${describeEstimate(each)}`);
     const { budget } = options;
     const pick = ranked.find((each) => budget === undefined || each.dollars <= budget);
@@ -465,19 +513,15 @@ export class RentGpu {
       source: { templateHash: template.hashId },
       diskGb,
       idleMinutes: options.idleMinutes,
+      maxHours: options.maxHours,
     });
     if (!box.ok) return box;
     const remote = this.remote(config.value, box.value);
-    const endpoint = await this.openTunnel(
-      config.value,
-      box.value,
-      head,
-      idleBudget(config.value, box.value),
-    );
+    const endpoint = await this.openTunnel(config.value, box.value, head);
     const served = await this.awaitTemplateBoot(remote, box.value, endpoint);
     if (!served.ok) return served;
-    await this.deps.fs.remove(this.state.idleFile);
-    await this.armIdleTimer();
+    await this.deps.fs.remove(this.state.files(box.value).idle);
+    await this.armIdleTimer(box.value);
 
     const serving = await endpoint.serving();
     const expected = boxServedFile(head, false);
@@ -544,71 +588,119 @@ export class RentGpu {
     }
   }
 
-  async down(options: { all?: boolean } = {}): Promise<Result<DownReport>> {
+  /** `box` names one box; with none, the only box rig holds, and `all` every box it holds and every box of rig's label
+   *  the market lists that it does not (a box whose state was lost). Each box's units stop only once it is confirmed
+   *  gone: a destroy that fails (vast 5xx or 429, the box still listed) leaves a box billing, and its idle check and
+   *  hard stop must run again rather than have been disabled by the attempt. */
+  async down(
+    options: { all?: boolean; box?: number | undefined } = {},
+  ): Promise<Result<DownReport>> {
     const config = await loadVastConfig(this.deps.fs, this.layout);
     if (!config.ok) return config;
 
-    // The timer and the tunnel stop only once the box is confirmed gone: a destroy that fails
-    // (vast 5xx or 429, the box still listed) leaves a box billing, and its idle check must run
-    // again rather than have been disabled by the attempt.
-    const destroyed: number[] = [];
-    let billed: { hours: number; cost: number } | undefined;
-    const box = await this.state.box();
-    if (box) {
-      const gone = await this.destroy(box);
-      if (!gone.ok) return gone;
-      billed = gone.value;
-      destroyed.push(box.instanceId);
-    } else {
-      this.deps.log.info(`no box in ${this.state.dir}`);
+    if (options.all && options.box !== undefined)
+      return fail(
+        ExitCode.Usage,
+        "down takes --box or --all, not both: --all destroys every box rig holds",
+      );
+    const held = await this.state.boxes();
+    let boxes: BoxState[];
+    if (options.all) boxes = held;
+    else {
+      const named = this.named(held, options.box);
+      if (!named.ok) return named;
+      boxes = named.value ? [named.value] : [];
     }
-    await this.stopLocalUnits();
+    if (held.length === 0) this.deps.log.info(`no box in ${this.state.dir}`);
+    const destroyed: number[] = [];
+    let hours = 0;
+    let cost = 0;
+    // every box is tried, whatever vast answered for the one before it
+    const refused: string[] = [];
+    for (const box of boxes) {
+      const gone = await this.destroy(box);
+      if (!gone.ok) {
+        refused.push(gone.message);
+        continue;
+      }
+      hours += gone.value.hours;
+      cost += gone.value.cost;
+      destroyed.push(box.instanceId);
+    }
+    const billed = destroyed.length > 0 ? { hours, cost: Math.round(cost * 100) / 100 } : {};
 
     if (options.all) {
-      for (const instance of await this.forgottenBoxes(config.value, destroyed)) {
+      const known = held.map((box) => box.instanceId);
+      for (const instance of await this.forgottenBoxes(config.value, known)) {
         await this.deps.rental.destroy(instance.id);
         destroyed.push(instance.id);
         this.deps.log.info(`destroyed forgotten ${instance.label} box ${instance.id}`);
       }
     }
+    if (refused.length > 0) return fail(ExitCode.Failure, refused.join("\n"));
     return ok({ destroyed, ...billed });
   }
 
-  async status(): Promise<Result<StatusReport>> {
+  /** every box rig holds, or the one `box` names */
+  async status(options: { box?: number | undefined } = {}): Promise<Result<StatusReport>> {
     const config = await loadVastConfig(this.deps.fs, this.layout);
     if (!config.ok) return config;
-    const box = await this.state.box();
-    const tunnelActive = await this.deps.systemd.isActive(TUNNEL_UNIT);
-    const healthy = await this.endpoint(config.value).healthy();
-    if (!box) return ok({ box: null, listed: false, tunnelActive, healthy, idleTimer: "none" });
+    const held = await this.state.boxes();
+    let boxes = held;
+    if (options.box !== undefined) {
+      const named = this.named(held, options.box);
+      if (!named.ok) return named;
+      boxes = named.value ? [named.value] : [];
+    }
+    const statuses: BoxStatus[] = [];
+    for (const box of boxes) statuses.push(await this.boxStatus(config.value, box));
+    return ok({ boxes: statuses });
+  }
 
+  private async boxStatus(config: VastConfig, box: BoxState): Promise<BoxStatus> {
+    const files = this.state.files(box);
+    const tunnelActive = await this.deps.systemd.isActive(files.tunnelUnit);
+    const endpoint = this.endpoint(config, box);
+    const healthy = endpoint ? await endpoint.healthy() : false;
     const listing = await this.listing(box);
     const hours = billedHours(box, this.deps.clock.now());
     // A box billing with its cost control dead is the one state status must not only report:
     // 2026-09-24 the timer went inactive at 09:08 with no stop in the journal, and box 52390478
     // billed idle until a person noticed (8.3 h, ~$11.63). A market that cannot be read is no
-    // evidence the box is gone, so the timer is re-armed then too.
-    const timerActive = await this.deps.systemd.isActive(IDLE_TIMER);
-    let idleTimer: StatusReport["idleTimer"] = timerActive ? "active" : "inactive";
+    // evidence the box is gone, so the timer is re-armed then too. The hard stop's timer the same.
+    const billing = listing === "unread" ? "may be billing" : "is billing";
+    const timerActive = await this.deps.systemd.isActive(files.idleTimer);
+    let idleTimer: BoxStatus["idleTimer"] = timerActive ? "active" : "inactive";
     if (listing !== null && !timerActive) {
-      await this.armIdleTimer();
-      const billing = listing === "unread" ? "may be billing" : "is billing";
+      await this.armIdleTimer(box);
       this.deps.log.warn(
-        `box ${box.instanceId} ${billing} and ${IDLE_TIMER} was not running: re-armed it (idle budget ${idleBudget(config.value, box)} min)`,
+        `box ${box.instanceId} ${billing} and ${files.idleTimer} was not running: re-armed it (idle budget ${idleBudget(config, box)} min)`,
       );
       idleTimer = "re-armed";
     }
+    let hardStop: BoxStatus["hardStop"] = null;
+    if (files.stopTimer && box.stopAt !== undefined) {
+      const stopActive = await this.deps.systemd.isActive(files.stopTimer);
+      hardStop = { at: box.stopAt, timer: stopActive ? "active" : "inactive" };
+      if (listing !== null && !stopActive) {
+        await this.armStopTimer(box);
+        this.deps.log.warn(
+          `box ${box.instanceId} ${billing} and ${files.stopTimer} was not running: re-armed it`,
+        );
+        hardStop = { at: box.stopAt, timer: "re-armed" };
+      }
+    }
     // An active timer whose checks fail is as dead as a stopped one (2026-09-25: fourteen checks
     // exited 1 while the timer read active), so the last check's result is part of the answer.
-    const lastCheck = await this.deps.systemd.lastResult(IDLE_SERVICE);
-    const idleCheck: StatusReport["idleCheck"] =
+    const lastCheck = await this.deps.systemd.lastResult(files.idleService);
+    const idleCheck: BoxStatus["idleCheck"] =
       lastCheck === null ? "unread" : lastCheck === "success" ? "ok" : "failed";
     if (idleCheck === "failed") {
       this.deps.log.warn(
-        `${IDLE_SERVICE}'s last run ended ${lastCheck}: the box's cost control is not running; see journalctl --user -u ${IDLE_SERVICE}`,
+        `${files.idleService}'s last run ended ${lastCheck}: box ${box.instanceId}'s cost control is not running; see journalctl --user -u ${files.idleService}`,
       );
     }
-    return ok({
+    return {
       box,
       listed: listing === "unread" ? "unread" : listing !== null,
       ...(listing !== null && listing !== "unread" ? { status: listing.status } : {}),
@@ -618,7 +710,22 @@ export class RentGpu {
       healthy,
       idleTimer,
       idleCheck,
-    });
+      hardStop,
+    };
+  }
+
+  /** the box `id` names among those held, or the only one held when it names none (null when none is held); several
+   *  held and none named is a usage error: a command that acts on a box never guesses which */
+  private named(held: BoxState[], id: number | undefined): Result<BoxState | null> {
+    if (id !== undefined) {
+      const box = held.find((each) => each.instanceId === id);
+      return box ? ok(box) : fail(ExitCode.Failure, `no box ${id} held here (${this.state.dir})`);
+    }
+    if (held.length <= 1) return ok(held[0] ?? null);
+    return fail(
+      ExitCode.Usage,
+      `${held.length} boxes held: name one with --box (${held.map((box) => box.instanceId).join(", ")})`,
+    );
   }
 
   /** the market's listing of the box: null when it lists no such box, "unread" when the market
@@ -637,14 +744,23 @@ export class RentGpu {
    *  goes down. A server that does not answer is no evidence of idleness: a box running other
    *  work on its card (a gate, a build, a training run) never serves, and was destroyed with
    *  that work still running (2026-09-24, 12.4 h in, the GPU at 100 %). */
-  async idleCheck(): Promise<Result<IdleReport>> {
+  async idleCheck(options: { box?: number | undefined } = {}): Promise<Result<IdleReport>> {
     const config = await loadVastConfig(this.deps.fs, this.layout);
     if (!config.ok) return config;
-    const box = await this.state.box();
+    const held = await this.state.boxes();
+    // a box's own timer names it; one destroyed since is no box, not a failure of the unit that outlived it
+    const named =
+      options.box !== undefined
+        ? ok(held.find((each) => each.instanceId === options.box) ?? null)
+        : this.named(held, undefined);
+    if (!named.ok) return named;
+    const box = named.value;
     if (!box) return ok({ action: "no-box" });
 
     const now = this.deps.clock.now();
-    const activity = await this.endpoint(config.value).activity();
+    // a box that serves nothing has no tunnel, and must never read another box's server through its port
+    const endpoint = this.endpoint(config.value, box);
+    const activity = (await endpoint?.activity()) ?? { key: "unreachable", busy: 0 };
     const listing = await this.listing(box);
     let gpuUtil = listing === "unread" ? undefined : listing?.gpuUtil;
     // The card is read on the box itself, at the address rig recorded for it, for a box vast lists as running: vast
@@ -653,12 +769,20 @@ export class RentGpu {
     // does not answer, with nothing from vast to go on, is idle by the same clock (else a VM that lost its network bills
     // for ever); one that answers without a number stays a card nobody read, below.
     let readOnBox: "box" | "unreachable" | undefined;
-    let seenOnBox: { now: number; window: number | null; downloadKBps: number | null } | undefined;
+    let seenOnBox:
+      | {
+          now: number;
+          window: number | null;
+          downloadKBps: number | null;
+          pull: { kibPerSecond: number; seconds: number } | null;
+        }
+      | undefined;
     if (listing && listing !== "unread" && listing.status === "running") {
       if (box.sshHost && box.sshPort) {
         const seen = await this.remote(config.value, box).cardUtilization(
           20_000,
           CARD_WINDOW_SECONDS,
+          DOWNLOAD_BUSY_KBPS,
         );
         if (seen === "unreachable") {
           if (gpuUtil === undefined) {
@@ -695,7 +819,8 @@ export class RentGpu {
     const gpuBusy = gpuUtil !== undefined && gpuUtil >= GPU_BUSY_PCT;
     const downloadKBps = seenOnBox?.downloadKBps ?? null;
     const downloading = downloadKBps !== null && downloadKBps >= DOWNLOAD_BUSY_KBPS;
-    const last = await this.state.idle();
+    if (seenOnBox?.pull) await this.recordPull(box, seenOnBox.pull, now);
+    const last = await this.state.idle(box);
     const gpu =
       readOnBox === "unreachable"
         ? "box unreachable over ssh"
@@ -712,7 +837,7 @@ export class RentGpu {
         `idle-check box ${box.instanceId}: server ${activity.key}, ${card}: ${verdict}`,
       );
     if (activity.busy > 0 || gpuBusy || downloading || activity.key !== last?.key) {
-      await this.state.saveIdle({ key: activity.key, ts: now });
+      await this.state.saveIdle(box, { key: activity.key, ts: now });
       const verdict = activity.busy > 0 || gpuBusy || downloading ? "active" : "changed";
       said(verdict);
       return ok({ action: verdict });
@@ -733,19 +858,32 @@ export class RentGpu {
     this.deps.log.info(
       `idle for ${idleMinutes} min (${activity.key}, ${card}) — destroying the box`,
     );
-    const down = await this.down();
+    const down = await this.down({ box: box.instanceId });
     if (!down.ok) return down;
     return ok({ action: "destroyed", idleMinutes });
   }
 
   /** the head's gates on the box (its one card, the server stopped meanwhile), the run pulled
    *  back, then the live probes through the tunnel */
-  async bench(head: Head): Promise<Result<BenchReport>> {
+  async bench(
+    head: Head,
+    options: { box?: number | undefined } = {},
+  ): Promise<Result<BenchReport>> {
     if (!this.loaded.ok) return this.loaded;
     const config = await loadVastConfig(this.deps.fs, this.layout);
     if (!config.ok) return config;
-    const box = await this.state.box();
+    const held = await this.state.boxes();
+    // with several boxes and none named, the one serving this head
+    const serving = held.filter((each) => each.head === head.name);
+    const named = this.named(
+      options.box === undefined && serving.length === 1 ? serving : held,
+      options.box,
+    );
+    if (!named.ok) return named;
+    const box = named.value;
     if (!box) return fail(ExitCode.Failure, "no box; run: rig vast up");
+    const endpoint = this.endpoint(config.value, box);
+    if (!endpoint) return fail(ExitCode.Failure, `box ${box.instanceId} serves no head`);
     const remote = this.remote(config.value, box);
 
     const pulledRuns = join(this.state.pulledRunsDir, pulledRunName(box));
@@ -756,7 +894,6 @@ export class RentGpu {
     if (remoteRunDir) await this.pullGateRun(remote, remoteRunDir, pulledRuns);
     await remote.startServer(head.name);
 
-    const endpoint = this.endpoint(config.value);
     if ((await endpoint.waitHealthy(SERVER_HEALTHY_TIMEOUT_MS)) !== "healthy") {
       const message = `the server did not come back healthy after the gates (box ${box.instanceId})`;
       return fail(ExitCode.Failure, message);
@@ -783,14 +920,20 @@ export class RentGpu {
     /** the box runs a compiled rig shipped from here; a template box runs its image's */
     binary?: boolean;
   }): Promise<Result<void>> {
-    if (!options.dryRun && (await this.state.box())) {
-      const message = `a box already exists (${this.state.instanceFile}); run: rig vast down`;
+    // a box rented by a rig that held one keeps that rig's units, which act on the only box: it stays alone until down
+    const legacy = await this.state.legacyBox();
+    if (!options.dryRun && legacy) {
+      const message = `box ${legacy.instanceId} was rented by a rig that held one box (${this.state.legacyInstanceFile}), and none is rented beside it; run: rig vast down --box ${legacy.instanceId}`;
       return fail(ExitCode.Failure, message);
     }
     const rigBinary = join(this.layout.root, "dist", "rig");
     if (options.binary !== false && !options.dryRun && !(await this.deps.fs.exists(rigBinary))) {
       const message = `${rigBinary} is missing — the box runs the compiled rig (run: bun run build)`;
       return fail(ExitCode.Failure, message);
+    }
+    if (options.binary !== false && !options.dryRun) {
+      const stale = await this.notBuiltFromHead(rigBinary);
+      if (stale) return fail(ExitCode.Failure, stale);
     }
     const pubkeyPath = join(this.deps.home, ".ssh", "id_ed25519.pub");
     if (!(await this.deps.fs.exists(pubkeyPath))) {
@@ -809,6 +952,32 @@ export class RentGpu {
       this.deps.log.info(`registered ${pubkeyPath} with vast`);
     }
     return ok(undefined);
+  }
+
+  /** why dist/rig is not the rig to ship, or null when it is: a box runs the rig shipped to it, and one built before a
+   *  change refuses that change's flags there, on cards paid by the hour (rental 3: `engine ab --median` exited 64 on
+   *  the box, its dist/rig older than #168). In a checkout it must be HEAD's tree. An install (install.sh) is a release
+   *  unpacked with no .git: its dist/rig is the release's, built by release.yml from the tag's tree, so a clean stamp
+   *  is enough there. The checkout is rig's own .git, not a HEAD git finds above the root (a home kept in git). */
+  private async notBuiltFromHead(rigBinary: string): Promise<string | null> {
+    const checkout = await this.deps.fs.exists(join(this.layout.root, ".git"));
+    const remedy = checkout
+      ? "rebuild it from this checkout: bun run build"
+      : "install a release (install.sh), or ship from a checkout after bun run build";
+    const said = await this.deps.shell.run([rigBinary, BUILT_FROM.flag], { timeoutMs: 30_000 });
+    const stamp = STAMP.exec(said.code === 0 ? said.stdout.trim() : "");
+    if (!stamp)
+      return `${rigBinary} does not say what it was built from (compiled before rig stamped its build, or not by bun run build); ${remedy}`;
+    const [built, tree, dirty] = stamp;
+    if (!checkout)
+      return dirty ? `${rigBinary} was built with changes no commit has; ${remedy}` : null;
+    const head = await this.deps.git.revParse(this.layout.root, BUILT_FROM.ref);
+    if (!head)
+      return `${this.layout.root} is a git checkout with no HEAD to check ${rigBinary} against`;
+    if (built === head) return null;
+    if (tree === head)
+      return `${rigBinary} was built with changes HEAD does not hold, so the box would run code no commit has; commit them, then rebuild: bun run build`;
+    return `${rigBinary} was built from tree ${tree!.slice(0, 12)}, and HEAD's tree is ${head.slice(0, 12)}; ${remedy}`;
   }
 
   /** the profile serve would give the offered cards and the cache formats it would run there, refused before the
@@ -834,11 +1003,12 @@ export class RentGpu {
     return ok(undefined);
   }
 
-  /** the market queried, the offers kept beside the box's state, the cheapest one picked;
-   *  a card this engine is not measured on needs --allow-arch */
+  /** the market queried, the offers kept beside the box's state, the cheapest one picked: by the hour, or all in when a
+   *  pack is priced. The download floor and the pack's pull read each host's measured rate where rig has one
+   *  (download-rates.ts), its declaration where not. A card this engine is not measured on needs --allow-arch. */
   private async pickOffer(
     config: VastConfig,
-    options: RentOptions & { vm?: boolean },
+    options: RentOptions & { vm?: boolean; priced?: { bytes: number; hours: number } },
   ): Promise<Result<Pick>> {
     const diskGb = options.diskGb ?? config.rental.disk_gb;
     const shape = {
@@ -853,7 +1023,20 @@ export class RentGpu {
     // the floor goes in the query, not only over the rows read: vast returns at most 64 offers, cheapest first, and a
     // fast one dearer than the 64th would never be seen
     const found = await this.deps.rental.searchOffers(query, diskGb);
-    const offers = floor === undefined ? found : found.filter((each) => each.downMbps >= floor);
+    const pulls = await this.rates.all();
+    const rateOf = (offer: Offer) => downloadRate(offer, pulls);
+    const offers =
+      floor === undefined
+        ? found
+        : found.filter((each) => {
+            const rate = rateOf(each);
+            if (rate.mbps >= floor) return true;
+            // the query let it through on what it declares: say why it is skipped
+            this.deps.log.info(
+              `  offer ${each.id} at ${describeRate(rate, each)} (declares ${each.downMbps.toFixed(0)}): under the floor`,
+            );
+            return false;
+          });
     await this.deps.fs.mkdirp(this.state.dir);
     if (offers.length === 0 && floor !== undefined) {
       // nothing at the floor: read the market without it, to say what the fastest is and what it costs
@@ -863,17 +1046,23 @@ export class RentGpu {
       );
       await this.deps.fs.writeText(this.state.path("offers.json"), JSON.stringify(market, null, 2));
       if (market.length === 0) return fail(ExitCode.Failure, `no offer matches: ${query}`);
-      const fastest = market.reduce((best, each) => (each.downMbps > best.downMbps ? each : best));
+      const fastest = market.reduce((best, each) =>
+        rateOf(each).mbps > rateOf(best).mbps ? each : best,
+      );
       return fail(
         ExitCode.Failure,
-        `no offer downloads at ${floor} Mb/s or more: the fastest is offer ${fastest.id} at ${fastest.downMbps.toFixed(0)} Mb/s, $${fastest.dph.toFixed(3)}/h (${fastest.geo}); nothing rented`,
+        `no offer downloads at ${floor} Mb/s or more: the fastest is offer ${fastest.id} at ${describeRate(rateOf(fastest), fastest)}, $${fastest.dph.toFixed(3)}/h (${fastest.geo}); nothing rented`,
       );
     }
     await this.deps.fs.writeText(this.state.path("offers.json"), JSON.stringify(offers, null, 2));
     if (offers.length === 0) return fail(ExitCode.Failure, `no offer matches: ${query}`);
-    for (const offer of offers.slice(0, 5)) this.deps.log.info(`  ${describeOffer(offer)}`);
+    const { priced } = options;
+    const ranked = priced ? rankOffers(offers, priced.bytes, priced.hours, rateOf) : undefined;
+    if (ranked)
+      for (const each of ranked.slice(0, 5)) this.deps.log.info(`  ${describeEstimate(each)}`);
+    else for (const offer of offers.slice(0, 5)) this.deps.log.info(`  ${describeOffer(offer)}`);
 
-    const offer = offers[0]!;
+    const offer = ranked ? ranked[0]!.offer : offers[0]!;
     if (!this.engine.supports(offer.computeCap) && !options.allowArch) {
       const measured = this.engine.archs.map((arch) => `sm_${arch.cap}`).join(", ");
       const message = `${offer.gpu} is sm_${offer.computeCap}, not a card this engine is measured on (${measured}); --allow-arch ${offer.computeCap} rents it for a benchmark`;
@@ -883,7 +1072,25 @@ export class RentGpu {
     this.deps.log.info(
       `pick: offer ${offer.id} ${label} at $${offer.dph.toFixed(3)}/h, ${offer.geo}, sm_${offer.computeCap}`,
     );
-    return ok({ offer, query, label });
+    return ok({ offer, query, label, ...(ranked ? { ranked: ranked.slice(0, 5) } : {}) });
+  }
+
+  /** a window's pull kept for the next rental's ranking. Keeping it is never the cost control's failure: a write that
+   *  fails is said, and the check goes on to its verdict. */
+  private async recordPull(
+    box: BoxState,
+    pull: { kibPerSecond: number; seconds: number },
+    now: number,
+  ): Promise<void> {
+    try {
+      const mbps = await this.rates.record(box, pull, now);
+      if (mbps !== null)
+        this.deps.log.info(
+          `box ${box.instanceId} measured ${mbps} Mb/s pulling (${box.geo}${box.machineId ? `, machine ${box.machineId}` : ""}): the next rental is ranked on it`,
+        );
+    } catch (error) {
+      this.deps.log.warn(`box ${box.instanceId}'s pull was not kept: ${(error as Error).message}`);
+    }
   }
 
   /** the instance created and recorded, then waited for: running, with an ssh endpoint that
@@ -903,16 +1110,43 @@ export class RentGpu {
       vm?: boolean | undefined;
       diskGb?: number | undefined;
       idleMinutes?: number | undefined;
+      maxHours?: number | undefined;
     },
   ): Promise<Result<ReachableBox>> {
-    const instanceId = await this.deps.rental.create(offer.id, {
-      ...(options.source ?? {
-        image: options.image ?? config.rental.image,
-        ...(options.onstart ? { onstart: options.onstart } : {}),
-      }),
-      diskGb: options.diskGb ?? config.rental.disk_gb,
-      label: config.rental.label,
-    });
+    const maxHours = options.maxHours ?? config.rental.max_hours;
+    if (!(maxHours >= MAX_HOURS.floor && maxHours <= MAX_HOURS.ceiling))
+      return fail(
+        ExitCode.Usage,
+        `a hard stop takes ${MAX_HOURS.floor} to ${MAX_HOURS.ceiling} hours, not ${maxHours}`,
+      );
+    // each serving box its own end of a tunnel here: the lowest port from vast.toml's local_port that no held box has
+    // and this rental claims, so that two rentals at once, which both read no box on it, never share it
+    const held = await this.state.boxes();
+    let localPort: number | undefined;
+    if (head) {
+      const taken = new Set(held.map((each) => this.localPort(config, each)));
+      localPort = config.rental.local_port;
+      while (
+        taken.has(localPort) ||
+        !(await this.deps.fs.claim(this.state.portClaim(localPort), `${this.deps.clock.now()}\n`))
+      )
+        localPort++;
+    }
+    let instanceId: number;
+    try {
+      instanceId = await this.deps.rental.create(offer.id, {
+        ...(options.source ?? {
+          image: options.image ?? config.rental.image,
+          ...(options.onstart ? { onstart: options.onstart } : {}),
+        }),
+        diskGb: options.diskGb ?? config.rental.disk_gb,
+        label: config.rental.label,
+      });
+    } catch (error) {
+      if (localPort !== undefined) await this.deps.fs.remove(this.state.portClaim(localPort));
+      throw error;
+    }
+    const createdAt = this.deps.clock.now();
     const box: BoxState = {
       instanceId,
       offerId: offer.id,
@@ -921,32 +1155,37 @@ export class RentGpu {
       cap: offer.computeCap,
       dph: offer.dph,
       geo: offer.geo,
-      createdAt: this.deps.clock.now(),
+      ...(offer.machineId ? { machineId: offer.machineId } : {}),
+      createdAt,
       ...(head ? { head: head.name } : {}),
       ...(options.idleMinutes !== undefined ? { idleMinutes: options.idleMinutes } : {}),
+      ...(localPort !== undefined ? { localPort } : {}),
+      stopAt: createdAt + maxHours * 3_600_000,
     };
     await this.state.saveBox(box);
-    // the box bills from here, so the reaper is installed and armed here and not after provisioning:
-    // a box whose provisioning dies, or whose `up` is killed, otherwise bills with nothing watching
+    // the box bills from here, so the reaper and the hard stop are installed and armed here and not after
+    // provisioning: a box whose provisioning dies, or whose `up` is killed, otherwise bills with nothing watching
     // it. Only tunnel.env needs the box's endpoint, so the units themselves can be written now.
     await this.installUnits(
       config,
+      box,
       head?.port ?? null,
       options.idleMinutes ?? config.rental.idle_minutes,
     );
-    await this.armIdleTimer();
+    await this.armIdleTimer(box);
+    await this.armStopTimer(box);
     this.deps.log.info(
-      `instance ${instanceId} created; waiting for it to run (image pull + vast's sshd install)`,
+      `instance ${instanceId} created; waiting for it to run (image pull + vast's sshd install); hard stop at ${new Date(box.stopAt!).toISOString()} (${maxHours} h)`,
     );
 
     const running = await this.waitRunning(instanceId);
     if (!running) {
-      await this.abandon(instanceId, "never reached running");
-      return fail(ExitCode.Failure, `instance ${instanceId} never reached running; destroyed`);
+      const outcome = await this.abandon(box, "never reached running");
+      return fail(ExitCode.Failure, `instance ${instanceId} never reached running; ${outcome}`);
     }
     if (!running.sshHost || !running.sshPort) {
-      await this.abandon(instanceId, "no ssh endpoint");
-      return fail(ExitCode.Failure, `instance ${instanceId} has no ssh endpoint; destroyed`);
+      const outcome = await this.abandon(box, "no ssh endpoint");
+      return fail(ExitCode.Failure, `instance ${instanceId} has no ssh endpoint; ${outcome}`);
     }
     // a VM is reached at the host's own address when vast gives one: its proxy port refused ssh for 13 minutes
     // after `running` on a VM whose direct port answered at the first try (box 53930876). A container keeps the
@@ -958,15 +1197,15 @@ export class RentGpu {
       sshPort: direct?.port ?? running.sshPort,
     };
     await this.state.saveBox(reachable);
-    await this.deps.fs.remove(this.state.knownHosts);
+    await this.deps.fs.remove(this.state.files(reachable).knownHosts);
 
     const said = await this.waitSsh(
       this.remote(config, reachable),
       options.vm ? VM_SSH_ATTEMPTS : SSH_ATTEMPTS,
     );
     if (said !== null) {
-      await this.abandon(instanceId, "ssh never answered");
-      const message = `ssh never answered at ${reachable.sshHost}:${reachable.sshPort} (last ssh said: ${said}); destroyed ${instanceId}`;
+      const outcome = await this.abandon(reachable, "ssh never answered");
+      const message = `ssh never answered at ${reachable.sshHost}:${reachable.sshPort} (last ssh said: ${said}); ${outcome}`;
       return fail(ExitCode.Failure, message);
     }
     this.deps.log.info(`ssh up: root@${reachable.sshHost}:${reachable.sshPort}`);
@@ -1128,46 +1367,55 @@ export class RentGpu {
     return true;
   }
 
-  /** the tunnel unit to the box's ssh endpoint and the idle timer, installed and started */
+  /** the box's tunnel unit to its ssh endpoint, installed and started */
   private async openTunnel(
     config: VastConfig,
     box: ReachableBox,
     head: Head,
-    idleMinutes: number,
   ): Promise<HeadEndpoint> {
-    await this.deps.fs.writeText(
-      this.state.tunnelEnv,
-      `HOST=${box.sshHost}\nPORT=${box.sshPort}\n`,
-    );
-    await this.installUnits(config, head.port, idleMinutes);
-    await this.deps.systemd.restart(TUNNEL_UNIT);
-    return this.endpoint(config);
+    const files = this.state.files(box);
+    await this.deps.fs.writeText(files.tunnelEnv, `HOST=${box.sshHost}\nPORT=${box.sshPort}\n`);
+    await this.installUnits(config, box, head.port, idleBudget(config, box));
+    await this.deps.systemd.restart(files.tunnelUnit);
+    // a serving box always has a port here (createBox)
+    return this.endpoint(config, box)!;
   }
 
-  /** the idle reaper's units, and the tunnel's unless the box serves nothing (`remotePort` null) */
+  /** the box's idle reaper and hard stop, and its tunnel unless it serves nothing (`remotePort` null) */
   private async installUnits(
     config: VastConfig,
+    box: BoxState,
     remotePort: number | null,
     idleMinutes: number,
   ): Promise<void> {
     const dir = this.deps.systemd.unitDir();
     await this.deps.fs.mkdirp(dir);
+    const files = this.state.files(box);
+    const localPort = this.localPort(config, box);
+    const { instanceId } = box;
     const units: Record<string, string> = {
-      ...(remotePort === null
+      ...(remotePort === null || localPort === null
         ? {}
         : {
-            [TUNNEL_UNIT]: renderTunnelUnit({
-              tunnelEnv: this.state.tunnelEnv,
-              knownHosts: this.state.knownHosts,
-              localPort: config.rental.local_port,
+            [files.tunnelUnit]: renderTunnelUnit({
+              tunnelEnv: files.tunnelEnv,
+              knownHosts: files.knownHosts,
+              localPort,
               remotePort,
             }),
           }),
-      [IDLE_SERVICE]: renderIdleService({
-        self: this.deps.self,
-        idleMinutes,
-      }),
-      [IDLE_TIMER]: renderIdleTimer(),
+      [files.idleService]: renderIdleService({ self: this.deps.self, idleMinutes, instanceId }),
+      [files.idleTimer]: renderIdleTimer(instanceId),
+      ...(files.stopService && files.stopTimer && box.stopAt !== undefined
+        ? {
+            [files.stopService]: renderStopService({
+              self: this.deps.self,
+              vastai: this.deps.vastai,
+              instanceId,
+            }),
+            [files.stopTimer]: renderStopTimer({ instanceId, at: box.stopAt }),
+          }
+        : {}),
     };
     let changed = false;
     for (const [name, text] of Object.entries(units)) {
@@ -1182,26 +1430,46 @@ export class RentGpu {
 
   // --- down ---
 
-  private async stopLocalUnits(): Promise<void> {
-    try {
-      await this.deps.systemd.disable(IDLE_TIMER);
-    } catch {
-      /* not installed yet */
+  /** The box's units, once it is gone: its timers disabled and stopped, its tunnel stopped, and their files removed.
+   *  Never a service: the box goes down from inside its own idle check or hard stop, and stopping that service would
+   *  kill the process doing it. */
+  private async retireUnits(box: BoxState): Promise<void> {
+    const files = this.state.files(box);
+    const timers = [files.idleTimer, files.stopTimer].filter((unit) => unit !== null);
+    for (const timer of timers) {
+      try {
+        await this.deps.systemd.disable(timer);
+      } catch {
+        /* not installed yet */
+      }
     }
-    for (const unit of [IDLE_TIMER, TUNNEL_UNIT]) {
+    for (const unit of [...timers, files.tunnelUnit]) {
       try {
         await this.deps.systemd.stop(unit);
       } catch {
         /* not installed yet */
       }
     }
+    const dir = this.deps.systemd.unitDir();
+    const units = [files.idleService, files.stopService, files.tunnelUnit, ...timers];
+    for (const unit of units) if (unit !== null) await this.deps.fs.remove(join(dir, unit));
+    await this.deps.systemd.daemonReload();
   }
 
-  /** the idle timer enabled as well as started, so a restart of the user manager or of this
-   *  machine arms it again while the box bills; `down` disables it */
-  private async armIdleTimer(): Promise<void> {
-    await this.deps.systemd.enable(IDLE_TIMER);
-    await this.deps.systemd.restart(IDLE_TIMER);
+  /** the box's idle timer enabled as well as started, so a restart of the user manager or of this machine arms it
+   *  again while the box bills; `down` disables it */
+  private async armIdleTimer(box: BoxState): Promise<void> {
+    const { idleTimer } = this.state.files(box);
+    await this.deps.systemd.enable(idleTimer);
+    await this.deps.systemd.restart(idleTimer);
+  }
+
+  /** the box's hard stop, enabled and started the same way; a legacy box has none */
+  private async armStopTimer(box: BoxState): Promise<void> {
+    const { stopTimer } = this.state.files(box);
+    if (!stopTimer || box.stopAt === undefined) return;
+    await this.deps.systemd.enable(stopTimer);
+    await this.deps.systemd.restart(stopTimer);
   }
 
   /** destroyed and confirmed gone from the listing, whatever the destroy call answered: a box
@@ -1225,7 +1493,8 @@ export class RentGpu {
     this.deps.log.info(
       `destroyed box ${box.instanceId} after ${hours} h (~$${cost} at $${box.dph}/h)`,
     );
-    await this.state.clear();
+    await this.state.clear(box);
+    await this.retireUnits(box);
     return ok({ hours, cost });
   }
 
@@ -1241,9 +1510,17 @@ export class RentGpu {
     return new RentedBox(this.deps.ssh, this.state.target(box), config.rental.remote_dir);
   }
 
-  private endpoint(config: VastConfig): HeadEndpoint {
-    const url = `http://127.0.0.1:${config.rental.local_port}`;
-    return new HeadEndpoint(this.deps.http, this.deps.clock, url);
+  /** this machine's end of the box's tunnel: its own port, or vast.toml's for a legacy box that serves; null for a box
+   *  that serves nothing */
+  private localPort(config: VastConfig, box: BoxState): number | null {
+    return box.localPort ?? (box.head ? config.rental.local_port : null);
+  }
+
+  /** the box's server through its tunnel; null for a box that serves nothing */
+  private endpoint(config: VastConfig, box: BoxState): HeadEndpoint | null {
+    const port = this.localPort(config, box);
+    if (port === null) return null;
+    return new HeadEndpoint(this.deps.http, this.deps.clock, `http://127.0.0.1:${port}`);
   }
 
   private buildTarballName(offer: Offer): string {
@@ -1277,12 +1554,12 @@ export class RentGpu {
     return said;
   }
 
-  private async abandon(instanceId: number, why: string): Promise<void> {
-    this.deps.log.error(`instance ${instanceId} ${why}; destroying it`);
-    await this.deps.rental.destroy(instanceId);
-    await this.state.clear();
-    // the timer armed at create has no box left to watch, and no state to read if it fired
-    await this.stopLocalUnits();
+  /** a box that will never serve, destroyed as `down` destroys one: its state and units go only once vast no longer
+   *  lists it, since vastai answers 0 to a destroy vast refused. What to say of it */
+  private async abandon(box: BoxState, why: string): Promise<string> {
+    this.deps.log.error(`instance ${box.instanceId} ${why}; destroying it`);
+    const gone = await this.destroy(box);
+    return gone.ok ? `destroyed ${box.instanceId}` : gone.message;
   }
 }
 
@@ -1305,7 +1582,7 @@ function idleExposure(minutes: number, dph: number): string {
 /** one ranked offer as the log shows it: its price all in first */
 function describeEstimate(each: OfferEstimate): string {
   const { offer } = each;
-  return `~$${each.dollars.toFixed(2)} all in, serving in ~${Math.round(each.minutesToServe)} min: ${describeOffer(offer)}, $${offer.downCostPerGb.toFixed(3)}/GB down`;
+  return `~$${each.dollars.toFixed(2)} all in, serving in ~${Math.round(each.minutesToServe)} min: ${describeOffer(offer)}, $${offer.downCostPerGb.toFixed(3)}/GB down, pulls at ${describeRate(each.rate, offer)}`;
 }
 
 /** one market row as the log shows it */

@@ -26,6 +26,16 @@ export class BunFileSystem implements FileSystem {
     await Bun.write(staged, text);
     await fsp.rename(staged, path);
   }
+  async claim(path: string, text: string) {
+    await fsp.mkdir(dirname(path), { recursive: true });
+    try {
+      await fsp.writeFile(path, text, { flag: "wx" });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+  }
   async writeBytes(path: string, bytes: Uint8Array) {
     await fsp.mkdir(dirname(path), { recursive: true });
     await Bun.write(path, bytes);

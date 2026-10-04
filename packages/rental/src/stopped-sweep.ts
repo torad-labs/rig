@@ -41,7 +41,7 @@ export class SweepStopped {
     private readonly deps: SweepDeps,
     private readonly layout: Layout,
   ) {
-    this.state = new RentalState(deps.fs, layout);
+    this.state = new RentalState(deps.fs, layout, (message) => deps.log.warn(message));
   }
 
   private get seenFile() {
@@ -62,7 +62,7 @@ export class SweepStopped {
     const ours = (box: Instance) =>
       box.label === label || (box.label === "" && fromRegistry(box.image));
 
-    const tracked = (await this.state.box())?.instanceId;
+    const tracked = new Set((await this.state.boxes()).map((box) => box.instanceId));
     let listed: Instance[];
     try {
       listed = await rental.list();
@@ -78,7 +78,7 @@ export class SweepStopped {
     const report: SweepReport = { destroyed: [], stopped: [] };
     const asked: number[] = [];
     for (const box of listed) {
-      if (!ours(box) || box.id === tracked || box.status === "running") continue;
+      if (!ours(box) || tracked.has(box.id) || box.status === "running") continue;
       const since = seen[box.id] ?? now;
       const hours = Math.round(((now - since) / HOUR_MS) * 10) / 10;
       report.stopped.push({ id: box.id, status: box.status, hours });

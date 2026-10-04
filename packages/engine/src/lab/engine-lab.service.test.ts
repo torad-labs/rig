@@ -233,6 +233,42 @@ describe("EngineLab.ab", () => {
     expect(more.ok && more.value.libs.b.path).toBe("/libs/new/libggml-cuda.so.0");
   });
 
+  test("median: each arm is the median of its repetitions, so one slow repetition moves the mean's change and not its", async () => {
+    const { p, lab } = setup();
+    // b is 10 % faster on every repetition but its last, which reads at a box's low level
+    p.shell.on(/^\S*llama-bench /, (_cmd, opts) => ({
+      code: 0,
+      stdout:
+        opts?.env?.SIDE === "b"
+          ? `{"samples_ts": [1, 110, 110, 20]}\n`
+          : `{"samples_ts": [1, 100, 100, 100]}\n`,
+      stderr: "",
+    }));
+    const req = {
+      target: target(),
+      model: "/m.gguf",
+      a: { env: { SIDE: "a" } },
+      b: { lib: "/libs/new", env: { SIDE: "b" } },
+      pairs: 2,
+      first: 1,
+      reps: 4,
+      extra: ["-p", "4096"],
+      run: "ab-median",
+    };
+    const median = await lab.ab({ ...req, stat: "median" });
+    expect(median.ok && median.value.stat).toBe("median");
+    for (const pair of median.ok ? median.value.pairs : []) {
+      expect(pair).toMatchObject({ a: 100, b: 110 });
+      expect(pair.change).toBeCloseTo(0.1, 12);
+    }
+    expect(median.ok && median.value.change.mean).toBeCloseTo(0.1, 12);
+    // the same run's files read again by the mean, today's rate and the default
+    const mean = await lab.ab({ ...req, pairs: 0, first: 3 });
+    expect(mean.ok && mean.value.stat).toBe("mean");
+    expect(mean.ok && mean.value.change).toMatchObject({ n: 2 });
+    expect(mean.ok && mean.value.change.mean).toBeCloseTo(80 / 100 - 1, 12);
+  });
+
   test("a side's args reach its own bench and no other: the KV cache type, one engine, one library", async () => {
     const { p, lab } = setup();
     const argvs: string[][] = [];

@@ -3,6 +3,7 @@ import { ExitCode } from "@rig/core";
 import type { Head } from "@rig/head";
 import type {
   BenchReport,
+  BoxStatus,
   GuardBox,
   PublishTemplate,
   RentGpu,
@@ -10,11 +11,12 @@ import type {
   SweepStopped,
   TemplateReport,
 } from "@rig/rental";
+import { MAX_HOURS } from "@rig/rental";
 import { type Args, flagBool, flagInt, flagNumber, flagStr } from "../cli/args.ts";
 import { type Command, type LoadHead, reportJson, reportLine, withHead } from "../cli/command.ts";
 
 const USAGE =
-  "vast up <head> --gpu CLASS [--gpus N] [--max-price DPH] [--min-down-mbps MBPS] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--private] [--dry-run] | up <head> --template [--hours H] [--budget USD] [--disk-gb GB] [--max-price DPH] [--idle-minutes MIN] [--dry-run] | lab --gpu CLASS [--gpus N] [--max-price DPH] [--min-down-mbps MBPS] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--vm] [--image IMAGE] [--dry-run] | down [--all] | status | idle-check | sweep | bench <head> | template <head> [--disk-gb GB] [--idle-minutes MIN] [--max-hours H] [--dry-run] | guard <head> [--idle-minutes MIN] [--max-hours H] [--stop-when FILE], each with [--json]   a rented card as a head, reached through an ssh tunnel (its public pack; --private ships the private [derive] assets); up --template: a box from the head's published template, the offers ranked by the session's cost all in for --hours (1 when not given), its own on-start bringing the head up, and none over --budget dollars all in rented; --min-down-mbps (up, lab): no offer whose host downloads slower is rented, and with none above it the command fails naming the fastest offer and its price (up --template floors at 800 and ranks by download time already); lab: a rented card with no head, rig and the engine pin shipped to it for `rig engine` measurements over ssh (nothing is fetched, derived or served, and the idle reaper reads the card alone); --vm asks the market for a host that rents a full virtual machine and brings it up from vast's KVM image, the one kind of box that runs docker (`rig e2e`, `rig image`), and --image names another image for either kind; sweep: destroy rig's boxes stopped for vast.toml's stopped_hours (hourly from rig-vast-sweep.timer); template: the head's pushed image as a vast template a box comes up from with no script, and the sweep's timer armed; guard: on such a box, stop it after the idle budget, after --max-hours whatever it reads, or at once when --stop-when's file exists";
+  "vast up <head> --gpu CLASS [--gpus N] [--max-price DPH] [--min-down-mbps MBPS] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--max-hours H] [--private] [--dry-run] | up <head> --template [--hours H] [--budget USD] [--disk-gb GB] [--max-price DPH] [--idle-minutes MIN] [--max-hours H] [--dry-run] | lab --gpu CLASS [--gpus N] [--max-price DPH] [--min-down-mbps MBPS] [--geo GEO] [--allow-arch CAP] [--disk-gb GB] [--idle-minutes MIN] [--max-hours H] [--vm] [--image IMAGE] [--pack HEAD [--hours H]] [--dry-run] | down [--box ID] [--all] | status [--box ID] | idle-check [--box ID] | sweep | bench <head> [--box ID] | template <head> [--disk-gb GB] [--idle-minutes MIN] [--max-hours H] [--dry-run] | guard <head> [--idle-minutes MIN] [--max-hours H] [--stop-when FILE], each with [--json]   a rented card as a head, reached through an ssh tunnel (its public pack; --private ships the private [derive] assets); rig holds any number of boxes, each with its own idle reaper and its own hard stop, a persistent timer armed at create that destroys it --max-hours after (vast.toml's max_hours when not given) whatever it reads; down, status, idle-check and bench act on the box --box names, or the only one held (down --all: every one, and rig's boxes the market lists that none of them is); up --template: a box from the head's published template, the offers ranked by the session's cost all in for --hours (1 when not given), its own on-start bringing the head up, and none over --budget dollars all in rented; --min-down-mbps (up, lab): no offer whose host downloads slower is rented, and with none above it the command fails naming the fastest offer and its price (up --template floors at 800 and ranks by download time already); a host's download is the rate rig measured on a box rented from it, else its region's, else what it declares; --pack (lab): the offers ranked by the session all in for --hours (1 when not given), the pack's download at each host's price per GB and rate included, the disk sized for the pack; lab: a rented card with no head, rig and the engine pin shipped to it for `rig engine` measurements over ssh (nothing is fetched, derived or served, and the idle reaper reads the card alone); --vm asks the market for a host that rents a full virtual machine and brings it up from vast's KVM image, the one kind of box that runs docker (`rig e2e`, `rig image`), and --image names another image for either kind; sweep: destroy rig's boxes stopped for vast.toml's stopped_hours (hourly from rig-vast-sweep.timer); template: the head's pushed image as a vast template a box comes up from with no script, and the sweep's timer armed; guard: on such a box, stop it after the idle budget, after --max-hours whatever it reads, or at once when --stop-when's file exists";
 const FORM = USAGE.split("   ")[0] ?? USAGE;
 /** the flags each subcommand takes: main holds a command's flags to its whole usage line, which names every
  *  subcommand's, so `down --dry-run` would pass there and destroy the box; each subcommand refuses any other */
@@ -28,6 +30,7 @@ export const SUBCOMMAND_FLAGS: Record<string, readonly string[]> = {
     "allow-arch",
     "disk-gb",
     "idle-minutes",
+    "max-hours",
     "private",
     "dry-run",
     "template",
@@ -44,16 +47,19 @@ export const SUBCOMMAND_FLAGS: Record<string, readonly string[]> = {
     "allow-arch",
     "disk-gb",
     "idle-minutes",
+    "max-hours",
     "vm",
     "image",
+    "pack",
+    "hours",
     "dry-run",
     "json",
   ],
-  down: ["all", "json"],
-  status: ["json"],
-  "idle-check": ["json"],
+  down: ["box", "all", "json"],
+  status: ["box", "json"],
+  "idle-check": ["box", "json"],
   sweep: ["json"],
-  bench: ["json"],
+  bench: ["box", "json"],
   template: ["disk-gb", "idle-minutes", "max-hours", "dry-run", "json"],
   guard: ["idle-minutes", "max-hours", "stop-when", "json"],
 };
@@ -128,6 +134,8 @@ export function gpuRentalCommand(
                 );
                 return ExitCode.Usage;
               }
+              const maxHours = hardStopHours(args, log);
+              if (maxHours === null) return ExitCode.Usage;
               const result = await service.upFromTemplate(head, {
                 hours,
                 budget,
@@ -135,6 +143,7 @@ export function gpuRentalCommand(
                 maxDph: flagNumber(args, "max-price"),
                 dryRun: flagBool(args, "dry-run"),
                 idleMinutes,
+                maxHours,
               });
               return reportJson(log, args, result);
             }
@@ -155,6 +164,8 @@ export function gpuRentalCommand(
               );
               return ExitCode.Usage;
             }
+            const maxHours = hardStopHours(args, log);
+            if (maxHours === null) return ExitCode.Usage;
             const result = await service.up(head, {
               gpu,
               gpus,
@@ -165,6 +176,7 @@ export function gpuRentalCommand(
               allowArch: flagStr(args, "allow-arch"),
               diskGb,
               idleMinutes,
+              maxHours,
               private: flagBool(args, "private"),
             });
             return reportJson(log, args, result);
@@ -185,33 +197,62 @@ export function gpuRentalCommand(
             );
             return ExitCode.Usage;
           }
-          const result = await service.lab({
-            gpu,
-            gpus,
-            maxDph: flagNumber(args, "max-price"),
-            minDownMbps,
-            geo: flagStr(args, "geo"),
-            dryRun: flagBool(args, "dry-run"),
-            allowArch: flagStr(args, "allow-arch"),
-            diskGb,
-            idleMinutes,
-            vm: flagBool(args, "vm"),
-            image: flagStr(args, "image"),
-          });
-          return reportJson(log, args, result);
+          const maxHours = hardStopHours(args, log);
+          if (maxHours === null) return ExitCode.Usage;
+          const pack = flagStr(args, "pack");
+          const hours = flagNumber(args, "hours");
+          if (hours !== undefined && (!pack || !(hours > 0))) {
+            log.error(
+              "usage: --hours prices the session --pack names, and takes a number above zero",
+            );
+            return ExitCode.Usage;
+          }
+          const lab = (head?: Head) =>
+            service.lab({
+              gpu,
+              gpus,
+              maxDph: flagNumber(args, "max-price"),
+              minDownMbps,
+              geo: flagStr(args, "geo"),
+              dryRun: flagBool(args, "dry-run"),
+              allowArch: flagStr(args, "allow-arch"),
+              diskGb,
+              idleMinutes,
+              maxHours,
+              vm: flagBool(args, "vm"),
+              image: flagStr(args, "image"),
+              pack: head,
+              hours,
+            });
+          if (pack === undefined) return reportJson(log, args, await lab());
+          return withHead(pack, "vast lab --pack <head>", loadHead, log, async (head) =>
+            reportJson(log, args, await lab(head)),
+          );
         }
-        case "down":
-          return reportJson(log, args, await service.down({ all: flagBool(args, "all") }));
-        case "status":
-          return reportLine(log, args, await service.status(), describeStatus);
-        case "idle-check":
-          return reportJson(log, args, await service.idleCheck());
+        case "down": {
+          const box = boxId(args, log);
+          if (box === null) return ExitCode.Usage;
+          return reportJson(log, args, await service.down({ all: flagBool(args, "all"), box }));
+        }
+        case "status": {
+          const box = boxId(args, log);
+          if (box === null) return ExitCode.Usage;
+          return reportLine(log, args, await service.status({ box }), describeStatus);
+        }
+        case "idle-check": {
+          const box = boxId(args, log);
+          if (box === null) return ExitCode.Usage;
+          return reportJson(log, args, await service.idleCheck({ box }));
+        }
         case "sweep":
           return reportJson(log, args, await sweep.run());
-        case "bench":
+        case "bench": {
+          const box = boxId(args, log);
+          if (box === null) return ExitCode.Usage;
           return withHead(name, "vast bench <head>", loadHead, log, async (head) =>
-            reportLine(log, args, await service.bench(head), describeBench),
+            reportLine(log, args, await service.bench(head, { box }), describeBench),
           );
+        }
         case "template":
           return withHead(name, "vast template <head>", loadHead, log, async (head) => {
             if (!template) {
@@ -271,15 +312,40 @@ function positiveInt(args: Args, name: string): number | undefined | null {
   return value !== undefined && value > 0 ? value : null;
 }
 
+/** `--box`: a whole number above zero, undefined when absent, null (said) when it is not one */
+function boxId(args: Args, log: Log): number | undefined | null {
+  const box = positiveInt(args, "box");
+  if (box === null) log.error("usage: --box takes a box's instance id");
+  return box;
+}
+
+/** `--max-hours` for a rental: its hard stop's hours, in MAX_HOURS's range; undefined when absent, null (said) when
+ *  out of it */
+function hardStopHours(args: Args, log: Log): number | undefined | null {
+  const hours = flagNumber(args, "max-hours");
+  if (hours === undefined || (hours >= MAX_HOURS.floor && hours <= MAX_HOURS.ceiling)) return hours;
+  log.error(`usage: --max-hours takes ${MAX_HOURS.floor} to ${MAX_HOURS.ceiling} hours`);
+  return null;
+}
+
+/** one line a box */
 function describeStatus(status: StatusReport): string {
-  const tunnel = `tunnel ${status.tunnelActive ? "active" : "down"}`;
-  if (!status.box) return `no box; ${tunnel}`;
+  if (status.boxes.length === 0) return "no box";
+  return status.boxes.map(describeBox).join("\n");
+}
+
+function describeBox(status: BoxStatus): string {
   const listed =
     status.listed === "unread" ? "vast UNREAD" : status.listed ? status.status : "NOT LISTED";
-  const server = `server ${status.healthy ? "healthy" : "unreachable"}`;
+  const serves = status.box.head || status.box.legacy;
+  const tunnel = serves ? `tunnel ${status.tunnelActive ? "active" : "down"}, ` : "";
+  const server = serves ? `server ${status.healthy ? "healthy" : "unreachable"}, ` : "";
   const timer = `idle timer ${status.idleTimer === "re-armed" ? "WAS NOT RUNNING, re-armed" : status.idleTimer}`;
   const check = status.idleCheck === "failed" ? ", its last check FAILED" : "";
-  return `box ${status.box.instanceId} ${status.box.gpu} $${status.box.dph}/h: ${listed}, ${status.hours} h (~$${status.cost}); ${tunnel}, ${server}, ${timer}${check}`;
+  const stop = status.hardStop
+    ? `, hard stop ${new Date(status.hardStop.at).toISOString()}${status.hardStop.timer === "active" ? "" : status.hardStop.timer === "re-armed" ? " (WAS NOT RUNNING, re-armed)" : " (NOT RUNNING)"}`
+    : ", no hard stop";
+  return `box ${status.box.instanceId} ${status.box.gpu} $${status.box.dph}/h: ${listed}, ${status.hours} h (~$${status.cost}); ${tunnel}${server}${timer}${check}${stop}`;
 }
 
 function describeBench(bench: BenchReport): string {

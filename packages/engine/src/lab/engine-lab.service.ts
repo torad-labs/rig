@@ -7,6 +7,7 @@
 import { dirname, join } from "node:path";
 import { ExitCode, fail, type Layout, ok, type Ports, type Result } from "@rig/core";
 import {
+  type ArmRate,
   type KernelShare,
   type KldSummary,
   type OpsVerdict,
@@ -100,6 +101,8 @@ export interface AbReport {
   args: { a: string[]; b: string[] };
   /** every pair in the run's directory, an earlier invocation's included (--first continues a run) */
   pairs: AbPair[];
+  /** how each arm's repetitions made its rate */
+  stat: ArmRate;
   change: PairedChange;
 }
 
@@ -307,6 +310,8 @@ export class EngineLab {
     reps: number;
     extra: string[];
     run: string;
+    /** each arm's rate from its repetitions: their mean unless "median" */
+    stat?: ArmRate;
   }): Promise<Result<AbReport>> {
     const { shell, fs, log } = this.ports;
     const dir = await this.open(req.run);
@@ -360,13 +365,15 @@ export class EngineLab {
       }
       log.info(`pair ${pair}: ${rates.join("; ")}`);
     }
-    const pairs = await this.pairsIn(dir);
+    const stat = req.stat ?? "mean";
+    const pairs = await this.pairsIn(dir, stat);
     if (!pairs.ok) return pairs;
     return ok({
       dir,
       libs: { a: libA.value, b: libB.value },
       args,
       pairs: pairs.value,
+      stat,
       change: pairedChange(pairs.value.map((pair) => pair.change)),
     });
   }
@@ -550,15 +557,15 @@ export class EngineLab {
   }
 
   /** the pairs ab-<n>-a/b.jsonl in `dir`, from 1 up to the first one missing either side */
-  private async pairsIn(dir: string): Promise<Result<AbPair[]>> {
+  private async pairsIn(dir: string, stat: ArmRate): Promise<Result<AbPair[]>> {
     const { fs } = this.ports;
     const pairs: AbPair[] = [];
     for (let pair = 1; ; pair++) {
       const [pa, pb] = [join(dir, `ab-${pair}-a.jsonl`), join(dir, `ab-${pair}-b.jsonl`)];
       if (!(await fs.exists(pa)) || !(await fs.exists(pb))) break;
-      const a = readBenchRate(await fs.readText(pa));
+      const a = readBenchRate(await fs.readText(pa), stat);
       if (!a.ok) return a;
-      const b = readBenchRate(await fs.readText(pb));
+      const b = readBenchRate(await fs.readText(pb), stat);
       if (!b.ok) return b;
       pairs.push({
         pair,

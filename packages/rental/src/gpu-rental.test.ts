@@ -4,7 +4,7 @@ import { layoutAt, ok } from "@rig/core";
 import { loadEngine } from "@rig/engine";
 import { loadHead } from "@rig/head";
 import { fakePorts, putHead, repoRoot } from "@rig/testing";
-import { headPackBytes } from "./box-template.ts";
+import { headDiskGb, headPackBytes } from "./box-template.ts";
 import { type LiveGate, RentGpu, VM_ONSTART } from "./gpu-rental.service.ts";
 import { loadVastConfig, offerQuery } from "./rental-config.ts";
 
@@ -20,6 +20,8 @@ const engine = await (async () => {
   return e.value;
 })();
 const vastToml = await Bun.file(`${root}/vast.toml`).text();
+/** HEAD's tree in the fixture checkout, and the stamp of a dist/rig built from it */
+const TREE = "47c0853456eff6e35f31bf988a784c15f8690f19";
 
 const h100: Offer = {
   id: 50262229,
@@ -37,6 +39,7 @@ const h100: Offer = {
   downMbps: 219,
   downCostPerGb: 0.003,
   storagePerHour: 0.01,
+  machineId: 41200,
 };
 
 /** boxServes: the pack the box answers /props with — its public pack, the default a box derives
@@ -48,6 +51,9 @@ async function setup(boxServes: "public" | "served" = "public") {
   p.fs.put("/r/engine/engine.toml", engineToml);
   p.fs.put("/r/vast.toml", vastToml);
   p.fs.put("/r/dist/rig", "binary");
+  p.fs.put("/r/.git/HEAD", "ref: refs/heads/main\n"); // a checkout: rig's own .git at its root
+  p.git.heads.set("/r", TREE);
+  p.shell.on(/^\/r\/dist\/rig --built-from$/, { code: 0, stdout: `${TREE}\n`, stderr: "" });
   p.fs.put("/home/u/.ssh/id_ed25519.pub", "ssh-ed25519 AAAAKEY marcos");
   const head = await loadHead(p.fs, layout, "bonsai-2-27b");
   const engine = await loadEngine(p.fs, layout);
@@ -67,7 +73,13 @@ async function setup(boxServes: "public" | "served" = "public") {
     model_path: `/workspace/rig/local/packs/bonsai-2-27b/${boxPack}`,
     total_slots: 16,
   });
-  const deps = { ...p, gate, self: ["/r/dist/rig"], home: "/home/u" };
+  const deps = {
+    ...p,
+    gate,
+    self: ["/r/dist/rig"],
+    vastai: "/home/u/.local/bin/vastai",
+    home: "/home/u",
+  };
   const uc = new RentGpu(deps, layout, engine);
   return { p, head: head.value, uc, gateRuns, layout, deps };
 }
@@ -175,38 +187,67 @@ describe("vast up", () => {
         `/r/local/rented-box/cached-builds/engine-sm90-${engine.sha7}.tar.gz`,
       ],
     ]);
-    expect(p.fs.text("/r/local/rented-box/tunnel.env")).toBe("HOST=ssh5.vast.ai\nPORT=12345\n");
-    expect(JSON.parse(p.fs.text("/r/local/rented-box/instance.json")!)).toMatchObject({
+    expect(p.fs.text("/r/local/rented-box/boxes/1000/tunnel.env")).toBe(
+      "HOST=ssh5.vast.ai\nPORT=12345\n",
+    );
+    const saved = JSON.parse(p.fs.text("/r/local/rented-box/boxes/1000/instance.json")!);
+    expect(saved).toMatchObject({
       instanceId: 1000,
       cap: "90",
       head: "bonsai-2-27b",
       sshPort: 12345,
+      localPort: 8100,
     });
-    // armed at create, before provisioning can fail; armed again at READY, which is idempotent
+    // armed at create, before provisioning can fail, the hard stop with the reaper; the reaper again at READY,
+    // which is idempotent
     expect(p.systemd.ops).toEqual([
       "daemon-reload",
-      "enable rig-vast-idle.timer",
-      "restart rig-vast-idle.timer",
-      "restart rig-vast-tunnel.service",
-      "enable rig-vast-idle.timer",
-      "restart rig-vast-idle.timer",
+      "enable rig-vast-idle-1000.timer",
+      "restart rig-vast-idle-1000.timer",
+      "enable rig-vast-stop-1000.timer",
+      "restart rig-vast-stop-1000.timer",
+      "restart rig-vast-tunnel-1000.service",
+      "enable rig-vast-idle-1000.timer",
+      "restart rig-vast-idle-1000.timer",
     ]);
     // each unit replaced by a rename: a reload another process triggers never reads half a file
-    expect(p.fs.replaced).toEqual(
-      ["rig-vast-tunnel.service", "rig-vast-idle.service", "rig-vast-idle.timer"].map(
-        (unit) => `/home/u/.config/systemd/user/${unit}`,
-      ),
+    const units = "/home/u/.config/systemd/user";
+    expect(p.fs.replaced.filter((path) => path.startsWith(units))).toEqual(
+      [
+        "rig-vast-tunnel-1000.service",
+        "rig-vast-idle-1000.service",
+        "rig-vast-idle-1000.timer",
+        "rig-vast-stop-1000.service",
+        "rig-vast-stop-1000.timer",
+      ].map((unit) => `${units}/${unit}`),
     );
-    expect(p.fs.text("/home/u/.config/systemd/user/rig-vast-tunnel.service")).toContain(
+    expect(p.fs.text(`${units}/rig-vast-tunnel-1000.service`)).toContain(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: systemd expands ${PORT} from the EnvironmentFile
       "-L 127.0.0.1:8100:127.0.0.1:8099 -p ${PORT} root@${HOST}",
     );
-    expect(p.fs.text("/home/u/.config/systemd/user/rig-vast-idle.service")).toContain(
-      "ExecStart=/r/dist/rig vast idle-check",
+    expect(p.fs.text(`${units}/rig-vast-tunnel-1000.service`)).toContain(
+      "EnvironmentFile=/r/local/rented-box/boxes/1000/tunnel.env",
+    );
+    expect(p.fs.text(`${units}/rig-vast-idle-1000.service`)).toContain(
+      "ExecStart=/r/dist/rig vast idle-check --box 1000",
+    );
+    // the hard stop: vast.toml's max_hours after the create, a persistent timer that runs rig's own down for the box,
+    // then the vast CLI found here, with no rig code, whatever rig's exit (units.test.ts)
+    expect(saved.stopAt - saved.createdAt).toBe(12 * 3_600_000);
+    const stop = p.fs.text(`${units}/rig-vast-stop-1000.timer`)!;
+    const at = new Date(saved.stopAt).toISOString().slice(0, 19).replace("T", " ");
+    expect(stop).toContain(`OnCalendar=${at} UTC`);
+    expect(stop).toContain("Persistent=true");
+    expect(stop).toContain("WantedBy=timers.target");
+    const stopService = p.fs.text(`${units}/rig-vast-stop-1000.service`)!;
+    expect(stopService).toContain("ExecStart=-/r/dist/rig vast down --box 1000\n");
+    expect(stopService).toContain("ExecStart=/home/u/.local/bin/vastai destroy instance 1000 -y\n");
+    expect(stopService).toContain(
+      "ExecStart=python3 -c \"import json,subprocess,sys;run=lambda token: subprocess.run(['/home/u/.local/bin/vastai','show','instances-v1']",
     );
     // The card is a point sample, so the box is read often enough that a run of a few minutes cannot fall between
     // two reads (2026-10-02: a box in use by short runs read under 10 % at every ten-minute check and was destroyed).
-    const timer = p.fs.text("/home/u/.config/systemd/user/rig-vast-idle.timer");
+    const timer = p.fs.text(`${units}/rig-vast-idle-1000.timer`);
     expect(timer).toContain("OnUnitActiveSec=3min");
     expect(timer).toContain("every 3 minutes");
     expect(timer).not.toContain("10min");
@@ -278,16 +319,17 @@ describe("vast up", () => {
     expect(!small.ok && small.message).toContain("REFUSING to rent RTX 3060: bonsai-2-27b");
     expect(p.rental.ops.some((op) => op.startsWith("create"))).toBe(false);
   });
-  test("an unmeasured card is refused with exit 3 unless --allow-arch; a second box is refused; no funds is refused", async () => {
+  test("an unmeasured card is refused with exit 3 unless --allow-arch; none beside a one-box rig's box; no funds is refused", async () => {
     const { p, head, uc } = await setup();
     p.rental.offers = [{ ...h100, gpu: "RTX 4090", computeCap: "89" }];
     let r = await uc.up(head, { gpu: "RTX_4090", dryRun: true });
     expect(!r.ok && r.code).toBe(3);
     r = await uc.up(head, { gpu: "RTX_4090", dryRun: true, allowArch: "89" });
     expect(r.ok).toBe(true);
+    // a box a rig that held one rented: its units act on the only box, so it stays alone
     p.fs.put("/r/local/rented-box/instance.json", JSON.stringify({ instanceId: 7 }));
     r = await uc.up(head, { gpu: "H100_SXM" });
-    expect(!r.ok && r.message).toContain("already exists"); // a real rental, not a dry run
+    expect(!r.ok && r.message).toContain("rig vast down --box 7"); // a real rental, not a dry run
     await p.fs.remove("/r/local/rented-box/instance.json");
     p.rental.balance = 0.5;
     r = await uc.up(head, { gpu: "H100_SXM" });
@@ -315,10 +357,28 @@ describe("vast up", () => {
     p.rental.statuses = ["loading"]; // provisioning dies before anything is served
     const r = await uc.up(head, { gpu: "H100_SXM" });
     expect(!r.ok && r.message).toContain("never reached running");
-    const armed = p.systemd.ops.indexOf("enable rig-vast-idle.timer");
-    expect(armed).toBeGreaterThanOrEqual(0);
-    expect(armed).toBeLessThan(p.systemd.ops.indexOf("disable rig-vast-idle.timer"));
-    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(false);
+    for (const timer of ["rig-vast-idle-1000.timer", "rig-vast-stop-1000.timer"]) {
+      const armed = p.systemd.ops.indexOf(`enable ${timer}`);
+      expect(armed).toBeGreaterThanOrEqual(0);
+      expect(armed).toBeLessThan(p.systemd.ops.indexOf(`disable ${timer}`));
+      expect(await p.systemd.isActive(timer)).toBe(false);
+      expect(await p.fs.exists(`/home/u/.config/systemd/user/${timer}`)).toBe(false);
+    }
+  });
+  test("a box abandoned in provisioning keeps its reaper and hard stop while vast still lists it", async () => {
+    // vastai exits 0 when vast refuses a destroy (a 429, a 5xx), so the call's answer is not the box's fate
+    const { p, head, uc } = await setup();
+    p.rental.statuses = ["loading"];
+    p.rental.destroy = async (id) => {
+      p.rental.ops.push(`destroy ${id}`);
+    };
+    const r = await uc.up(head, { gpu: "H100_SXM" });
+    expect(!r.ok && r.message).toContain("never reached running");
+    expect(!r.ok && r.message).toContain("box 1000 is STILL listed after destroy");
+    expect(p.rental.ops).toContain("destroy 1000");
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(true);
+    for (const timer of ["rig-vast-idle-1000.timer", "rig-vast-stop-1000.timer"])
+      expect(await p.systemd.isActive(timer)).toBe(true);
   });
   test("a box with less disk than it was sold is refused before the fetch starts, both numbers named", async () => {
     // box 53786017 was created for 160 GB and died 91 GB into a 134 GB pack: the sold disk is asked
@@ -389,6 +449,100 @@ describe("vast up", () => {
         ),
       ).toBe(true);
     }
+  });
+});
+
+describe("the rig shipped to a box", () => {
+  // rental 3: its dist/rig was built before #168, so `rig engine ab --median` exited 64 on the box, on paid cards
+  const stamped = (p: ReturnType<typeof fakePorts>, said: { code: number; stdout: string }) =>
+    p.shell.on(/^\/r\/dist\/rig --built-from$/, { ...said, stderr: "" });
+  /** nothing searched or rented: the refusal came before the market */
+  const rentedNothing = (p: ReturnType<typeof fakePorts>) => {
+    expect(p.rental.ops.filter((op) => /^(search|create) /.test(op))).toEqual([]);
+    expect(p.rental.instances.size).toBe(0);
+  };
+  test("lab refuses a dist/rig built from another tree than HEAD's, before any rent, and names the rebuild", async () => {
+    const { p, uc } = await setup();
+    stamped(p, { code: 0, stdout: "0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6\n" });
+    const r = await uc.lab({ gpu: "H100_SXM", maxDph: 3 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe(1);
+    expect(r.message).toContain("/r/dist/rig was built from tree 0f1e2d3c4b5a");
+    expect(r.message).toContain(`HEAD's tree is ${TREE.slice(0, 12)}`);
+    expect(r.message).toContain("bun run build");
+    rentedNothing(p);
+  });
+  test("up refuses one built with changes HEAD does not hold", async () => {
+    const { p, head, uc } = await setup();
+    stamped(p, { code: 0, stdout: `${TREE}-dirty\n` });
+    const r = await uc.up(head, { gpu: "H100_SXM" });
+    expect(!r.ok && r.message).toContain("changes HEAD does not hold");
+    expect(!r.ok && r.message).toContain("bun run build");
+    rentedNothing(p);
+  });
+  test("a dist/rig that does not say what it was built from is refused: one compiled before the stamp, or by hand", async () => {
+    const { p, uc } = await setup();
+    stamped(p, { code: 64, stdout: "" }); // rig: unknown command "--built-from"
+    const r = await uc.lab({ gpu: "H100_SXM", maxDph: 3 });
+    expect(!r.ok && r.message).toContain("does not say what it was built from");
+    expect(!r.ok && r.message).toContain("bun run build");
+    rentedNothing(p);
+  });
+  test("a checkout with no HEAD has nothing to check it against, and is refused", async () => {
+    const { p, uc } = await setup();
+    p.git.heads.delete("/r");
+    const r = await uc.lab({ gpu: "H100_SXM", maxDph: 3 });
+    expect(!r.ok && r.message).toContain("/r is a git checkout with no HEAD");
+    rentedNothing(p);
+  });
+  describe("an install, a release unpacked by install.sh with no checkout", () => {
+    /** no .git at the root: a HEAD git finds above it (a home directory kept in git) is not rig's */
+    const installed = async () => {
+      const s = await setup();
+      s.p.fs.files.delete("/r/.git/HEAD");
+      s.p.fs.dirs.delete("/r/.git");
+      s.p.git.heads.set("/r", "1111111111111111111111111111111111111111");
+      return s;
+    };
+    test("ships the release's own binary, stamped clean with the tag's tree", async () => {
+      const { p, uc } = await installed();
+      stamped(p, { code: 0, stdout: "0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6\n" });
+      const r = await uc.lab({ gpu: "H100_SXM", maxDph: 3 });
+      expect(r.ok && r.value.kind).toBe("lab");
+    });
+    test("refuses an unstamped binary, a release from before the stamp", async () => {
+      const { p, uc } = await installed();
+      stamped(p, { code: 64, stdout: "" });
+      const r = await uc.lab({ gpu: "H100_SXM", maxDph: 3 });
+      expect(!r.ok && r.message).toContain("does not say what it was built from");
+      expect(!r.ok && r.message).toContain("install a release");
+      rentedNothing(p);
+    });
+    test("refuses a dirty one: no commit has its code", async () => {
+      const { p, uc } = await installed();
+      stamped(p, { code: 0, stdout: `${TREE}-dirty\n` });
+      const r = await uc.lab({ gpu: "H100_SXM", maxDph: 3 });
+      expect(!r.ok && r.message).toContain("changes no commit has");
+      rentedNothing(p);
+    });
+    test("refuses what is not a stamp at all", async () => {
+      const { p, uc } = await installed();
+      stamped(p, { code: 0, stdout: "rig 0.1.13\n" });
+      const r = await uc.lab({ gpu: "H100_SXM", maxDph: 3 });
+      expect(!r.ok && r.message).toContain("does not say what it was built from");
+      rentedNothing(p);
+    });
+  });
+  test("a stamp of HEAD's tree is shipped, and a dry run, which ships nothing, does not ask", async () => {
+    const { p, uc } = await setup();
+    const r = await uc.lab({ gpu: "H100_SXM", maxDph: 3 });
+    expect(r.ok && r.value.kind).toBe("lab");
+    expect(p.shell.calls).toContainEqual(["/r/dist/rig", "--built-from"]);
+    const dry = await setup();
+    stamped(dry.p, { code: 0, stdout: "0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6\n" });
+    expect((await dry.uc.lab({ gpu: "H100_SXM", maxDph: 3, dryRun: true })).ok).toBe(true);
+    expect(dry.p.shell.calls).not.toContainEqual(["/r/dist/rig", "--built-from"]);
   });
 });
 
@@ -467,6 +621,56 @@ describe("vast lab", () => {
       expect(r.ok).toBe(false);
       expect(p.fs.text("/r/local/rented-box/offers.json")).toContain("50263101");
     });
+    // 2026-10-03 rental 2c: `--min-down-mbps 2000` rented box 54020392, Japan, declaring 7,754 Mb/s; it pulled the pack at
+    // about 53 MiB/s by its own sampler, while Texas (declaring 5,422) pulled it at 437 MiB/s. The declaration is a
+    // figure the host wrote, and a host rig has measured is ranked on what it measured.
+    const RATES = "/r/local/rented-box/download-rates.json";
+    const measured = (rows: Array<{ machineId: number; geo: string; mbps: number }>) =>
+      JSON.stringify(rows.map((row, index) => ({ instanceId: 54020392 + index, at: 0, ...row })));
+    test("a host measured slower than the floor is skipped whatever it declares, and the log says what it pulled at", async () => {
+      const { p, uc } = await setup();
+      const japan = { ...quicker, id: 50263104, dph: 0.45, geo: "Japan, JP", machineId: 7754 };
+      p.rental.offers = [japan, quick];
+      p.fs.put(RATES, measured([{ machineId: 7754, geo: "Japan, JP", mbps: 447 }]));
+      const r = await uc.lab({ gpu: "RTX_5090", maxDph: 1, minDownMbps: 2000, dryRun: true });
+      expect(r.ok && r.value.kind === "dry-run" && r.value.pick.id).toBe(50263102);
+      expect(p.log.lines.join("\n")).toContain(
+        "offer 50263104 at 447 Mb/s measured on its host (declares 8000): under the floor",
+      );
+    });
+    test("a host never measured takes its region's measured rate, and its own outranks the region's", async () => {
+      const { p, uc } = await setup();
+      const japan = { ...quicker, id: 50263105, dph: 0.45, geo: "Japan, JP", machineId: 9001 };
+      p.rental.offers = [japan, quick];
+      p.fs.put(RATES, measured([{ machineId: 7754, geo: "Japan, JP", mbps: 447 }]));
+      const regional = await uc.lab({
+        gpu: "RTX_5090",
+        maxDph: 1,
+        minDownMbps: 2000,
+        dryRun: true,
+      });
+      expect(regional.ok && regional.value.kind === "dry-run" && regional.value.pick.id).toBe(
+        50263102,
+      );
+      expect(p.log.lines.join("\n")).toContain("447 Mb/s measured in Japan, JP");
+      p.fs.put(
+        RATES,
+        measured([
+          { machineId: 7754, geo: "Japan, JP", mbps: 447 },
+          { machineId: 9001, geo: "Japan, JP", mbps: 3600 },
+        ]),
+      );
+      const own = await uc.lab({ gpu: "RTX_5090", maxDph: 1, minDownMbps: 2000, dryRun: true });
+      expect(own.ok && own.value.kind === "dry-run" && own.value.pick.id).toBe(50263105);
+    });
+    test("with every offer measured under it the failure names the fastest by what it pulled at", async () => {
+      const { p, uc } = await setup();
+      p.rental.offers = [{ ...quicker, machineId: 7754 }];
+      p.fs.put(RATES, measured([{ machineId: 7754, geo: "Texas, US", mbps: 447 }]));
+      const r = await uc.lab({ gpu: "RTX_5090", maxDph: 1, minDownMbps: 2000, dryRun: true });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toContain("offer 50263103 at 447 Mb/s measured");
+    });
     test("vast up takes the same floor", async () => {
       const { p, head, uc } = await setup();
       p.rental.offers = [h100, { ...h100, id: 50262230, dph: 2.4, downMbps: 4000 }];
@@ -475,6 +679,60 @@ describe("vast lab", () => {
       const none = await uc.up(head, { gpu: "H100_SXM", minDownMbps: 9000, dryRun: true });
       expect(none.ok).toBe(false);
       if (!none.ok) expect(none.message).toContain("offer 50262230");
+    });
+  });
+  describe("--pack: the head whose pack the box will pull, priced", () => {
+    // a host bills its downloads per GB, 17 times apart (0.003 to 0.051 $/GB, 2026-09-29): the cheapest by the hour
+    // is not the cheapest box once the pack is pulled onto it
+    const dearPull = { ...rtx5090, id: 50263201, dph: 0.41, downCostPerGb: 0.051, downMbps: 5000 };
+    const cheapPull = { ...rtx5090, id: 50263202, dph: 0.5, downCostPerGb: 0.003, downMbps: 5000 };
+    test("ranks by the session all in, the pack's download at the host's price per GB included", async () => {
+      const { p, head, uc } = await setup();
+      p.rental.offers = [dearPull, cheapPull];
+      const r = await uc.lab({ gpu: "RTX_5090", maxDph: 1, pack: head, hours: 2, dryRun: true });
+      expect(r.ok).toBe(true);
+      if (!r.ok || r.value.kind !== "dry-run") return;
+      expect(r.value.pick.id).toBe(50263202);
+      const gb = headPackBytes(head) / 1e9;
+      const [first, second] = r.value.ranked ?? [];
+      expect(first?.offer.id).toBe(50263202);
+      expect(second?.offer.id).toBe(50263201);
+      // the per-GB price is in the total: the gap is the pack's bytes at 0.048 $/GB less the hour's 0.09
+      expect(second!.dollars - first!.dollars).toBeGreaterThan(0.048 * gb - 0.09 * 3);
+      expect(p.log.lines.join("\n")).toContain("$0.051/GB down");
+    });
+    test("ranks on the measured rate: a host that pulled slowly is billed the hours its download takes", async () => {
+      const { p, head, uc } = await setup();
+      const slowHost = { ...cheapPull, id: 50263203, machineId: 7754 };
+      // another region: a host never measured takes its region's rate, and Texas is measured slow here
+      const fastHost = { ...cheapPull, id: 50263204, dph: 0.52, machineId: 5422, geo: "Spain, ES" };
+      p.rental.offers = [slowHost, fastHost];
+      p.fs.put(
+        "/r/local/rented-box/download-rates.json",
+        JSON.stringify([{ instanceId: 1, machineId: 7754, geo: "Texas, US", mbps: 20, at: 0 }]),
+      );
+      const r = await uc.lab({ gpu: "RTX_5090", maxDph: 1, pack: head, dryRun: true });
+      expect(r.ok && r.value.kind === "dry-run" && r.value.pick.id).toBe(50263204);
+      if (!r.ok || r.value.kind !== "dry-run") return;
+      const slow = r.value.ranked?.find((each) => each.offer.id === 50263203);
+      // the hours of a pull at 20 Mb/s, not at the 5,000 the host declares
+      expect(slow?.minutesToServe).toBeGreaterThan((headPackBytes(head) * 8) / 20e6 / 60);
+      expect(p.log.lines.join("\n")).toContain("pulls at 20 Mb/s measured on its host");
+    });
+    test("the box's disk holds the pack: no --disk-gb sizes it for the head, and a smaller one is refused", async () => {
+      const { p, head, uc } = await setup();
+      // vast.toml's disk under the head's own (bonsai-2-27b: 15.3 GB, a 30 GB disk)
+      p.fs.put("/r/vast.toml", vastToml.replace(/^disk_gb = \d+/m, "disk_gb = 20"));
+      p.rental.offers = [cheapPull];
+      await uc.lab({ gpu: "RTX_5090", maxDph: 1, pack: head, dryRun: true });
+      const gb = headDiskGb(head);
+      expect(gb).toBeGreaterThan(20);
+      expect(p.rental.ops.filter((op) => op.startsWith("search "))).toEqual([
+        expect.stringContaining(`disk_space>=${gb}`),
+      ]);
+      const small = await uc.lab({ gpu: "RTX_5090", pack: head, diskGb: 10, dryRun: true });
+      expect(small.ok).toBe(false);
+      if (!small.ok) expect(small.message).toContain(`bonsai-2-27b's own ${gb} GB`);
     });
   });
   test("rents a card and ships rig and the pin to it, serving nothing: no head, no fetch, no derive, no tunnel", async () => {
@@ -506,18 +764,25 @@ describe("vast lab", () => {
     ]);
     const rigCalls = p.ssh.calls.filter((c) => c.includes("/workspace/rig/dist/rig "));
     expect(rigCalls).toEqual([]);
-    const saved = JSON.parse(p.fs.text("/r/local/rented-box/instance.json")!);
+    const saved = JSON.parse(p.fs.text("/r/local/rented-box/boxes/1000/instance.json")!);
     expect(saved).toMatchObject({ instanceId: 1000, cap: "120", sshPort: 12345, idleMinutes: 45 });
     expect(saved.head).toBeUndefined();
-    // the reaper is armed and its unit written; the tunnel to a server that is not there is neither
-    expect(p.systemd.ops).not.toContain("restart rig-vast-tunnel.service");
-    expect(p.fs.replaced).toEqual(
-      ["rig-vast-idle.service", "rig-vast-idle.timer"].map(
-        (unit) => `/home/u/.config/systemd/user/${unit}`,
-      ),
+    expect(saved.localPort).toBeUndefined();
+    // the reaper and the hard stop are armed and their units written; the tunnel to a server that is not there is
+    // neither
+    expect(p.systemd.ops.some((op) => op.includes("tunnel"))).toBe(false);
+    expect(p.fs.replaced.filter((path) => path.includes("/systemd/"))).toEqual(
+      [
+        "rig-vast-idle-1000.service",
+        "rig-vast-idle-1000.timer",
+        "rig-vast-stop-1000.service",
+        "rig-vast-stop-1000.timer",
+      ].map((unit) => `/home/u/.config/systemd/user/${unit}`),
     );
-    expect(p.systemd.ops).toContain("enable rig-vast-idle.timer");
-    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    for (const timer of ["rig-vast-idle-1000.timer", "rig-vast-stop-1000.timer"]) {
+      expect(p.systemd.ops).toContain(`enable ${timer}`);
+      expect(await p.systemd.isActive(timer)).toBe(true);
+    }
     expect(p.log.lines.join("\n")).toContain("idle timer armed (45 min");
   });
   test("a lab box nobody uses is destroyed by the idle check on the card's reading alone, and a busy card keeps it", async () => {
@@ -561,7 +826,7 @@ describe("vast lab", () => {
     expect(VM_ONSTART).toContain("chown root:root /root/.ssh/authorized_keys");
     // and it is reached at the host's own address, where box 53930876's sshd answered while vast's proxy refused
     const recorded = async (t: typeof vm) =>
-      JSON.parse(await t.p.fs.readText("/r/local/rented-box/instance.json")) as {
+      JSON.parse(await t.p.fs.readText("/r/local/rented-box/boxes/1000/instance.json")) as {
         sshHost: string;
         sshPort: number;
       };
@@ -615,7 +880,7 @@ describe("vast lab", () => {
     expect(!gone.ok && gone.message).toContain("ssh never answered");
     expect(dead.p.rental.instances.size).toBe(0);
   });
-  test("an unmeasured card is refused unless --allow-arch, a second box is refused, and a box that never answers is destroyed", async () => {
+  test("an unmeasured card is refused unless --allow-arch, none beside a one-box rig's box, and a box that never answers is destroyed", async () => {
     const { p, uc } = await setup();
     p.rental.offers = [{ ...rtx5090, gpu: "RTX 4090", computeCap: "89" }];
     const refused = await uc.lab({ gpu: "RTX_4090", dryRun: true });
@@ -623,7 +888,7 @@ describe("vast lab", () => {
     p.rental.offers = [rtx5090];
     p.fs.put("/r/local/rented-box/instance.json", JSON.stringify({ instanceId: 7 }));
     const second = await uc.lab({ gpu: "RTX_5090" });
-    expect(!second.ok && second.message).toContain("already exists");
+    expect(!second.ok && second.message).toContain("a rig that held one box");
     await p.fs.remove("/r/local/rented-box/instance.json");
     p.ssh.on(/^true$/, { code: 255, stdout: "", stderr: "refused" });
     const dead = await uc.lab({ gpu: "RTX_5090" });
@@ -631,6 +896,238 @@ describe("vast lab", () => {
     // and what it last said, so a box that refuses the key reads differently from one that never booted
     expect(!dead.ok && dead.message).toContain("last ssh said: refused");
     expect(p.rental.instances.size).toBe(0);
+  });
+});
+
+// Rentals 2b and 2c ran their KL legs one box after the other because rig held one (2026-10-03): each box gets its own
+// state, reaper, hard stop and tunnel port, and every command that acts on a box acts on the one it is named.
+describe("more than one box", () => {
+  const units = "/home/u/.config/systemd/user";
+  const lab5090: Offer = { ...h100, id: 50263001, gpu: "RTX 5090", computeCap: "120", dph: 0.41 };
+  /** a serving box (1000, its tunnel at 8100), a lab box (1001) and a second serving box (1002, at 8101) */
+  async function three() {
+    const t = await setup();
+    t.p.http.json(/8101\/health$/, { status: "ok" });
+    t.p.http.json(/8101\/props$/, {
+      model_path: `/workspace/rig/local/packs/bonsai-2-27b/${t.head.public?.file}`,
+      total_slots: 16,
+    });
+    expect((await t.uc.up(t.head, { gpu: "H100_SXM" })).ok).toBe(true);
+    t.p.rental.offers = [lab5090];
+    expect((await t.uc.lab({ gpu: "RTX_5090", maxHours: 3 })).ok).toBe(true);
+    t.p.rental.offers = [h100];
+    const second = await t.uc.up(t.head, { gpu: "H100_SXM" });
+    expect(second.ok && second.value.kind === "up" && second.value.localUrl).toBe(
+      "http://127.0.0.1:8101",
+    );
+    return t;
+  }
+
+  test("each box is held with its own state, reaper, hard stop and, serving, its own tunnel port", async () => {
+    const { p } = await three();
+    expect(p.rental.instances.size).toBe(3);
+    const saved = (id: number) =>
+      JSON.parse(p.fs.text(`/r/local/rented-box/boxes/${id}/instance.json`)!);
+    expect(saved(1000)).toMatchObject({ localPort: 8100, head: "bonsai-2-27b" });
+    expect(saved(1001).localPort).toBeUndefined();
+    expect(saved(1002)).toMatchObject({ localPort: 8101, head: "bonsai-2-27b" });
+    expect(p.fs.text(`${units}/rig-vast-tunnel-1002.service`)).toContain(
+      "-L 127.0.0.1:8101:127.0.0.1:8099",
+    );
+    expect(await p.fs.exists(`${units}/rig-vast-tunnel-1001.service`)).toBe(false);
+    for (const id of [1000, 1001, 1002])
+      for (const timer of [`rig-vast-idle-${id}.timer`, `rig-vast-stop-${id}.timer`])
+        expect(await p.systemd.isActive(timer)).toBe(true);
+    // --max-hours is the lab box's own hard stop, over vast.toml's 12
+    expect(saved(1001).stopAt - saved(1001).createdAt).toBe(3 * 3_600_000);
+    expect(saved(1002).stopAt - saved(1002).createdAt).toBe(12 * 3_600_000);
+  });
+  test("down acts on the box it names and retires only that box's units; none named with several is refused", async () => {
+    const { p, uc } = await three();
+    const unnamed = await uc.down();
+    expect(!unnamed.ok && unnamed.code).toBe(64);
+    expect(!unnamed.ok && unnamed.message).toContain(
+      "3 boxes held: name one with --box (1000, 1001, 1002)",
+    );
+    expect(p.rental.instances.size).toBe(3);
+    const before = p.systemd.ops.length;
+    const r = await uc.down({ box: 1001 });
+    expect(r).toMatchObject({ ok: true, value: { destroyed: [1001] } });
+    expect([...p.rental.instances.keys()]).toEqual([1000, 1002]);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1001")).toBe(false);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(true);
+    const ops = p.systemd.ops.slice(before);
+    expect(ops.some((op) => op.includes("1000") || op.includes("1002"))).toBe(false);
+    // the box goes down from inside its own idle check or hard stop: their services are never stopped
+    expect(
+      ops.some((op) => op.startsWith("stop") && op.endsWith(".service") && !op.includes("tunnel")),
+    ).toBe(false);
+    expect(await p.systemd.isActive("rig-vast-idle-1000.timer")).toBe(true);
+    expect((await p.fs.list(units)).filter((unit) => unit.includes("1001"))).toEqual([]);
+    const missing = await uc.down({ box: 7 });
+    expect(!missing.ok && missing.message).toContain("no box 7 held here");
+    const all = await uc.down({ all: true });
+    expect(all.ok && all.value.destroyed).toEqual([1000, 1002]);
+    expect(await p.fs.list(units)).toEqual([]);
+  });
+  test("the idle check reads the box it names: a lab box never reads another box's server through its port", async () => {
+    const { p, uc } = await three();
+    const unnamed = await uc.idleCheck();
+    expect(!unnamed.ok && unnamed.code).toBe(64);
+    p.http.on(/8100\/metrics$/, () => ({
+      status: 200,
+      text: "llamacpp:prompt_tokens_total 9\nllamacpp:tokens_predicted_total 9\nllamacpp:requests_processing 1\n",
+    }));
+    const lab = p.rental.instances.get(1001)!;
+    p.rental.instances.set(1001, { ...lab, gpuUtil: 0 });
+    const before = p.http.requests.length;
+    expect(await uc.idleCheck({ box: 1001 })).toEqual({ ok: true, value: { action: "changed" } });
+    expect(p.http.requests.slice(before)).toEqual([]);
+    expect(p.log.lines.at(-1)).toContain("idle-check box 1001: server unreachable");
+    // the serving box reads its own server, busy
+    expect(await uc.idleCheck({ box: 1000 })).toEqual({ ok: true, value: { action: "active" } });
+    // the lab box idles out alone, and the others stay
+    p.clock.t += 45 * 60_000;
+    expect(await uc.idleCheck({ box: 1001 })).toMatchObject({
+      ok: true,
+      value: { action: "destroyed" },
+    });
+    expect([...p.rental.instances.keys()]).toEqual([1000, 1002]);
+    expect(await p.systemd.isActive("rig-vast-idle-1002.timer")).toBe(true);
+  });
+  test("status lists every box, the oldest first, or the one named", async () => {
+    const { p, uc } = await three();
+    const all = await uc.status();
+    expect(all.ok && all.value.boxes.map((each) => each.box.instanceId)).toEqual([
+      1000, 1001, 1002,
+    ]);
+    expect(all.ok && all.value.boxes.map((each) => each.healthy)).toEqual([true, false, true]);
+    const one = await uc.status({ box: 1002 });
+    expect(one.ok && one.value.boxes.map((each) => each.box.localPort)).toEqual([8101]);
+    // a port freed by a box going down is taken by the next serving box
+    await uc.down({ box: 1000 });
+    p.rental.offers = [h100];
+    const next = await uc.up((await setup()).head, { gpu: "H100_SXM" });
+    expect(next.ok && next.value.kind === "up" && next.value.localUrl).toBe(
+      "http://127.0.0.1:8100",
+    );
+  });
+  test("two ups at once take two ports: the port is claimed before the create, not read from what is saved", async () => {
+    const { p, head, uc } = await setup();
+    p.http.json(/8101\/health$/, { status: "ok" });
+    p.http.json(/8101\/props$/, {
+      model_path: `/workspace/rig/local/packs/bonsai-2-27b/${head.public?.file}`,
+      total_slots: 16,
+    });
+    const both = await Promise.all([
+      uc.up(head, { gpu: "H100_SXM" }),
+      uc.up(head, { gpu: "H100_SXM" }),
+    ]);
+    expect(both.every((r) => r.ok)).toBe(true);
+    const saved = (id: number) =>
+      JSON.parse(p.fs.text(`/r/local/rented-box/boxes/${id}/instance.json`)!).localPort;
+    expect([saved(1000), saved(1001)].sort()).toEqual([8100, 8101]);
+  });
+  test("a box record that does not parse is named and skipped; every other box is still read and reaped", async () => {
+    const { p, uc } = await three();
+    // a record cut short (a full disk, a hand edit): records are written by rename, so a reader never sees one mid-write
+    expect(p.fs.replaced).toContain("/r/local/rented-box/boxes/1001/instance.json");
+    p.fs.put("/r/local/rented-box/boxes/1001/instance.json", '{"instanceId": 10');
+    expect((await uc.idleCheck({ box: 1000 })).ok).toBe(true);
+    const status = await uc.status();
+    expect(status.ok && status.value.boxes.map((each) => each.box.instanceId)).toEqual([
+      1000, 1002,
+    ]);
+    expect(p.log.lines.join("\n")).toContain(
+      "/r/local/rented-box/boxes/1001/instance.json does not parse",
+    );
+  });
+  test("down --all tries every box though vast refuses one, and --all with --box is refused", async () => {
+    const { p, uc } = await three();
+    const both = await uc.down({ all: true, box: 1001 });
+    expect(!both.ok && both.code).toBe(64);
+    expect(p.rental.instances.size).toBe(3);
+    const destroy = p.rental.destroy.bind(p.rental);
+    p.rental.destroy = async (id) => {
+      if (id === 1000) throw new Error("vastai destroy instance 1000: 502 Bad Gateway");
+      await destroy(id);
+    };
+    const all = await uc.down({ all: true });
+    expect(!all.ok && all.message).toContain("box 1000 is STILL listed after destroy");
+    expect([...p.rental.instances.keys()]).toEqual([1000]);
+    expect(await p.systemd.isActive("rig-vast-stop-1000.timer")).toBe(true);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1002")).toBe(false);
+  });
+  test("a hard stop outside a quarter hour to a week is refused before anything is rented", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [lab5090];
+    for (const maxHours of [0.1, 169, 99_999_999_999]) {
+      const r = await uc.lab({ gpu: "RTX_5090", maxHours });
+      expect(!r.ok && r.code).toBe(64);
+      expect(!r.ok && r.message).toContain("hard stop takes 0.25 to 168 hours");
+    }
+    expect(p.rental.ops.some((op) => op.startsWith("create"))).toBe(false);
+    expect((await uc.lab({ gpu: "RTX_5090", maxHours: 168 })).ok).toBe(true);
+  });
+});
+
+// A rig that held one box kept it at local/rented-box/instance.json with units named for none: a box it rented before an
+// upgrade is checked, reaped and downed where it is, so the upgrade never leaves it billing without its reaper.
+describe("a box rented by a rig that held one", () => {
+  const legacy = {
+    instanceId: 1000,
+    offerId: 1,
+    gpu: "RTX 5090",
+    cap: "120",
+    dph: 0.41,
+    geo: "Texas, US",
+    createdAt: 0,
+    sshHost: "ssh5.vast.ai",
+    sshPort: 12345,
+  };
+  async function held() {
+    const t = await setup();
+    t.p.rental.instances.set(1000, {
+      id: 1000,
+      status: "running",
+      label: "rig",
+      dph: 0.41,
+      gpuUtil: 0,
+    });
+    t.p.fs.put("/r/local/rented-box/instance.json", JSON.stringify(legacy));
+    for (const unit of ["rig-vast-idle.service", "rig-vast-idle.timer"])
+      t.p.fs.put(`/home/u/.config/systemd/user/${unit}`, "[Unit]\n");
+    await t.p.systemd.enable("rig-vast-idle.timer");
+    await t.p.systemd.restart("rig-vast-idle.timer");
+    return t;
+  }
+  test("its old timer's idle check, which names no box, reaps it where it is", async () => {
+    const { p, uc } = await held();
+    expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "changed" } });
+    expect(p.fs.text("/r/local/rented-box/idle.json")).toContain('"key":"unreachable"');
+    p.clock.t += 45 * 60_000;
+    expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "destroyed" } });
+    expect(p.rental.instances.size).toBe(0);
+    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(false);
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(false);
+    expect(await p.fs.list("/home/u/.config/systemd/user")).toEqual([]);
+  });
+  test("status reads it with no hard stop and re-arms its old timer; no box is rented beside it", async () => {
+    const { p, head, uc } = await held();
+    p.systemd.active.delete("rig-vast-idle.timer");
+    const r = await uc.status();
+    expect(r).toMatchObject({
+      ok: true,
+      value: {
+        boxes: [{ box: { instanceId: 1000, legacy: true }, idleTimer: "re-armed", hardStop: null }],
+      },
+    });
+    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    const beside = await uc.up(head, { gpu: "H100_SXM" });
+    expect(!beside.ok && beside.message).toContain("run: rig vast down --box 1000");
+    expect(p.rental.instances.size).toBe(1);
+    expect((await uc.down({ box: 1000 })).ok).toBe(true);
+    expect((await uc.up(head, { gpu: "H100_SXM" })).ok).toBe(true);
   });
 });
 
@@ -643,12 +1140,18 @@ describe("vast down / status / idle", () => {
     p.rental.instances.set(56, { id: 56, status: "running", label: "other", dph: 1 });
     const r = await uc.down({ all: true });
     expect(r).toEqual({ ok: true, value: { destroyed: [1000, 55], hours: 2, cost: 3.95 } });
-    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(false);
-    expect(p.systemd.ops.slice(-3)).toEqual([
-      "disable rig-vast-idle.timer",
-      "stop rig-vast-idle.timer",
-      "stop rig-vast-tunnel.service",
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1000")).toBe(false);
+    // its units retired: the timers disabled and stopped, the tunnel stopped, their files gone. Never a service: a
+    // box goes down from inside its own idle check or hard stop, which stopping would kill.
+    expect(p.systemd.ops.slice(-6)).toEqual([
+      "disable rig-vast-idle-1000.timer",
+      "disable rig-vast-stop-1000.timer",
+      "stop rig-vast-idle-1000.timer",
+      "stop rig-vast-stop-1000.timer",
+      "stop rig-vast-tunnel-1000.service",
+      "daemon-reload",
     ]);
+    expect(await p.fs.list("/home/u/.config/systemd/user")).toEqual([]);
   });
   test("down refuses to believe a destroy the listing contradicts, and leaves the box's cost control running", async () => {
     const { p, head, uc } = await setup();
@@ -657,9 +1160,10 @@ describe("vast down / status / idle", () => {
     const before = p.systemd.ops.length;
     const r = await uc.down();
     expect(!r.ok && r.message).toContain("STILL listed");
-    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(true);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(true);
     expect(p.systemd.ops.slice(before)).toEqual([]);
-    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    expect(await p.systemd.isActive("rig-vast-idle-1000.timer")).toBe(true);
+    expect(await p.systemd.isActive("rig-vast-stop-1000.timer")).toBe(true);
   });
   test("down: a destroy vast refuses (a 429, a 5xx) keeps the state and the idle timer; a box vast no longer lists is gone whatever the call answers", async () => {
     const { p, head, uc } = await setup();
@@ -672,15 +1176,16 @@ describe("vast down / status / idle", () => {
     expect(!refused.ok && refused.message).toContain(
       "box 1000 is STILL listed after destroy (the destroy failed: vastai destroy instance 1000: 429 Too Many Requests) — it is billing, and its idle timer stays armed",
     );
-    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(true);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(true);
     expect(p.systemd.ops.slice(before)).toEqual([]);
-    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    expect(await p.systemd.isActive("rig-vast-idle-1000.timer")).toBe(true);
     // destroyed from vast's console meanwhile: the next down's call refuses the gone id
     p.rental.instances.delete(1000);
     const gone = await uc.down();
     expect(gone.ok && gone.value.destroyed).toEqual([1000]);
-    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(false);
-    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(false);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(false);
+    expect(await p.systemd.isActive("rig-vast-idle-1000.timer")).toBe(false);
+    expect(await p.systemd.isActive("rig-vast-stop-1000.timer")).toBe(false);
   });
   test("an engine.toml this binary cannot read stops up and bench, never the cost control of a box that bills", async () => {
     const { p, head, uc, deps, layout } = await setup();
@@ -693,7 +1198,7 @@ describe("vast down / status / idle", () => {
     const stale = new RentGpu(deps, layout, unreadable);
     expect(await stale.up(head, { gpu: "H100_SXM", dryRun: true })).toEqual(unreadable);
     expect(await stale.bench(head)).toEqual(unreadable);
-    expect(await stale.status()).toMatchObject({ ok: true, value: { listed: true } });
+    expect(await stale.status()).toMatchObject({ ok: true, value: { boxes: [{ listed: true }] } });
     p.http.on(/8100\/metrics$/, () => ({
       status: 200,
       text: "llamacpp:prompt_tokens_total 1\nllamacpp:tokens_predicted_total 1\nllamacpp:requests_processing 0\n",
@@ -728,8 +1233,10 @@ describe("vast down / status / idle", () => {
       value: { action: "destroyed", idleMinutes: 45 },
     });
     expect(p.rental.instances.size).toBe(0);
-    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(false);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(false);
     expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "no-box" } });
+    // the box's own unit fired after the box went is no box, never a failure
+    expect(await uc.idleCheck({ box: 1000 })).toEqual({ ok: true, value: { action: "no-box" } });
   });
   test("--disk-gb sizes the query and the box; --idle-minutes is this box's own budget, read by every idle check", async () => {
     const { p, head, uc } = await setup();
@@ -737,10 +1244,10 @@ describe("vast down / status / idle", () => {
     expect(r.ok).toBe(true);
     expect(p.rental.ops.find((op) => op.startsWith("search "))).toContain("disk_space>=300");
     expect(p.rental.ops.at(-1)).toBe("create 50262229 nvidia/cuda:13.0.3-devel-ubuntu24.04 300");
-    expect(JSON.parse(p.fs.text("/r/local/rented-box/instance.json")!)).toMatchObject({
+    expect(JSON.parse(p.fs.text("/r/local/rented-box/boxes/1000/instance.json")!)).toMatchObject({
       idleMinutes: 720,
     });
-    expect(p.fs.text("/home/u/.config/systemd/user/rig-vast-idle.service")).toContain(
+    expect(p.fs.text("/home/u/.config/systemd/user/rig-vast-idle-1000.service")).toContain(
       "after 720 idle minutes",
     );
     // the READY line prices the budget: what the box can bill idle before it is destroyed
@@ -858,9 +1365,9 @@ describe("vast down / status / idle", () => {
     });
     /** what the check prints on a box whose sampler has been writing: the card now, its peak over the window, and the
      *  average KB/s the box received over it (absent from a box whose sampler predates the download column) */
-    const sampled = (now: string, peak: number, download?: number) => ({
+    const sampled = (now: string, peak: number, download?: number, pull?: [number, number]) => ({
       code: 0,
-      stdout: `${now}\nrc=0\nwindow=${peak}\n${download === undefined ? "" : `download=${download}\n`}`,
+      stdout: `${now}\nrc=0\nwindow=${peak}\n${download === undefined ? "" : `download=${download}\n`}${pull ? `pull=${pull[0]} ${pull[1]}\n` : ""}`,
       stderr: "",
     });
     const unreachable = {
@@ -1020,6 +1527,45 @@ describe("vast down / status / idle", () => {
       }
       expect(await uc.idleCheck()).toMatchObject({ ok: true, value: { action: "destroyed" } });
     });
+    // what the next rental ranks on. 2026-10-03 the sampler read 51-64 MB/s through box 54020392's pull (Japan) and 437.5
+    // through 53980196's (Texas), each within a fifth of the rate measured by hand from its fetch.
+    test("a box's pull is recorded by host and region, its best window kept and kept past the box; rig's payload push is never one", async () => {
+      const { p, uc } = await vm();
+      const RATES = "/r/local/rented-box/download-rates.json";
+      p.fs.put(
+        RATES,
+        JSON.stringify([{ instanceId: 7, machineId: 1, geo: "Japan, JP", mbps: 447, at: 0 }]),
+      );
+      // rig's payload pushed from here: 20 seconds at 30 MB/s, 600 MB
+      p.ssh.on(smi, sampled("0", 0, 1_700, [30_000, 4]));
+      await uc.idleCheck();
+      // the engine's runtime from NVIDIA's CDN: 2.1 GiB in 15 seconds, too short a pull to measure a host by
+      p.clock.t += 3 * 60_000;
+      p.ssh.on(smi, sampled("0", 0, 6_250, [150_000, 3]));
+      await uc.idleCheck();
+      expect(JSON.parse(p.fs.text(RATES)!)).toHaveLength(1);
+      // the pack: 437.5 MiB/s for the three minutes of the window it ran in, half the window's average
+      p.ssh.on(smi, sampled("0", 0, 224_000, [448_000, 36]));
+      p.clock.t += 3 * 60_000;
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+      p.ssh.on(smi, sampled("0", 0, 100_000, [200_000, 30])); // the window the pull ended in
+      p.clock.t += 3 * 60_000;
+      await uc.idleCheck();
+      const rows = JSON.parse(p.fs.text(RATES)!);
+      expect(rows).toEqual([
+        { instanceId: 7, machineId: 1, geo: "Japan, JP", mbps: 447, at: 0 },
+        {
+          instanceId: 1000,
+          machineId: 41200,
+          geo: "Germany, DE",
+          mbps: 3670,
+          at: expect.any(Number),
+        },
+      ]);
+      expect(p.log.lines.join("\n")).toContain("measured 3670 Mb/s");
+      expect((await uc.down()).ok).toBe(true);
+      expect(JSON.parse(p.fs.text(RATES)!)).toHaveLength(2);
+    });
     test("a box whose sampler has no download column yet is read as before: the card decides alone", async () => {
       const { p, uc } = await vm();
       p.ssh.on(smi, sampled("0", 0));
@@ -1097,55 +1643,71 @@ describe("vast down / status / idle", () => {
       expect(said).not.toContain("unreachable over ssh");
     });
   });
-  test("status reads the state, the market and the tunnel", async () => {
+  test("status reads the state, the market, the tunnel and the hard stop", async () => {
     const { p, head, uc } = await setup();
-    expect(await uc.status()).toMatchObject({
-      ok: true,
-      value: { box: null, listed: false, healthy: true },
-    });
+    expect(await uc.status()).toEqual({ ok: true, value: { boxes: [] } });
     await uc.up(head, { gpu: "H100_SXM" });
     p.clock.t += 3_600_000;
-    expect(await uc.status()).toMatchObject({
+    const r = await uc.status();
+    expect(r).toMatchObject({
       ok: true,
-      value: { listed: true, hours: 1, cost: 1.98 },
+      value: {
+        boxes: [{ listed: true, hours: 1, cost: 1.98, healthy: true, tunnelActive: true }],
+      },
     });
+    const box = r.ok ? r.value.boxes[0]! : undefined;
+    expect(box?.hardStop).toEqual({ at: box!.box.createdAt + 12 * 3_600_000, timer: "active" });
   });
   test("status re-arms the idle timer of a box that bills without it, and says so; a box gone from the listing is left alone", async () => {
     const { p, head, uc } = await setup();
     await uc.up(head, { gpu: "H100_SXM" });
-    expect(await uc.status()).toMatchObject({ ok: true, value: { idleTimer: "active" } });
-    p.systemd.active.delete("rig-vast-idle.timer"); // 2026-09-24: dead at 09:08, no stop logged
+    expect(await uc.status()).toMatchObject({
+      ok: true,
+      value: { boxes: [{ idleTimer: "active" }] },
+    });
+    p.systemd.active.delete("rig-vast-idle-1000.timer"); // 2026-09-24: dead at 09:08, no stop logged
     const before = p.systemd.ops.length;
-    expect(await uc.status()).toMatchObject({ ok: true, value: { idleTimer: "re-armed" } });
+    expect(await uc.status()).toMatchObject({
+      ok: true,
+      value: { boxes: [{ idleTimer: "re-armed" }] },
+    });
     expect(p.systemd.ops.slice(before)).toEqual([
-      "enable rig-vast-idle.timer",
-      "restart rig-vast-idle.timer",
+      "enable rig-vast-idle-1000.timer",
+      "restart rig-vast-idle-1000.timer",
     ]);
-    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
-    expect(p.log.lines.join("\n")).toContain("rig-vast-idle.timer was not running: re-armed");
+    expect(await p.systemd.isActive("rig-vast-idle-1000.timer")).toBe(true);
+    expect(p.log.lines.join("\n")).toContain("rig-vast-idle-1000.timer was not running: re-armed");
+    // the hard stop's timer the same
+    p.systemd.active.delete("rig-vast-stop-1000.timer");
+    expect(await uc.status()).toMatchObject({
+      ok: true,
+      value: { boxes: [{ hardStop: { timer: "re-armed" } }] },
+    });
+    expect(await p.systemd.isActive("rig-vast-stop-1000.timer")).toBe(true);
     // destroyed elsewhere: nothing bills, so nothing is armed
-    p.systemd.active.delete("rig-vast-idle.timer");
+    p.systemd.active.delete("rig-vast-idle-1000.timer");
+    p.systemd.active.delete("rig-vast-stop-1000.timer");
     p.rental.instances.delete(1000);
     expect(await uc.status()).toMatchObject({
       ok: true,
-      value: { listed: false, idleTimer: "inactive" },
+      value: { boxes: [{ listed: false, idleTimer: "inactive", hardStop: { timer: "inactive" } }] },
     });
-    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(false);
+    expect(await p.systemd.isActive("rig-vast-idle-1000.timer")).toBe(false);
   });
   test("status: a market that cannot be read is no evidence the box is gone, so a dead timer is re-armed", async () => {
     const { p, head, uc } = await setup();
     await uc.up(head, { gpu: "H100_SXM" });
-    p.systemd.active.delete("rig-vast-idle.timer");
+    p.systemd.active.delete("rig-vast-idle-1000.timer");
     p.rental.show = async () => {
       throw new Error("vastai show instance 1000: 401 key expired");
     };
     expect(await uc.status()).toMatchObject({
       ok: true,
-      value: { listed: "unread", idleTimer: "re-armed" },
+      value: { boxes: [{ listed: "unread", idleTimer: "re-armed" }] },
     });
-    expect(await p.systemd.isActive("rig-vast-idle.timer")).toBe(true);
+    expect(await p.systemd.isActive("rig-vast-idle-1000.timer")).toBe(true);
     expect(p.log.lines.join("\n")).toContain(
-      "box 1000 may be billing and rig-vast-idle.timer was not running: re-armed",
+      "box 1000 may be billing and rig-vast-idle-1000.timer was not running: re-armed",
     );
   });
   test("status reports an active timer whose last check failed: a check that exits 1 controls nothing", async () => {
@@ -1153,18 +1715,21 @@ describe("vast down / status / idle", () => {
     await uc.up(head, { gpu: "H100_SXM" });
     expect(await uc.status()).toMatchObject({
       ok: true,
-      value: { idleTimer: "active", idleCheck: "ok" },
+      value: { boxes: [{ idleTimer: "active", idleCheck: "ok" }] },
     });
-    p.systemd.results.set("rig-vast-idle.service", "exit-code");
+    p.systemd.results.set("rig-vast-idle-1000.service", "exit-code");
     expect(await uc.status()).toMatchObject({
       ok: true,
-      value: { idleTimer: "active", idleCheck: "failed" },
+      value: { boxes: [{ idleTimer: "active", idleCheck: "failed" }] },
     });
     expect(p.log.lines.join("\n")).toContain(
-      "rig-vast-idle.service's last run ended exit-code: the box's cost control is not running",
+      "rig-vast-idle-1000.service's last run ended exit-code: box 1000's cost control is not running",
     );
-    p.systemd.results.set("rig-vast-idle.service", null);
-    expect(await uc.status()).toMatchObject({ ok: true, value: { idleCheck: "unread" } });
+    p.systemd.results.set("rig-vast-idle-1000.service", null);
+    expect(await uc.status()).toMatchObject({
+      ok: true,
+      value: { boxes: [{ idleCheck: "unread" }] },
+    });
   });
   test("a dry run prices the next box while one is still up", async () => {
     const { p, uc, head } = await setup();

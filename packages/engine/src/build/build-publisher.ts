@@ -215,7 +215,11 @@ export class BuildPublisher {
    *  A machine with no NVIDIA driver (a compile in a container with no card) cannot find libcuda.so.1, so every
    *  driver call the engine imports reads as undefined. Then, and only then, the toolkit's stub of it is preloaded:
    *  it carries the soname and exports the driver API the engine linked against, and every other symbol is still
-   *  checked. A machine with the driver is checked against the driver. */
+   *  checked. A machine with the driver is checked against the driver.
+   *
+   *  A library the loader cannot find is the refusal, by name: every symbol it would have exported reads as undefined
+   *  too, and those are not a stale object. 2026-10-03 the v0.1.13 prebuilt in a card-less container (no driver, so no
+   *  stub to preload) was refused as "a stale or empty object" over cuMemCreate when libcuda.so.1 was simply absent. */
   private async unresolvedSymbol(
     staging: string,
     targets: string[],
@@ -225,6 +229,17 @@ export class BuildPublisher {
       let ldd = await this.ldd(join(staging, target), staging);
       if (driverStub && /libcuda\.so\.1 => not found/.test(ldd.output))
         ldd = await this.ldd(join(staging, target), staging, driverStub);
+      const absent = new Set(
+        Array.from(ldd.output.matchAll(/^\s*(\S+) => not found\s*$/gm), (m) => m[1]!),
+      );
+      if (absent.size > 0) {
+        const named = [...absent].map((lib) =>
+          lib === "libcuda.so.1"
+            ? `${lib} not found (the NVIDIA driver's library: no NVIDIA driver is installed on this machine)`
+            : `${lib} not found (in the build dir or on the loader's path)`,
+        );
+        return `${target} does not resolve: ${named.join("; ")}`;
+      }
       const missing = ldd.output.split("\n").find((line) => line.includes("undefined symbol"));
       if (ldd.code !== 0 || missing) {
         return `${target} does not resolve: ${(missing ?? ldd.stderr).trim()} (a stale or empty object in the build tree; the next build prunes empty ones)`;

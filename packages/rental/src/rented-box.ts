@@ -5,7 +5,7 @@
 import { basename, dirname } from "node:path";
 import type { RunResult, Ssh, SshTarget } from "@rig/core";
 import { type Layout, layoutAt } from "@rig/core";
-import { SAMPLER_PATHS, samplerScript, windowRead } from "./box-sampler.ts";
+import { SAMPLER_PATHS, SAMPLER_TICK_SECONDS, samplerScript, windowRead } from "./box-sampler.ts";
 
 /** where a template box's on-start logs (box-template.ts) */
 const TEMPLATE_LOGS = "/var/log/rig";
@@ -41,12 +41,21 @@ export class RentedBox {
    *  retired by its own pid file. `now` is the busiest card's percent; null when nvidia-smi gave no number
    *  (and "unreachable" when ssh itself did not answer: the command always exits 0 once a shell ran it, so any other exit
    *  is the transport). `window` is null when the sampler has no sample in the window yet, `downloadKBps` the average
-   *  received over the window, null when no sample in it carries the column. */
+   *  received over the window, null when no sample in it carries the column. `pull` is the rate over the ticks that
+   *  received at least `pullKBps` and how long they ran, null when none did. */
   async cardUtilization(
     timeoutMs: number,
     windowSeconds: number,
+    pullKBps: number,
   ): Promise<
-    { now: number; window: number | null; downloadKBps: number | null } | "unreachable" | null
+    | {
+        now: number;
+        window: number | null;
+        downloadKBps: number | null;
+        pull: { kibPerSecond: number; seconds: number } | null;
+      }
+    | "unreachable"
+    | null
   > {
     const probe = await this.ssh.run(
       this.target,
@@ -59,7 +68,7 @@ export class RentedBox {
         "RIG_SAMPLER",
         "mv $S.new $S",
         'kill -0 "$(cat $P 2>/dev/null)" 2>/dev/null || { nohup setsid sh $S >/dev/null 2>&1 < /dev/null & } >/dev/null 2>&1',
-        windowRead(SAMPLER_PATHS.samples, windowSeconds),
+        windowRead(SAMPLER_PATHS.samples, windowSeconds, pullKBps),
         "exit 0",
       ].join("\n"),
       { timeoutMs },
@@ -73,10 +82,14 @@ export class RentedBox {
     if (percents.length === 0) return null;
     const window = /^window=(\d+)$/m.exec(probe.stdout)?.[1];
     const download = /^download=(\d+)$/m.exec(probe.stdout)?.[1];
+    const pull = /^pull=(\d+) (\d+)$/m.exec(probe.stdout);
     return {
       now: Math.max(...percents),
       window: window === undefined ? null : Number(window),
       downloadKBps: download === undefined ? null : Number(download),
+      pull: pull
+        ? { kibPerSecond: Number(pull[1]), seconds: Number(pull[2]) * SAMPLER_TICK_SECONDS }
+        : null,
     };
   }
 

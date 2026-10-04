@@ -25,6 +25,15 @@ describe("rig", () => {
     expect(run.exitCode).toBe(0);
     expect(run.stdout.toString()).toBe(`rig ${version}\n`);
   });
+  test("--built-from: a rig run from the source was not stamped by bun run build, and says so", () => {
+    const run = rig("--built-from");
+    expect(run.exitCode).toBe(1);
+    expect(run.stdout.toString()).toBe("");
+    // the whole of stderr: a crash prints the source around it, this message's line included
+    expect(run.stderr.toString()).toBe(
+      "rig: this rig was not compiled by bun run build, so it does not know its tree\n",
+    );
+  });
   test("<command> --help prints the command's usage and runs nothing", () => {
     const run = rig("build", "--help");
     expect(run.exitCode).toBe(0);

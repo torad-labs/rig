@@ -1789,6 +1789,10 @@ practical-equivalence one (KLD at most 1.10x the floor, same top within 0.25 poi
 | 2k (32 chunks) | 0.012685 / 96.209 % | 0.011520 / 96.453 % | 0.908 | +0.244 |
 | 16k (4 chunks) | 0.012742 / 96.749 % | 0.007469 / 97.354 % | 0.586 | +0.605 |
 
+Both ratios are superseded by rental 2c (the D3 scorecard below). On one build and one box, q8_0 K/V/idx reads 0.978x of the
+f16 floor at 2k and 0.977x at 16k, and the commits between are bit for bit at f16. 2a's 16k floor of 0.012742 did not
+reproduce there (0.007538), so the 0.586 above is not a 41 % margin.
+
 Decode, f16 against q8_0, `rig engine ab`, 3 pairs of 3 reps: **-0.68 % at d65536** (95 % CI -1.19 % to -0.16 %) and
 **-0.85 % at d262144** (95 % CI -2.86 % to +1.16 %, inside noise).
 
@@ -1860,3 +1864,66 @@ each request sits at its run's level from the first request. Only runs back to b
 - **Slots, np3 one session at a time against np1, ABBA, all at the high level:** 1.012 and 1.005, so 1.008
   (np3 152.82 and 152.77 against np1 150.95 and 152.08). The 1.07 above compared
   runs 3 hours apart across this swing and is superseded. The bar is 0.95, and slots = 3 holds.
+
+### D3 scorecard: v0.1.13 as served (rental 2b, Oct 3, 2026, 2:14-2:28 AM CT)
+
+Box 53980196, two RTX PRO 6000 Blackwell Server Edition, EPYC 9655, $2.993/h, destroyed after 0.23 h. The image was built
+from rig a1a2001 with engine 0090733 (`image-build-a1a2001.log` beside the raw file), and the pack's three shards were sha256-checked on the box. rig's own
+argv: `-np 3 -c 524288 --kv-unified`, q8_0 K/V/idx, draft-mtp n_max 2, `-sm tensor`. The served sampler is T 1.0 and
+top_p 0.95, never temperature 0. Six prompts of 320 tokens at depth 0, the same six after a 32k primer carried as history,
+then one 128k primer for prefill (`local/research/freeze-prep-2026-10-02/served-2b.py`, raw `served-2b.json`).
+Each ± is the 95 % CI half-width over the six requests.
+
+| build | box | decode d0 | decode d32k | acceptance d0 / d32k | prefill 32k | prefill 128k | KL vs previous pin |
+|---|---|---|---|---|---|---|---|
+| v0.1.13, 009073391, q8_0, 3 slots | 2b, Server Edition | **173.4 ± 12.8** | **148.0 ± 8.4** | 0.625 ± 0.087 / 0.528 ± 0.054 | **2,877** (32,791 tokens) | **1,830** (131,097 tokens) | **0.011893 / 0.007363** (2k / 16k) |
+| v0.1.12, 3d40ae99c, f16, 1 slot | rental 1, Max-Q | 154.7 (148.7-160.6) | 146.9 (one prompt) | 0.6125 / — | 2,215.1 (32,721 tokens) | not measured | the base |
+| 765692590, the plan's baseline | — | not measured | not measured | not measured | not measured | not measured | 0.011851 / 0.007344 (2k / 16k) |
+
+The two measured rows are on different boxes, a Server Edition and a power-capped Max-Q, with different prompt sets.
+They are not a paired comparison: rental 2a found one box's speed moving about 25 % between runs with the same token streams.
+Rental 2c measured KL only, so the baseline row has no speed cells.
+
+#### KL against v0.1.12 (rental 2c, Oct 3, 2026, 9:00-10:02 AM CT)
+
+Box 54020392, two RTX PRO 6000 Blackwell Workstation Edition (2a's SKU), driver 595.71.05, EPYC 9554, $2.856/h, destroyed
+after 1.04 h, about $3.25 all in with the pack's download. Each
+engine was installed by `rig build --from-tarball --off-pin` from its prebuilt (3d40ae9 sha256 08852ac1…, 0090733
+b5b58f64…, 7656925 4dcf1819…) with one CUDA runtime beside all three (libcublas 13.5.1.27 bdcdcd88…, libcudart 13.3.29
+9f92e4c3…), and each ran its own llama-perplexity on its own libraries, because llama.h's `llama_context_params` gained
+`type_idx` between 3d40ae99c and 009073391 (d5fb3b1b8). The base is v0.1.12 as it served: 3d40ae99c, f16 K/V, the served
+shape `-ngl 99 -sm tensor -ts 1,1 -fa on -b 4096 -ub 1024`, `GGML_CUDA_ALLREDUCE=internal,GGML_CUDA_GRAPH_MAX=0`, on the
+real pack (sha256-pinned shards) over the KL corpus (sha256 5f5c84b3…, the same tokens as rentals 1 and 2a), 32 chunks
+at 2k and 4 at 16k. The candidate is v0.1.13 as it serves: 009073391 with q8_0 K/V/idx. The floor is the base engine
+against itself at `-ub 512`. Bar, set by rig-orchestrator before the box: the candidate's mean KLD at most 1.25x the floor
+at each depth, and its same top within 0.5 points of the floor's. Script `local/research/glm53-rental2-2026-10-02/leg-kl-2c.sh`,
+logs `local/research/freeze-prep-2026-10-02/rental-2c-pulled/`.
+
+| depth | row | mean KLD | same top | PPL ratio | against the floor |
+|---|---|---|---|---|---|
+| 2k | self: 3d40ae99c against its own base | 0 ± 0 | 99.997 ± 0.003 % | 1.000205 | the instrument reads identical as 0 |
+| 2k | floor: 3d40ae99c at `-ub 512` | 0.012162 ± 0.00021 | 96.417 ± 0.103 % | 1.000135 | — |
+| 2k | **candidate: v0.1.13, 009073391, q8_0 K/V/idx** | **0.011893 ± 0.000231** | **96.658 ± 0.099 %** | 1.000647 | **0.978x, same top +0.24: PASS** |
+| 2k | baseline: 765692590, f16 | 0.011851 ± 0.0002 | 96.472 ± 0.102 % | 1.001529 | 0.974x |
+| 16k | self | 0 ± 0 | 99.994 ± 0.004 % | 1.000289 | — |
+| 16k | floor | 0.007538 ± 0.000131 | 97.360 ± 0.089 % | 1.000734 | — |
+| 16k | **candidate** | **0.007363 ± 0.00012** | **97.397 ± 0.088 %** | 0.999531 | **0.977x, same top +0.04: PASS** |
+| 16k | baseline | 0.007344 ± 0.000113 | 97.366 ± 0.088 % | 1.000753 | 0.974x |
+| 2k | 009073391 with the f16 cache and no `-ctki`, against a fresh 3d40ae99c base | 0 ± 0 | 99.997 ± 0.003 % | 1.000205 | equal to the self row in every digit |
+| 16k | the same | 0 ± 0 | 99.994 ± 0.004 % | 1.000289 | equal to the self row in every digit |
+
+v0.1.13 as served, with every lever since v0.1.12 and the q8_0 caches together, reads inside v0.1.12's own batch-shape
+reordering at both depths, and as far from v0.1.12 as the plan's 765692590 baseline is, inside each row's ± (2k 0.011893
+against 0.011851, 16k 0.007363 against 0.007344). Nothing grows with depth.
+
+rig-glm predicted, before the box, that the floor and candidate would equal rental 2a's rows to the printed digit. That
+did not hold on the same SKU (floor 2k predicted 0.012685, read 0.012162; candidate 2k predicted 0.011520, read
+0.011893), with both self rows exactly 0. The last two rows separate the readings: the freeze at f16 is bit for bit with
+3d40ae99c at f16 prefill on this build (`leg-kl-2c-f16.sh`, written on the box after the miss, its prediction first), so
+the commits from 3d40ae99c to 009073391 are cleared. What moved the digits is the library build or the box, not the
+commits. 2c ran the portable prebuilts (native=off in every marker) on driver 595.71.05, and 2a ran a library compiled
+on its box with nvcc 13.0 on driver 580.173.02 (rig-builder's 2a ready receipt, Oct 2, 7:46 PM CT). Separating those two
+needs 2a's library on a 2c-style box. The same move
+shows in the floor: 2a's f16 floor at 16k read 0.012742, this build's 0.007538. A floor holds only against a candidate
+measured on the same build and box, as every row here was, so 2c's ratios (0.978x and 0.977x) are the D3 numbers, not
+any comparison with 2a's rows.

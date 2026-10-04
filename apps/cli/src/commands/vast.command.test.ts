@@ -17,7 +17,11 @@ async function setup() {
   const engine = await loadEngine(p.fs, layout);
   if (!head.ok || !engine.ok) throw new Error("fixture");
   const gate = { run: async () => ok({ dir: "/r/local/gate-runs/bonsai-2-27b/live", pass: true }) };
-  const uc = new RentGpu({ ...p, gate, self: ["/r/dist/rig"], home: "/home/u" }, layout, engine);
+  const uc = new RentGpu(
+    { ...p, gate, self: ["/r/dist/rig"], vastai: "/home/u/.local/bin/vastai", home: "/home/u" },
+    layout,
+    engine,
+  );
   return { p, head: head.value, uc };
 }
 
@@ -74,6 +78,7 @@ describe("vast command", () => {
       downMbps: 251,
       downCostPerGb: 0.003,
       storagePerHour: 0.01,
+      machineId: 41200,
     };
     const run = (
       vast: { run(args: never): Promise<number> },
@@ -102,6 +107,32 @@ describe("vast command", () => {
         await expect(run(vast, { "min-down-mbps": bad })).rejects.toBeInstanceOf(UsageError);
       expect(p.rental.ops).toEqual([]);
     });
+    test("lab --pack names the head whose pack is priced, --hours its session; --hours alone is refused", async () => {
+      const { p, vast } = await command();
+      const loaded: string[] = [];
+      const t = await setup();
+      const guard = new GuardBox({ ...p, box: {} });
+      const sweep = new SweepStopped({ ...p, self: ["/r/dist/rig"] }, layoutAt("/r"));
+      const lab = gpuRentalCommand(
+        t.uc,
+        null,
+        guard,
+        sweep,
+        async (name) => {
+          loaded.push(name);
+          return ok(t.head);
+        },
+        t.p.log,
+      );
+      t.p.fs.put("/home/u/.ssh/id_ed25519.pub", "ssh-ed25519 AAAAKEY marcos");
+      t.p.rental.offers = [card];
+      expect(await run(lab, { pack: "bonsai-2-27b", hours: "2", json: true })).toBe(0);
+      expect(loaded).toEqual(["bonsai-2-27b"]);
+      expect(t.p.log.lines.join("\n")).toContain("all in");
+      expect(await run(vast, { hours: "2" })).toBe(64);
+      expect(p.log.lines.join("\n")).toContain("--hours prices the session --pack names");
+      expect(await run(lab, { pack: "bonsai-2-27b", hours: "0" })).toBe(64);
+    });
     test("up --template refuses it: that form ranks by the download already and floors at 800 Mb/s", async () => {
       const { p, head, vast } = await command();
       const code = await vast.run({
@@ -112,6 +143,99 @@ describe("vast command", () => {
       expect(code).toBe(64);
       expect(p.log.lines.join("\n")).toContain("--min-down-mbps");
       expect(p.rental.ops).toEqual([]);
+    });
+  });
+  describe("more than one box", () => {
+    /** boxes 1000 and 1001 held, the older first, both listed as running */
+    async function held() {
+      const t = await setup();
+      const guard = new GuardBox({ ...t.p, box: {} });
+      const sweep = new SweepStopped({ ...t.p, self: ["/r/dist/rig"] }, layoutAt("/r"));
+      const vast = gpuRentalCommand(t.uc, null, guard, sweep, async () => ok(t.head), t.p.log);
+      for (const [age, id] of [
+        [2, 1000],
+        [1, 1001],
+      ] as const) {
+        t.p.rental.instances.set(id, { id, status: "running", label: "rig", dph: 0.5 });
+        t.p.fs.put(
+          `/r/local/rented-box/boxes/${id}/instance.json`,
+          JSON.stringify({
+            instanceId: id,
+            offerId: 1,
+            gpu: "RTX 5090",
+            cap: "12.0",
+            dph: 0.5,
+            geo: "Texas, US",
+            createdAt: Date.now() - age * 3_600_000,
+          }),
+        );
+      }
+      return { ...t, vast };
+    }
+    const args = (subcommand: string, flags: Record<string, string | boolean> = {}) => ({
+      positionals: [subcommand],
+      flags,
+      dashed: [],
+    });
+    test("--box names the box down, status, idle-check and bench act on; none named with two held is refused", async () => {
+      const { p, vast } = await held();
+      for (const subcommand of ["down", "idle-check", "bench"]) {
+        const at = p.log.lines.length;
+        const run =
+          subcommand === "bench"
+            ? { ...args(subcommand), positionals: ["bench", "bonsai-2-27b"] }
+            : args(subcommand);
+        expect(await vast.run(run)).toBe(64);
+        expect(p.log.lines.slice(at).join("\n")).toContain(
+          "2 boxes held: name one with --box (1000, 1001)",
+        );
+      }
+      let at = p.log.lines.length;
+      expect(await vast.run(args("status", { box: "1001" }))).toBe(0);
+      const one = p.log.lines.slice(at).join("\n");
+      expect(one).toContain("1001");
+      expect(one).not.toContain("1000");
+      at = p.log.lines.length;
+      expect(await vast.run(args("status"))).toBe(0);
+      const both = p.log.lines.slice(at).join("\n");
+      expect(both.indexOf("1000")).toBeGreaterThan(-1);
+      expect(both.indexOf("1000")).toBeLessThan(both.indexOf("1001"));
+      at = p.log.lines.length;
+      expect(
+        await vast.run({ ...args("bench", { box: "7" }), positionals: ["bench", "bonsai-2-27b"] }),
+      ).not.toBe(0);
+      expect(p.log.lines.slice(at).join("\n")).toContain("no box 7 held here");
+      expect(p.rental.ops).toEqual([]);
+      expect(await vast.run(args("down", { box: "1001" }))).toBe(0);
+      expect(p.rental.ops).toEqual(["destroy 1001"]);
+      expect(await p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(true);
+      // with one box left, naming none acts on it
+      expect(await vast.run(args("down"))).toBe(0);
+      expect(p.rental.ops).toEqual(["destroy 1001", "destroy 1000"]);
+    });
+    test("--box takes an instance id and --max-hours a quarter hour to a week; anything else acts on nothing", async () => {
+      const { p, vast } = await held();
+      for (const subcommand of ["down", "status", "idle-check"]) {
+        expect(await vast.run(args(subcommand, { box: "0" }))).toBe(64);
+        await expect(vast.run(args(subcommand, { box: "box7" }))).rejects.toBeInstanceOf(
+          UsageError,
+        );
+      }
+      expect(p.log.lines.join("\n")).toContain("usage: --box takes a box's instance id");
+      const lab = (hours: string) => vast.run(args("lab", { gpu: "RTX_5090", "max-hours": hours }));
+      const up = (hours: string) =>
+        vast.run({
+          ...args("up", { gpu: "RTX_5090", "max-hours": hours }),
+          positionals: ["up", "bonsai-2-27b"],
+        });
+      for (const rent of [lab, up]) {
+        for (const out of ["0", "0.1", "169"]) expect(await rent(out)).toBe(64);
+        for (const bad of ["-2", "soon"])
+          await expect(rent(bad)).rejects.toBeInstanceOf(UsageError);
+      }
+      expect(p.log.lines.join("\n")).toContain("usage: --max-hours takes 0.25 to 168 hours");
+      expect(p.rental.ops).toEqual([]);
+      expect(p.rental.instances.size).toBe(2);
     });
   });
   test("the subcommands' flags are exactly the ones the usage line names", async () => {

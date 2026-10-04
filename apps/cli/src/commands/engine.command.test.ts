@@ -189,6 +189,55 @@ describe("rig engine", () => {
     expect(p.log.lines.join("\n")).toContain("with -ctk q8_0 -ctv q8_0");
   });
 
+  test("--median rates each arm by the median of its repetitions, under the lease and held; only ab takes it", async () => {
+    const { p, command } = setup();
+    p.shell.on(/^\/bin\/rig engine/, { code: 0, stdout: "", stderr: "" });
+    const ab = ["ab", "--tree", "glm", "--gpu", "0", "--model", "/m.gguf", "--run", "med"];
+    await command.run(parseArgs([...ab, "--median"]));
+    expect(p.cardLease.leases[0]?.cmd).toContain("--median");
+    const tree = "/r/local/engine-build-trees/glm";
+    p.fs.put(`${tree}/bin/libggml-cuda.so.0`, "the tree's library");
+    p.fs.put(`${tree}/bin/llama-bench`, "elf");
+    p.shell.on(/^ldd /, (_cmd, opts) => ({
+      code: 0,
+      stdout: `\tlibggml-cuda.so.0 => ${opts?.env?.LD_LIBRARY_PATH?.split(":")[0]}/libggml-cuda.so.0 (0x7f)\n`,
+      stderr: "",
+    }));
+    // one slow repetition: its mean is 80, its median 100
+    p.shell.on(/-o jsonl/, () => ({
+      code: 0,
+      stdout: `{"samples_ts": [1, 100, 100, 40]}\n`,
+      stderr: "",
+    }));
+    const held = [...ab, "--pairs", "1", "--held", "--", "-p", "0"];
+    expect(await command.run(parseArgs([...held.slice(0, 9), "--median", ...held.slice(9)]))).toBe(
+      0,
+    );
+    const said = p.log.lines.join("\n");
+    expect(said).toContain("pair 1: a 100.0, b 100.0 t/s");
+    expect(said).toContain("each arm the median of its repetitions after the first");
+    await expect(
+      command.run(
+        parseArgs([
+          "kld",
+          "--tree",
+          "glm",
+          "--gpu",
+          "0",
+          "--model",
+          "/m.gguf",
+          "--text",
+          "/t",
+          "--base",
+          "/b",
+          "--tag",
+          "x",
+          "--median",
+        ]),
+      ),
+    ).rejects.toThrow(UsageError);
+  });
+
   test("an unknown subcommand is a usage error", async () => {
     const { command } = setup();
     expect(await command.run(parseArgs(["bench"]))).toBe(ExitCode.Usage);

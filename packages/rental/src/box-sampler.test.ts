@@ -59,18 +59,47 @@ describe("the window read", () => {
       [100, "3 200"],
       [10, "0 0"],
     ]);
-    expect(sh(windowRead(file, 360)).stdout.toString()).toBe("window=62\ndownload=150\n");
+    expect(sh(windowRead(file, 360, 512)).stdout.toString()).toBe("window=62\ndownload=150\n");
+  });
+  // A window's average is diluted by the ticks it spent not pulling: rental 2b's pull of the pack, 437.5 MB/s by hand,
+  // read 218.7 in the window it ended in. The ticks that pulled are averaged on their own, and counted, so a pull is
+  // measured at its rate and a short one is told from a sustained one.
+  test("prints the average over the ticks that pulled at least the floor, and how many there were", () => {
+    const file = samples([
+      [300, "0 448000"],
+      [200, "0 450000"],
+      [100, "0 446000"],
+      [50, "0 300"], // the pull ended: an ssh session's trickle, under the floor
+      [10, "0 0"],
+    ]);
+    expect(sh(windowRead(file, 360, 512)).stdout.toString()).toBe(
+      "window=0\ndownload=268860\npull=448000 3\n",
+    );
+  });
+  test("a window whose card read 0 throughout prints its peak as 0, not as no reading", () => {
+    const file = samples([
+      [100, "0 0"],
+      [10, "0 0"],
+    ]);
+    expect(sh(windowRead(file, 360, 512)).stdout.toString()).toBe("window=0\ndownload=0\n");
+  });
+  test("a window with no tick at the floor prints no pull", () => {
+    const file = samples([
+      [100, "3 200"],
+      [10, "0 511"],
+    ]);
+    expect(sh(windowRead(file, 360, 512)).stdout.toString()).toBe("window=3\ndownload=355\n");
   });
   test("lines of the first generation carry no download column: the card is read, the download is absent", () => {
     const file = samples([
       [100, "5"],
       [50, "40"],
     ]);
-    expect(sh(windowRead(file, 360)).stdout.toString()).toBe("window=40\n");
+    expect(sh(windowRead(file, 360, 512)).stdout.toString()).toBe("window=40\n");
   });
   test("an empty window prints nothing", () => {
-    expect(sh(windowRead(samples([[3000, "99 1"]]), 360)).stdout.toString()).toBe("");
-    expect(sh(windowRead("/nonexistent/samples", 360)).stdout.toString()).toBe("");
+    expect(sh(windowRead(samples([[3000, "99 1"]]), 360, 512)).stdout.toString()).toBe("");
+    expect(sh(windowRead("/nonexistent/samples", 360, 512)).stdout.toString()).toBe("");
   });
 });
 

@@ -4,7 +4,15 @@
 // and this file satisfies. Everything below this line is wiring; nothing here decides anything.
 import { dirname, resolve } from "node:path";
 import { realPorts } from "@rig/adapters";
-import { ExitCode, fail, type Layout, layoutAt, type Ports, type Result } from "@rig/core";
+import {
+  BUILT_FROM,
+  ExitCode,
+  fail,
+  type Layout,
+  layoutAt,
+  type Ports,
+  type Result,
+} from "@rig/core";
 import {
   BuildEngine,
   BuildPrebuilt,
@@ -40,6 +48,9 @@ import { manageUnitCommand } from "./commands/unit.command.ts";
 import { bringUpHeadCommand } from "./commands/up.command.ts";
 import { gpuRentalCommand, publishTemplate } from "./commands/vast.command.ts";
 import { verifyHeadCommand } from "./commands/verify.command.ts";
+
+/** The tree this binary was built from, which tools/build.ts defines at the compile: none run from the source. */
+declare const RIG_BUILT_FROM: string | undefined;
 
 /** A compiled binary runs from /$bunfs; a checkout runs this file under bun. */
 const compiled = import.meta.dir.startsWith("/$bunfs");
@@ -140,6 +151,7 @@ function commandsFor(
             : Promise.resolve(fail(ExitCode.Failure, "no engine to gate with")),
       },
       self: selfCommand(),
+      vastai: Bun.which("vastai") ?? "vastai",
       home: process.env.HOME ?? "",
     },
     layout,
@@ -169,6 +181,17 @@ function commandsFor(
 async function main(argv: string[]): Promise<number> {
   if (argv[0] === "--version" || argv[0] === "version") {
     console.log(`rig ${version}`);
+    return 0;
+  }
+  // read by `rig vast up` and `lab` before they ship this binary to a box
+  if (argv[0] === BUILT_FROM.flag) {
+    if (typeof RIG_BUILT_FROM !== "string") {
+      console.error(
+        "rig: this rig was not compiled by bun run build, so it does not know its tree",
+      );
+      return 1;
+    }
+    console.log(RIG_BUILT_FROM);
     return 0;
   }
   const ports = realPorts();

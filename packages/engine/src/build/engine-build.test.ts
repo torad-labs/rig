@@ -665,6 +665,37 @@ glibc = "2.35"
     expect(p.shell.calls.some((c) => c[0] === "curl")).toBe(false);
     expect(p.log.lines.some((l) => l.includes("glibc 2.31 on this machine"))).toBe(true);
   });
+  test("a machine with no NVIDIA driver is refused by the driver library it lacks, never as a stale object", async () => {
+    // 2026-10-03, the v0.1.13 fresh install in a card-less ubuntu:22.04: libcuda.so.1 not found read "a stale or empty object"
+    const { p, uc } = await prebuiltSetup();
+    p.shell.on(/^ldd -r /, {
+      code: 0,
+      stdout: "\tlibcuda.so.1 => not found\n",
+      stderr: "undefined symbol: cuMemCreate\t(/r/libggml-cuda.so.0)\n",
+    });
+    const r = await uc.run({ gpu: 0 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.message).toContain("llama-server does not resolve: libcuda.so.1 not found");
+    expect(r.message).toContain("NVIDIA driver");
+    expect(r.message).not.toContain("stale or empty object");
+    expect(await p.fs.exists(dir)).toBe(false);
+  });
+  test("a library missing from the build dir is named, never read as a stale object", async () => {
+    const { p, uc } = await prebuiltSetup();
+    p.shell.on(/^ldd -r /, {
+      code: 0,
+      stdout:
+        "\tlibcublasLt.so.13 => not found\n\tlibcuda.so.1 => /usr/lib/x86_64-linux-gnu/libcuda.so.1\n",
+      stderr: "undefined symbol: cublasLtMatmul\t(/r/libggml-cuda.so.0)\n",
+    });
+    const r = await uc.run({ gpu: 0 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.message).toContain("llama-server does not resolve: libcublasLt.so.13 not found");
+    expect(r.message).not.toContain("NVIDIA driver");
+    expect(r.message).not.toContain("stale or empty object");
+  });
   test("--compile builds from source over a pinned prebuilt, and --portable (which makes one) always does", async () => {
     for (const options of [{ compile: true }, { portable: true }]) {
       const { p, uc } = await prebuiltSetup();
@@ -742,12 +773,16 @@ describe("build, on a machine with no NVIDIA driver (a compile in a container wi
     expect(!r.ok && r.message).toContain("mul_mat_q_case");
     expect(await p.fs.exists(`/r/local/engine-builds/${engine.sha7}-sm120`)).toBe(false);
   });
-  test("with no stub in the cache there is nothing to preload: the driver's missing symbols are the refusal", async () => {
+  test("with no stub in the cache there is nothing to preload: the refusal names the driver library, not a stale object", async () => {
     const { p, uc } = await setup();
     configures(p, "CMAKE_CUDA_COMPILER:FILEPATH=/usr/local/cuda/bin/nvcc\n");
     const preloaded = loader(p, () => NO_DRIVER);
     const r = await uc.run({ gpu: 0 });
-    expect(!r.ok && r.message).toContain("undefined symbol: cuMemCreate");
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.message).toContain("libcuda.so.1 not found");
+    expect(r.message).toContain("NVIDIA driver");
+    expect(r.message).not.toContain("stale or empty object");
     expect(preloaded.every((preload) => preload === undefined)).toBe(true);
   });
 });

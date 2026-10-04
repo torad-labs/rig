@@ -57,7 +57,7 @@
       "-sm": ["--split-mode", "-sm"],
       "-ts": ["--tensor-split", "-ts"]
     },
-    "009073391c9718aef0870d209e22502f8ccca3cc": {
+    "42f3b1be0ab2ef79410084bde97eb4a4ff4e1c94": {
       "-m": ["--model", "-m"],
       "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],
       "--jinja": ["--jinja", "--no-jinja"],

@@ -51,10 +51,17 @@ export function readKldSummary(text: string): KldSummary | null {
   };
 }
 
-/** one llama-bench test's rate in tokens a second, from its `-o jsonl` output: the mean of its repetitions from the
- *  second on, the first reading slow on a card that was idle (all of them when there is one). One test a run: a run
- *  of several (-p and -n together) is refused, as the pairs compare one number. */
-export function readBenchRate(jsonl: string): Result<{ rate: number; samples: number[] }> {
+/** how an arm's repetitions make its rate: their mean, or their median, which one repetition at a box's low level
+ *  does not move (rental 2a's box ran at ~121 and ~152 tok/s on the same token streams) */
+export type ArmRate = "mean" | "median";
+
+/** one llama-bench test's rate in tokens a second, from its `-o jsonl` output: the mean (or median) of its repetitions
+ *  from the second on, the first reading slow on a card that was idle (all of them when there is one). One test a
+ *  run: a run of several (-p and -n together) is refused, as the pairs compare one number. */
+export function readBenchRate(
+  jsonl: string,
+  by: ArmRate = "mean",
+): Result<{ rate: number; samples: number[] }> {
   const tests = jsonl.split("\n").filter((line) => line.startsWith("{"));
   if (tests.length !== 1)
     return fail(
@@ -64,7 +71,16 @@ export function readBenchRate(jsonl: string): Result<{ rate: number; samples: nu
   const samples = (JSON.parse(tests[0] as string) as { samples_ts?: number[] }).samples_ts ?? [];
   if (samples.length === 0) return fail(ExitCode.Failure, "llama-bench printed no samples_ts");
   const counted = samples.length > 1 ? samples.slice(1) : samples;
-  return ok({ rate: counted.reduce((a, b) => a + b, 0) / counted.length, samples });
+  return ok({ rate: by === "median" ? median(counted) : mean(counted), samples });
+}
+
+const mean = (xs: readonly number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+/** the middle value, or the mean of the two middle ones */
+function median(xs: readonly number[]): number {
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
 /** t(0.975, df) for df 1..30; past 30 the normal's 1.96, a little narrow (2.04 at 30) */

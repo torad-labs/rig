@@ -29,10 +29,24 @@ const pro6000 = (o: Partial<Offer>): Offer => ({
   downMbps: 900,
   downCostPerGb: 0.003,
   storagePerHour: 0.02,
+  machineId: 1,
   ...o,
 });
-const dearDownload = pro6000({ id: 53168569, dph: 3.2, downCostPerGb: 0.051, downMbps: 900 });
-const cheapDownload = pro6000({ id: 33665866, dph: 3.47, downCostPerGb: 0.003, downMbps: 6724 });
+const dearDownload = pro6000({
+  id: 53168569,
+  dph: 3.2,
+  downCostPerGb: 0.051,
+  downMbps: 900,
+  machineId: 53168,
+  geo: "Sweden, SE",
+});
+const cheapDownload = pro6000({
+  id: 33665866,
+  dph: 3.47,
+  downCostPerGb: 0.003,
+  downMbps: 6724,
+  machineId: 33665,
+});
 
 async function setup() {
   const p = fakePorts();
@@ -59,7 +73,11 @@ async function setup() {
     total_slots: 1,
   });
   const gate: LiveGate = { run: async () => ok({ dir: "", pass: true }) };
-  const uc = new RentGpu({ ...p, gate, self: ["/r/dist/rig"], home: "/home/u" }, layout, engine);
+  const uc = new RentGpu(
+    { ...p, gate, self: ["/r/dist/rig"], vastai: "/home/u/.local/bin/vastai", home: "/home/u" },
+    layout,
+    engine,
+  );
   return { p, head: head.value, engine: engine.value, uc };
 }
 
@@ -114,6 +132,23 @@ describe("vast up --template", () => {
     expect(p.rental.instances.size).toBe(0);
   });
 
+  // 2026-10-03: box 54020392 declared 7,754 Mb/s and pulled the pack at about 447 Mb/s by its own sampler
+  test("a host measured slower than it declares is ranked on what it pulled at", async () => {
+    const { p, head, uc } = await setup();
+    p.fs.put(
+      "/r/local/rented-box/download-rates.json",
+      JSON.stringify([{ instanceId: 1, machineId: 33665, geo: "Norway, NO", mbps: 100, at: 0 }]),
+    );
+    const r = await uc.upFromTemplate(head, { hours: 1, dryRun: true });
+    expect(r.ok && r.value.kind === "dry-run" && r.value.pick.id).toBe(dearDownload.id);
+    if (!r.ok || r.value.kind !== "dry-run") return;
+    const measured = r.value.ranked?.find((each) => each.offer.id === cheapDownload.id);
+    expect(measured?.rate).toEqual({ mbps: 100, source: "host" });
+    // 134 GB at 100 Mb/s is about 179 minutes, not the 2.7 the host's 6,724 would give: billed, it outweighs the
+    // other host's 0.051 $/GB
+    expect(measured?.minutesToServe).toBeGreaterThan(179);
+  });
+
   test("rents from the template with rig's label, follows the box's own bring-up, then the tunnel, the timer and READY", async () => {
     const { p, head, uc } = await setup();
     servesAfter(p, 3);
@@ -143,8 +178,11 @@ describe("vast up --template", () => {
     expect(log).toContain("box 1000: 2026-10-01T03:04:00Z rig: == serve");
     expect(log).toContain("READY: 2× RTX PRO 6000 WS box 1000");
     expect(log).toContain("ANTHROPIC_BASE_URL=http://127.0.0.1:8100");
-    expect(p.systemd.ops).toContain("enable rig-vast-idle.timer");
-    expect(p.fs.text("/r/local/rented-box/instance.json")).toContain('"instanceId": 1000');
+    expect(p.systemd.ops).toContain("enable rig-vast-idle-1000.timer");
+    expect(p.systemd.ops).toContain("enable rig-vast-stop-1000.timer");
+    expect(p.fs.text("/r/local/rented-box/boxes/1000/instance.json")).toContain(
+      '"instanceId": 1000',
+    );
   });
 
   test("--disk-gb grows the box's disk past the head's own, in the market's pricing and the rental; never below it", async () => {
@@ -185,7 +223,7 @@ describe("vast up --template", () => {
     expect(!r.ok && r.message).toContain("destroyed");
     expect(p.ssh.pulled).toEqual([["/var/log/rig/up.log", "/r/local/rented-box/box-1000-up.log"]]);
     expect(p.rental.instances.size).toBe(0);
-    expect(await p.fs.exists("/r/local/rented-box/instance.json")).toBe(false);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1000/instance.json")).toBe(false);
   });
 
   test("a box that never serves within the budget is destroyed, its log kept", async () => {
