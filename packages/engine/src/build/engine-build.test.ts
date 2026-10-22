@@ -20,6 +20,17 @@ const compiledToml = engineToml.replace(/^\[cuda\][\s\S]*$/m, "");
 
 const GOMP = "/usr/lib/gcc/x86_64-linux-gnu/15/libgomp.so.1";
 
+/** libggml-base.so as llama.cpp links it: the commit it was built from among its strings, NUL-ended (build-info) */
+const baseLib = (commit: string) => `\0GNU C17\0${commit}\0version: %s (build %d, commit %s)\0`;
+
+/** `tar -czf OUT` succeeds, and like tar, leaves OUT behind */
+function packs(p: ReturnType<typeof fakePorts>) {
+  p.shell.on(/^tar -C \S+ -czf/, (cmd) => {
+    p.fs.put(cmd[4]!, "tgz");
+    return { code: 0, stdout: "", stderr: "" };
+  });
+}
+
 async function setup(toml = compiledToml) {
   const p = fakePorts();
   const layout = layoutAt("/r");
@@ -185,6 +196,7 @@ describe("build", () => {
     p.fs.put(`/r/local/engine-builds/engine-sm120-${engine.sha7}.tar.gz`, "tgz");
     p.shell.on(/^tar -C (\S+) -xzf/, (cmd) => {
       for (const t of TARGETS) p.fs.put(`${cmd[2]}/${t}`, t);
+      p.fs.put(`${cmd[2]}/libggml-base.so`, baseLib(engine.sha7));
       return { code: 0, stdout: "", stderr: "" };
     });
     const right = await uc.run({
@@ -194,6 +206,28 @@ describe("build", () => {
     expect(right.ok).toBe(true);
     if (right.ok)
       expect(right.value.marker).toContain(`source=tarball:engine-sm120-${engine.sha7}.tar.gz`);
+  });
+  test("--from-tarball installs the file given over a build already here, never answers with that build", async () => {
+    const { p, uc } = await setup();
+    const dir = `/r/local/engine-builds/${engine.sha7}-sm120`;
+    p.fs.put(
+      `${dir}/BUILD`,
+      `fork=${engine.fork.sha} cap=sm_120 native=on built=2026-10-01T19:43:36.779Z host=h source=compiled`,
+    );
+    p.fs.put(`${dir}/llama-server`, "old llama-server");
+    const tarball = `/r/local/engine-builds/engine-sm120-${engine.sha7}.tar.gz`;
+    p.fs.put(tarball, "tgz");
+    p.shell.on(/^tar -C (\S+) -xzf/, (cmd) => {
+      for (const t of TARGETS) p.fs.put(`${cmd[2]}/${t}`, `new ${t}`);
+      p.fs.put(`${cmd[2]}/libggml-base.so`, baseLib(engine.sha7));
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const r = await uc.run({ gpu: 0, fromTarball: tarball });
+    expect(r.ok ? { built: r.value.alreadyBuilt, marker: r.value.marker } : r.message).toEqual({
+      built: false,
+      marker: expect.stringContaining(`source=tarball:engine-sm120-${engine.sha7}.tar.gz`),
+    });
+    expect(p.fs.text(`${dir}/llama-server`)).toBe("new llama-server");
   });
   test("fetches the pinned commit under local/engine-sources when the submodule is not at the pin", async () => {
     const { p, uc, engine } = await setup();
@@ -276,7 +310,7 @@ describe("build", () => {
   test("--portable links no OpenSSL (a newer host's would not load on an older one); native does, both say so", async () => {
     const configureOf = async (portable: boolean) => {
       const { p, uc } = await setup();
-      p.shell.on(/^tar -C \S+ -czf/, { code: 0, stdout: "", stderr: "" });
+      packs(p);
       await uc.run({ gpu: 0, portable });
       return p.shell.calls.find((c) => c[0] === "cmake" && c[1] === "-S")!;
     };
@@ -285,7 +319,7 @@ describe("build", () => {
   });
   test("--portable packs the build without its marker (it names this host) or this machine's user", async () => {
     const { p, uc } = await setup();
-    p.shell.on(/^tar -C \S+ -czf/, { code: 0, stdout: "", stderr: "" });
+    packs(p);
     const r = await uc.run({ gpu: 0, portable: true });
     expect(r.ok && r.value.tarball).toBe(
       `/r/local/engine-builds/engine-sm120-${engine.sha7}.tar.gz`,
@@ -295,13 +329,25 @@ describe("build", () => {
     expect(pack).toContain("--owner=0");
     expect(pack).toContain("--numeric-owner");
   });
+  test("--portable leaves no tarball under the build's own name when tar fails part way", async () => {
+    const { p, uc } = await setup();
+    p.shell.on(/^tar -C \S+ -czf/, (cmd) => {
+      p.fs.put(cmd[4]!, "half a gzip stream"); // tar writes as it goes, then dies (ENOSPC, a signal)
+      return { code: 2, stdout: "", stderr: "tar: write error: No space left on device" };
+    });
+    const r = await uc.run({ gpu: 0, portable: true });
+    expect(!r.ok && r.message).toContain("No space left on device");
+    const tarball = `/r/local/engine-builds/engine-sm120-${engine.sha7}.tar.gz`;
+    expect(await p.fs.exists(tarball)).toBe(false);
+    expect(await p.fs.exists(`${tarball}.part`)).toBe(false);
+  });
   describe("--portable over a build already published here", () => {
     const dir = `/r/local/engine-builds/${engine.sha7}-sm120`;
     const tarball = `/r/local/engine-builds/engine-sm120-${engine.sha7}.tar.gz`;
     /** a build published here before this run: its marker, and `targets` */
     async function over(native: "on" | "off", targets: readonly string[], source = "compiled") {
       const s = await setup();
-      s.p.shell.on(/^tar -C \S+ -czf/, { code: 0, stdout: "", stderr: "" });
+      packs(s.p);
       s.p.fs.put(
         `${dir}/BUILD`,
         `fork=${engine.fork.sha} cap=sm_120 native=${native} built=2026-10-01T19:43:36.779Z host=h source=${source}`,
@@ -349,7 +395,7 @@ describe("build", () => {
   });
   test("a portable build ships the compiler's libgomp beside its targets; a native one does not", async () => {
     const portable = await setup();
-    portable.p.shell.on(/^tar -C \S+ -czf/, { code: 0, stdout: "", stderr: "" });
+    packs(portable.p);
     expect((await portable.uc.run({ gpu: 0, portable: true })).ok).toBe(true);
     expect(portable.p.fs.text(`/r/local/engine-builds/${engine.sha7}-sm120/libgomp.so.1`)).toBe(
       "gomp",
@@ -483,7 +529,13 @@ glibc = "2.35"
   /** curl writes each file's bytes (`served` overrides one); tar unpacks the build (`members`, TARGETS unless
    *  given), and each runtime archive the libraries its wildcards name (`omit` leaves one out) */
   async function prebuiltSetup(
-    o: { served?: Record<string, string>; omit?: string; members?: readonly string[] } = {},
+    o: {
+      served?: Record<string, string>;
+      omit?: string;
+      members?: readonly string[];
+      /** the commit the build's libggml-base.so carries, the pin's unless given */
+      commit?: string;
+    } = {},
   ) {
     const s = await setup(prebuiltToml);
     s.p.shell.on(/^curl/, (cmd) => {
@@ -494,6 +546,7 @@ glibc = "2.35"
     });
     s.p.shell.on(/^tar -C (\S+) -xzf/, (cmd) => {
       for (const t of o.members ?? TARGETS) s.p.fs.put(`${cmd[2]}/${t}`, `elf ${t}`);
+      s.p.fs.put(`${cmd[2]}/libggml-base.so`, baseLib(o.commit ?? engine.sha7));
       return { code: 0, stdout: "", stderr: "" };
     });
     s.p.shell.on(/^tar -C (\S+) -xJf/, (cmd) => {
@@ -524,6 +577,45 @@ glibc = "2.35"
     for (const name of Object.keys(bytes))
       expect(await p.fs.exists(`${downloads}/${name}`)).toBe(false);
   });
+  test("an install records the CUDA runtime beside it, and one installed with another runtime, or with none recorded, is installed again", async () => {
+    const runtime = [body("cuda_cudart-archive.tar.xz"), body("libcublas-archive.tar.xz")]
+      .map((text) => sha(text).slice(0, 12))
+      .join("+");
+    const first = await prebuiltSetup();
+    const installed = await first.uc.run({ gpu: 0 });
+    expect(installed.ok ? installed.value.marker : installed.message).toContain(
+      ` runtime=${runtime}`,
+    );
+    const earlier = `fork=${engine.fork.sha} cap=sm_120 native=off built=2026-10-01T19:43:36.779Z host=h source=tarball:${tarballName}`;
+    for (const marker of [`${earlier} runtime=000000000000+111111111111`, earlier]) {
+      const { p, uc } = await prebuiltSetup();
+      p.fs.put(`${dir}/BUILD`, marker);
+      p.fs.put(`${dir}/llama-server`, "old llama-server");
+      const r = await uc.run({ gpu: 0 });
+      expect(r.ok ? { built: r.value.alreadyBuilt, marker: r.value.marker } : r.message).toEqual({
+        built: false,
+        marker: expect.stringContaining(` runtime=${runtime}`),
+      });
+      expect(p.fs.text(`${dir}/llama-server`)).toBe("elf llama-server");
+    }
+    // a build compiled here links the toolkit's runtime, which the pin's [cuda] does not describe
+    const { p, uc } = await prebuiltSetup();
+    p.fs.put(`${dir}/BUILD`, earlier.replace(`source=tarball:${tarballName}`, "source=compiled"));
+    p.fs.put(`${dir}/llama-server`, "compiled llama-server");
+    const compiled = await uc.run({ gpu: 0 });
+    expect(compiled.ok && compiled.value.alreadyBuilt).toBe(true);
+  });
+  test("a tarball's own marker is never kept: the install writes rig's, naming the tarball and the runtime", async () => {
+    const { p, uc } = await prebuiltSetup();
+    p.shell.on(/^tar -C (\S+) -xzf/, (cmd) => {
+      for (const t of TARGETS) p.fs.put(`${cmd[2]}/${t}`, `elf ${t}`);
+      p.fs.put(`${cmd[2]}/libggml-base.so`, baseLib(engine.sha7));
+      p.fs.put(`${cmd[2]}/BUILD`, `fork=${engine.fork.sha} cap=sm_120 source=compiled`); // packed by hand
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const r = await uc.run({ gpu: 0 });
+    expect(r.ok ? r.value.marker : r.message).toContain(`source=tarball:${tarballName} runtime=`);
+  });
   test("installs a build published before llama-perplexity was a target: an install needs the targets that serve", async () => {
     const { p, uc } = await prebuiltSetup({ members: PUBLISHED_32E695E });
     const r = await uc.run({ gpu: 0 });
@@ -537,6 +629,24 @@ glibc = "2.35"
       .map((c) => c.at(-1)!.split("/").at(-1));
     expect(checked).toContain("llama-server");
     expect(checked).not.toContain("llama-perplexity");
+  });
+  test("a tarball under the pin's name whose library carries another commit is refused by that commit, and nothing is published", async () => {
+    const local = `/r/local/prebuilt/${tarballName}`;
+    for (const [commit, why] of [
+      ["deadbee", "carries commit deadbee, not the pin's"],
+      ["", "carries no commit"],
+    ] as const) {
+      const { p, uc } = await prebuiltSetup({ commit });
+      p.fs.put(local, "a build of another commit, renamed");
+      const r = await uc.run({ gpu: 0, fromTarball: local });
+      expect(r.ok ? "installed" : r.message).toContain(why);
+      expect(await p.fs.exists(dir)).toBe(false);
+    }
+    // llama.cpp's short commit can run past seven characters (009073391 for 0090733): a prefix of the pin is the pin
+    const { p, uc } = await prebuiltSetup({ commit: engine.fork.sha.slice(0, 9) });
+    p.fs.put(local, "the pin's build");
+    const r = await uc.run({ gpu: 0, fromTarball: local });
+    expect(r.ok ? r.value.dir : r.message).toBe(dir);
   });
   test("an install still refuses a tarball missing a target that serves, by name", async () => {
     const members = PUBLISHED_32E695E.filter((m) => m !== "llama-bench");
@@ -699,8 +809,18 @@ glibc = "2.35"
   test("--compile builds from source over a pinned prebuilt, and --portable (which makes one) always does", async () => {
     for (const options of [{ compile: true }, { portable: true }]) {
       const { p, uc } = await prebuiltSetup();
-      p.shell.on(/^tar -C \S+ -czf/, { code: 0, stdout: "", stderr: "" }); // --portable packs it
-      expect((await uc.run({ gpu: 0, ...options })).ok).toBe(true);
+      packs(p); // --portable packs it
+      // the prebuilt is already installed here: neither flag is answered by it
+      p.fs.put(
+        `${dir}/BUILD`,
+        `fork=${engine.fork.sha} cap=sm_120 native=off built=2026-10-01T19:43:36.779Z host=h source=tarball:${tarballName}`,
+      );
+      p.fs.put(`${dir}/llama-server`, "elf llama-server");
+      const r = await uc.run({ gpu: 0, ...options });
+      expect(r.ok ? { built: r.value.alreadyBuilt, marker: r.value.marker } : r.message).toEqual({
+        built: false,
+        marker: expect.stringContaining("source=compiled"),
+      });
       expect(p.shell.calls.some((c) => c[0] === "cmake")).toBe(true);
       expect(p.shell.calls.some((c) => c[0] === "curl")).toBe(false);
     }

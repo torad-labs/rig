@@ -21,7 +21,7 @@
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { benchCache } from "@rig/head";
-import type { Probe, ProbeResult } from "./probe.ts";
+import { benchEnv, type Probe, type ProbeResult } from "./probe.ts";
 
 export interface DeviceProfile {
   name: string;
@@ -607,11 +607,7 @@ export const rooflineProbe: Probe = {
         "-d",
         String(depth),
       ];
-      const env = {
-        CUDA_DEVICE_ORDER: "PCI_BUS_ID",
-        CUDA_VISIBLE_DEVICES: String(ctx.gpu),
-        LD_LIBRARY_PATH: ctx.binDir,
-      };
+      const env = benchEnv(ctx);
       const plain = await ctx.shell.run([...bench, "-r", "3"], { env, timeoutMs: 1_800_000 });
       const rate = plain.code === 0 ? parseBenchRate(plain.stdout, cfg.gen) : null;
       if (rate === null) {

@@ -107,7 +107,10 @@ export function gpuRentalCommand(
     headName: (args) => args.positionals[1],
     async run(args: Args) {
       const [subcommand, name] = args.positionals;
-      const takes = SUBCOMMAND_FLAGS[subcommand ?? ""];
+      // own keys only: `rig vast constructor` names Object.prototype's, which is no subcommand
+      const takes = Object.hasOwn(SUBCOMMAND_FLAGS, subcommand ?? "")
+        ? SUBCOMMAND_FLAGS[subcommand ?? ""]
+        : undefined;
       const other = takes ? Object.keys(args.flags).filter((flag) => !takes.includes(flag)) : [];
       if (other.length > 0) {
         log.error(
@@ -255,18 +258,18 @@ export function gpuRentalCommand(
         }
         case "template":
           return withHead(name, "vast template <head>", loadHead, log, async (head) => {
+            const diskGb = positiveInt(args, "disk-gb");
+            const idleMinutes = positiveInt(args, "idle-minutes");
+            if (diskGb === null || idleMinutes === null) {
+              log.error("usage: --disk-gb and --idle-minutes take a whole number above zero");
+              return ExitCode.Usage;
+            }
+            // the lifetime every box rented from the template is stopped at, bounded as up's and lab's hard stop is
+            const maxHours = hardStopHours(args, log);
+            if (maxHours === null) return ExitCode.Usage;
             if (!template) {
               log.error("vast template reads the engine pin, and engine.toml did not load");
               return ExitCode.Failure;
-            }
-            const diskGb = positiveInt(args, "disk-gb");
-            const idleMinutes = positiveInt(args, "idle-minutes");
-            const maxHours = positiveInt(args, "max-hours");
-            if (diskGb === null || idleMinutes === null || maxHours === null) {
-              log.error(
-                "usage: --disk-gb, --idle-minutes and --max-hours take a whole number above zero",
-              );
-              return ExitCode.Usage;
             }
             const result = await publishTemplate(template, sweep, head, {
               idleMinutes,
@@ -283,11 +286,12 @@ export function gpuRentalCommand(
         case "guard":
           return withHead(name, "vast guard <head>", loadHead, log, async (head) => {
             const idleMinutes = positiveInt(args, "idle-minutes");
-            const maxHours = positiveInt(args, "max-hours");
-            if (idleMinutes === null || maxHours === null) {
-              log.error("usage: --idle-minutes and --max-hours take a whole number above zero");
+            if (idleMinutes === null) {
+              log.error("usage: --idle-minutes takes a whole number above zero");
               return ExitCode.Usage;
             }
+            const maxHours = hardStopHours(args, log);
+            if (maxHours === null) return ExitCode.Usage;
             const result = await guard.run(head, {
               idleMinutes: idleMinutes ?? TEMPLATE_IDLE_MINUTES,
               maxHours,

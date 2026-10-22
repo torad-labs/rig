@@ -9,7 +9,7 @@ import { checkArtifact } from "@rig/core";
 import type { Engine } from "@rig/engine";
 import { isBuilt } from "@rig/engine";
 import type { Head } from "@rig/head";
-import { describeProfile, HeadEndpoint, placeHead } from "@rig/head";
+import { describeProfile, HeadEndpoint, placeHead, profileSpeculates } from "@rig/head";
 
 /** what describe needs from unit (injected; describe never imports unit) */
 export interface UnitReader {
@@ -78,7 +78,7 @@ export class DescribeHead {
         : [...devices];
     const card = gpus[0] === undefined ? null : await this.deps.gpu.query(gpus[0]);
     const cap = card?.computeCap ?? null;
-    const built = cap ? await isBuilt(this.deps.fs, this.engine.binDir(cap)) : false;
+    const built = cap ? await isBuilt(this.deps.fs, this.engine.binDir(cap), this.engine) : false;
     let pack = true;
     for (const file of head.servedFiles)
       pack &&= (await checkArtifact(this.deps.fs, this.deps.hasher, file)) === "ok";
@@ -89,6 +89,8 @@ export class DescribeHead {
       `http://127.0.0.1:${head.port}`,
     );
     const serving = await endpoint.healthy();
+    // the draft this card serves: none where its profile turns speculation off, the head's where no profile is placed
+    const drafts = !placed.ok || profileSpeculates(head, placed.value.profile);
     return {
       name: head.name,
       title: head.title,
@@ -98,13 +100,14 @@ export class DescribeHead {
       served_file: head.servedFiles[0]!.file,
       undrived: head.undrived ?? null,
       engine_commit: this.engine.sha7,
-      speculative: head.speculative
-        ? {
-            type: head.speculative.type,
-            file: "file" in head.speculative ? head.speculative.file : null,
-            n_max: head.speculative.n_max,
-          }
-        : null,
+      speculative:
+        drafts && head.speculative
+          ? {
+              type: head.speculative.type,
+              file: "file" in head.speculative ? head.speculative.file : null,
+              n_max: head.speculative.n_max,
+            }
+          : null,
       model_ctx: head.context.model,
       advertise_ctx: head.context.advertise,
       supported_archs: this.engine.archs.map((arch) => `sm_${arch.cap}`),

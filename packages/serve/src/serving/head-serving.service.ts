@@ -90,7 +90,7 @@ export class ServeHead {
     const { profile, cards } = placed.value;
     const cap = cards[0]!.cap; // a profile's cards are of one compute capability
     const binDir = this.engine.binDir(cap);
-    if (!(await isBuilt(this.deps.fs, binDir)))
+    if (!(await isBuilt(this.deps.fs, binDir, this.engine)))
       return fail(
         ExitCode.Failure,
         `REFUSING to start: no complete build at ${binDir} for sm_${cap} (run: rig build)`,
@@ -183,12 +183,13 @@ export class ServeHead {
       );
     // fewer slots than the profile's share its pool, never a longer window than the model's own for one conversation;
     // a pool larger than the profile's is one its measurement never covered
-    if (options.ctx !== undefined && (options.ctx < 1 || options.ctx > profile.ctx))
+    const pool = Math.min(profile.ctx, slots * head.context.model);
+    if (options.ctx !== undefined && (options.ctx < 1 || options.ctx > pool))
       return fail(
         ExitCode.Failure,
-        `REFUSING: --ctx ${options.ctx} — ${where} holds a pool of 1 to ${profile.ctx} cells`,
+        `REFUSING: --ctx ${options.ctx} — ${where} holds a pool of 1 to ${pool} cells at ${slots} slot${slots === 1 ? "" : "s"}`,
       );
-    const ctx = options.ctx ?? Math.min(profile.ctx, slots * head.context.model);
+    const ctx = options.ctx ?? pool;
     const cacheRam = options.cacheRam ?? defaultCacheRam(await this.deps.host.ramMiB());
     const binDir = this.engine.binDir(cards[0]!.cap);
     const gpus = cards.map((card) => card.index);
@@ -245,14 +246,31 @@ export class ServeHead {
     return ok(await this.run(head, plan.value, extra));
   }
 
-  /** Start the planned server as a child, forward SIGINT/SIGTERM, exit with its code. */
+  /** Start the planned server as a child in a session of its own, forward SIGINT and SIGTERM to it once each and a
+   *  hangup as SIGTERM, exit with its code. In rig's process group a terminal's Ctrl-C reached llama-server beside the
+   *  copy rig forwarded, and llama-server answers a second signal with exit(1); in its own session only rig's copy
+   *  reaches it, and so does a box's `kill -INT` of rig (rented-box.ts). The terminal's hangup no longer reaches it
+   *  either, so rig passes that on. setsid execs in place, so the child keeps the pid rig signals. */
   async run(head: Head, plan: ServePlan, extra: readonly string[] = []): Promise<number> {
     this.deps.log.info(serveLogLine(head, plan));
-    const child = this.deps.shell.spawn([...plan.argv, ...extra], { env: plan.env });
-    const forward = (sig: "SIGINT" | "SIGTERM") => () => child.kill(sig);
-    process.on("SIGINT", forward("SIGINT"));
-    process.on("SIGTERM", forward("SIGTERM"));
-    return child.exited;
+    const setsid = await this.deps.shell.which("setsid");
+    if (!setsid)
+      this.deps.log.warn(
+        "setsid is not on PATH: llama-server runs in rig's process group, so a terminal's Ctrl-C reaches it twice and it exits 1",
+      );
+    const argv = [...(setsid ? [setsid, "--wait"] : []), ...plan.argv, ...extra];
+    const child = this.deps.shell.spawn(argv, { env: plan.env });
+    const forwards: Array<["SIGINT" | "SIGTERM" | "SIGHUP", () => void]> = [
+      ["SIGINT", () => child.kill("SIGINT")],
+      ["SIGTERM", () => child.kill("SIGTERM")],
+      ["SIGHUP", () => child.kill("SIGTERM")],
+    ];
+    for (const [signal, forward] of forwards) process.on(signal, forward);
+    try {
+      return await child.exited;
+    } finally {
+      for (const [signal, forward] of forwards) process.off(signal, forward);
+    }
   }
 }
 

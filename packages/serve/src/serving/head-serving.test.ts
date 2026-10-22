@@ -141,6 +141,18 @@ describe("argv", () => {
     const under = await uc.plan(head, { devices: [1], cacheRam: 8192, ctx: 262144 });
     expect(under.ok && under.value.ctx).toBe(262144);
   });
+  test("--ctx above what its slots can use is refused: no conversation's window is longer than the model's own", async () => {
+    const { p, head, uc } = await setup();
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 }); // a pool of 786,432 for 8 slots
+    const one = await uc.plan(head, { devices: [1], cacheRam: 8192, slots: 1, ctx: 262145 });
+    expect(!one.ok && one.message).toContain(
+      "REFUSING: --ctx 262145 — this card's profile (32607 MiB for the head) holds a pool of 1 to 262144 cells at 1 slot",
+    );
+    const window = await uc.plan(head, { devices: [1], cacheRam: 8192, slots: 1, ctx: 262144 });
+    expect(window.ok && window.value.ctx).toBe(262144);
+    const two = await uc.plan(head, { devices: [1], cacheRam: 8192, slots: 2, ctx: 524289 });
+    expect(!two.ok && two.message).toContain("1 to 524288 cells at 2 slots");
+  });
   test("a profile whose K/V the engine's CUDA flash attention does not run is refused, never served on the CPU", async () => {
     const toml = headToml.replace(
       "ctx = 786432\n",
@@ -285,7 +297,7 @@ describe("glm-5.3-flash", () => {
       cacheRam: 8192,
     });
     if (!r.ok) throw new Error(r.message);
-    const bin = `${root}/local/engine-builds/4131f11-sm120`;
+    const bin = `${root}/local/engine-builds/fdf8d40-sm120`;
     expect(r.value.argv).toEqual([
       `${bin}/llama-server`,
       "-m",
@@ -470,6 +482,75 @@ describe("serve", () => {
       "UNDRIVED: the adapter is missing: serving the source pack",
     );
   });
+  /** run() on a server that records the signals it gets and ends on the first that stops it; returned once spawned */
+  async function running(tools: string[]) {
+    const { p, head, uc } = await setup();
+    for (const tool of tools) p.shell.tools.add(tool);
+    const signals: string[] = [];
+    let started: () => void = () => {};
+    const spawned = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    p.shell.spawn = (cmd, opts) => {
+      p.shell.spawned.push({ cmd: [...cmd], ...(opts ? { opts } : {}) });
+      let exit: (code: number) => void = () => {};
+      const exited = new Promise<number>((resolve) => {
+        exit = resolve;
+      });
+      const kill = (signal = "SIGTERM") => {
+        signals.push(signal);
+        exit(0);
+      };
+      started();
+      return { pid: 4300, kill, exited };
+    };
+    const plan: ServePlan = {
+      argv: ["/b/llama-server", "-m", "/p.gguf"],
+      env: {},
+      binDir: "/b",
+      gpus: [0],
+      slots: 1,
+      ctx: 8192,
+      cacheRam: 0,
+      vramMiB: [16303],
+      profile: { devices: 1, min_vram_mib: 16000, slots: 4, ctx: 294912 },
+      speculative: false,
+      cache: { k: "q4_0", v: "q4_0" },
+    };
+    const before = process.listenerCount("SIGINT");
+    const code = uc.run(head, plan);
+    await spawned;
+    return { p, signals, code, before };
+  }
+  test("the server runs in a session of its own: a terminal's Ctrl-C reaches rig alone, which sends it once", async () => {
+    const { p, signals, code, before } = await running(["setsid"]);
+    // the terminal signals its foreground group; llama-server answers a second SIGINT with exit(1)
+    expect(p.shell.spawned[0]!.cmd).toEqual([
+      "/usr/bin/setsid",
+      "--wait",
+      "/b/llama-server",
+      "-m",
+      "/p.gguf",
+    ]);
+    process.emit("SIGINT");
+    expect(await code).toBe(0);
+    expect(signals).toEqual(["SIGINT"]);
+    expect(process.listenerCount("SIGINT")).toBe(before); // nothing of a finished run stays on rig's signals
+  });
+  test("a hangup is passed on as SIGTERM: in its own session the server no longer hears the terminal close", async () => {
+    const { signals, code } = await running(["setsid"]);
+    process.emit("SIGHUP");
+    expect(await code).toBe(0);
+    expect(signals).toEqual(["SIGTERM"]);
+  });
+  test("without setsid the server runs in rig's group as before, and the log says what that costs", async () => {
+    const { p, signals, code } = await running([]);
+    expect(p.shell.spawned[0]!.cmd[0]).toBe("/b/llama-server");
+    expect(p.log.lines.join("\n")).toContain("setsid is not on PATH");
+    process.emit("SIGTERM");
+    expect(await code).toBe(0);
+    expect(signals).toEqual(["SIGTERM"]);
+  });
 });
 
 describe("verify", () => {
@@ -490,6 +571,14 @@ describe("verify", () => {
     p.fs.put(head.path("assets/mtp-draft-vocab-98304.i32"), "v");
     r = await uc.verify(head, [0]);
     expect(r.ok).toBe(true);
+    // the pin installed from a tarball with another CUDA runtime beside it: a [cuda] moved on never reached it
+    p.fs.put(
+      `${bin}/BUILD`,
+      `fork=${engine.fork.sha} cap=sm_120 source=tarball:engine-sm120-${engine.sha7}.tar.gz runtime=000000000000`,
+    );
+    r = await uc.verify(head, [0]);
+    expect(r.ok ? "verified" : r.message).toContain("no complete build");
+    p.fs.put(`${bin}/BUILD`, "fork=… cap=sm_120");
     p.hasher.pinned.set(head.servedPath, "0".repeat(64));
     r = await uc.verify(head, [0]);
     expect(!r.ok && r.message).toContain("sha256 differs");

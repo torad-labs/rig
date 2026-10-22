@@ -48,10 +48,11 @@ export const needleProbe: Probe = {
       const question = `Above is a long document with ${cfg.needles.length} NOTE lines buried in it.\n${questions}\nAnswer with just the codes, one per line. Do not explain.`;
 
       const started = Date.now();
+      // greedy, as every other quality probe asks: a leg carries none of the head's sampling, so a sampled answer would
+      // be drawn at the server's defaults and differ from one run of the gate to the next
       const reply = await client.chat(`${haystack}\n\n${question}`, {
         maxTokens: 2048,
         thinking: true,
-        greedy: false,
         timeoutMs: false,
       });
       const secs = (Date.now() - started) / 1000;

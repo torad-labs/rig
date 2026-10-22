@@ -316,7 +316,11 @@ describe("roofline probe", () => {
     const shell = new FakeShell();
     shell.tools.add("nsys");
     const env: Record<string, string>[] = [];
-    shell.on(/^\S*llama-bench /, () => ({ code: 0, stdout: plain, stderr: "" }));
+    const plainEnv: Record<string, string>[] = [];
+    shell.on(/^\S*llama-bench /, (_cmd, opts) => {
+      plainEnv.push(opts?.env ?? {});
+      return { code: 0, stdout: plain, stderr: "" };
+    });
     shell.on(/^nsys profile /, (_cmd, opts) => {
       env.push(opts?.env ?? {});
       return { code: 0, stdout: "", stderr };
@@ -325,7 +329,7 @@ describe("roofline probe", () => {
       writeCapture(cmd[cmd.indexOf("-o") + 1] as string, CAPTURE);
       return { code: 0, stdout: "", stderr: "" };
     });
-    return { shell, env };
+    return { shell, env, plainEnv };
   }
   const ctx = (shell: FakeShell) =>
     ({
@@ -335,6 +339,7 @@ describe("roofline probe", () => {
       binDir: "/r/local/engine-builds/abc1234-sm120",
       gpu: 1,
       cap: "120",
+      engineEnv: { GGML_CUDA_GRAPH_MAX: "0", GGML_CUDA_L2_ISSUE_LEGACY: "1" }, // the card's profile's switches
       shell,
       runDir: dir,
     }) as unknown as ProbeContext;
@@ -360,7 +365,7 @@ describe("roofline probe", () => {
   ];
 
   test("at each depth: a plain llama-bench for the wall, then the capture with the node ranges on and graphs off", async () => {
-    const { shell, env } = nsys(INIT);
+    const { shell, env, plainEnv } = nsys(INIT);
     const result = await rooflineProbe.run(ctx(shell));
     expect(result.pass).toBe("measured");
     expect(result.summary).toBe(
@@ -390,8 +395,15 @@ describe("roofline probe", () => {
     expect(shell.calls[3]).toEqual([...BENCH, "16384", "-r", "3"]);
     expect(env[0]).toMatchObject({
       CUDA_VISIBLE_DEVICES: "1",
+      GGML_CUDA_L2_ISSUE_LEGACY: "1", // the card's profile's switches, under the capture's own
       GGML_CUDA_NVTX: "1",
       GGML_CUDA_DISABLE_GRAPHS: "1",
+    });
+    // the wall is the engine as serve runs it on this card: the profile's graph cap and L2 issuer
+    expect(plainEnv[0]).toMatchObject({
+      CUDA_VISIBLE_DEVICES: "1",
+      GGML_CUDA_GRAPH_MAX: "0",
+      GGML_CUDA_L2_ISSUE_LEGACY: "1",
     });
     expect(result.lines[0]).toBe("depth 0:");
     expect(result.data).toMatchObject({

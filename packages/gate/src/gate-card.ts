@@ -71,7 +71,7 @@ export async function claimGateCard(
   if (refusal) return fail(ExitCode.Unsupported, `REFUSING on GPU ${gpu}'s profile: ${refusal}`);
 
   const binDir = engine.binDir(card.computeCap);
-  if (!(await isBuilt(deps.fs, binDir))) {
+  if (!(await isBuilt(deps.fs, binDir, engine))) {
     const message = `no complete build at ${binDir} for sm_${card.computeCap} (run: rig build --gpu ${gpu})`;
     return fail(ExitCode.Failure, message);
   }

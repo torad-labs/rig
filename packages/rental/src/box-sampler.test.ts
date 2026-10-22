@@ -2,7 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rxBytes, SAMPLER_PATHS, samplerScript, windowRead } from "./box-sampler.ts";
+import {
+  CARD_QUERY,
+  cardPercents,
+  rxBytes,
+  SAMPLER_PATHS,
+  samplerScript,
+  windowRead,
+} from "./box-sampler.ts";
 
 // The sampler and its reads are shell text, so they are run under sh here: the unit tests of the idle check feed it
 // canned output and cannot tell an awk program that parses from one that does not.
@@ -24,6 +31,16 @@ const PROC_NET_DEV = [
   "br-0a1b2c3d4e5f:     300       7    0    0    0     0          0         0        0       0    0    0    0     0       0          0",
   "",
 ].join("\n");
+
+describe("the card's percent", () => {
+  test("a card holding no memory reads 0 whatever its counter says; a busy card and an unsized one read as they are", () => {
+    const out = sh(`printf '100, 0\\n35, 20480\\n7, [N/A]\\n100, 63\\n' | ${cardPercents()}`);
+    expect(out.stdout.toString()).toBe("0\n35\n7\n0\n");
+  });
+  test("the sampler and the instant read both run the query through it", () => {
+    expect(samplerScript().join("\n")).toContain(`${CARD_QUERY} 2>/dev/null | ${cardPercents()}`);
+  });
+});
 
 describe("the received bytes", () => {
   test("every interface but loopback is summed, whatever its name's length", () => {

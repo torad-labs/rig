@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { layoutAt } from "@rig/core";
@@ -100,6 +100,7 @@ describe("vast template", () => {
       "mkdir -p /var/log/rig && rm -f /var/log/rig/FAILED",
       "nohup sh -c 'until /opt/rig/dist/rig vast guard glm-5.3-flash --idle-minutes 60 --max-hours 24 --stop-when /var/log/rig/FAILED; do sleep 30; done' >> /var/log/rig/guard.log 2>&1 &",
       "nohup sh -c 'n=0; while :; do t=$(date +%s); /opt/rig/dist/rig up glm-5.3-flash --foreground; [ $(($(date +%s) - t)) -ge 900 ] && n=0; n=$((n + 1)); [ $n -ge 5 ] && break; echo \"rig: rig up exited, try $((n + 1)) of 5 in $((30 * n)) s\"; sleep $((30 * n)); done; touch /var/log/rig/FAILED' >> /var/log/rig/up.log 2>&1 &",
+      'nohup sh -c \'sleep 87300; until curl -fsS -m 30 -X PUT -H "Authorization: Bearer $CONTAINER_API_KEY" -H "Content-Type: application/json" -d "{\\"state\\":\\"stopped\\"}" https://console.vast.ai/api/v0/instances/$CONTAINER_ID/; do sleep 60; done\' >> /var/log/rig/backstop.log 2>&1 &',
     ]);
     expect(spec.onstart.length).toBeLessThan(4048); // vast's limit on the field
     expect(headDiskGb(head)).toBe(160);
@@ -120,6 +121,15 @@ describe("vast template", () => {
       new TextDecoder().decode(p.fs.files.get(`${RECORD}/template.json`)),
     );
     expect(recorded).toMatchObject({ id: 77, hashId: "hash-2", image: IMAGE });
+    expect(p.fs.replaced.filter((path) => path === `${RECORD}/template.json`)).toHaveLength(2);
+  });
+
+  test("a template record that does not parse is refused by its path, and no template is saved over it", async () => {
+    const { p, head } = await machine();
+    p.fs.put(`${RECORD}/template.json`, '{"id": 77, "hashId": "ha'); // cut short
+    const r = await publish(p).run(head, { idleMinutes: 60, maxHours: 24, dryRun: false });
+    expect(r.ok ? "saved" : r.message).toContain(`${RECORD}/template.json does not parse`);
+    expect(p.rental.templates).toEqual([]);
   });
 
   test("a dry run saves nothing and needs no key; a real one without the pull key refuses", async () => {
@@ -195,5 +205,38 @@ describe("the on-start's supervisor", () => {
     // the third run lasts 20 minutes: it served, then died; five quick failures after it are needed to give up
     const r = await supervise([5, 5, 1200, 5, 5, 5, 5]);
     expect(r).toMatchObject({ runs: 7, slept: [30, 60, 30, 60, 90, 120], failed: true });
+  });
+});
+
+describe("the on-start's backstop", () => {
+  test("a quarter hour past the lifetime it stops the box with the box's own key, asking each minute until vast takes it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rig-backstop-"));
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    // curl refuses twice (vast 5xx), then takes the stop; every call's argv is kept
+    writeFileSync(
+      join(bin, "curl"),
+      `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> ${dir}/curl.args; echo --- >> ${dir}/curl.args\nn=$(cat ${dir}/curls 2>/dev/null || echo 0); echo $((n + 1)) > ${dir}/curls; [ $n -ge 2 ]\n`,
+    );
+    writeFileSync(join(bin, "sleep"), `#!/bin/sh\necho "$1" >> ${dir}/slept\n`);
+    for (const tool of ["curl", "sleep"]) Bun.spawnSync(["chmod", "+x", join(bin, tool)]);
+    const line = renderOnstart("h", 60, 24).split("\n").at(-1)!;
+    const script = /^nohup sh -c '(.*)' >> /.exec(line)![1]!;
+    const run = Bun.spawnSync(["sh", "-c", script], {
+      env: { PATH: `${bin}:/usr/bin:/bin`, CONTAINER_ID: "4242", CONTAINER_API_KEY: "box-key" },
+    });
+    expect(run.exitCode).toBe(0);
+    expect(readFileSync(join(dir, "slept"), "utf8").trim().split("\n")).toEqual([
+      String(24 * 3600 + 900),
+      "60",
+      "60",
+    ]);
+    const calls = readFileSync(join(dir, "curl.args"), "utf8").split("---\n").filter(Boolean);
+    expect(calls).toHaveLength(3);
+    const argv = calls[0]!.trim().split("\n");
+    expect(argv).toContain("PUT");
+    expect(argv).toContain("Authorization: Bearer box-key");
+    expect(argv).toContain('{"state":"stopped"}');
+    expect(argv.at(-1)).toBe("https://console.vast.ai/api/v0/instances/4242/");
   });
 });

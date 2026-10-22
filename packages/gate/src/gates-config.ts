@@ -84,6 +84,9 @@ export const GatesSchema = v.strictObject({
       v.pipe(v.string(), v.regex(/^sm\d{2,3}$/, "a card as sm<cap>, like sm120")),
       v.record(v.string(), posInt),
     ),
+    // the engine switches the tables were taken under: the census runs under them on every card, over its profile's,
+    // so a switch whose launches depend on the card (the paced L2 issuer's) is counted the one way the table was
+    env: v.optional(v.record(v.string(), v.string()), {}),
   }),
   roofline: v.strictObject({
     gen: posInt,
@@ -115,6 +118,13 @@ export async function loadGates(fs: FileSystem, head: Head): Promise<Result<Gate
     return fail(
       ExitCode.Failure,
       `gates.toml is invalid: ${parsed.issues.map((i) => `${v.getDotPath(i) ?? "(root)"}: ${i.message}`).join("; ")}`,
+    );
+  // a leg on the head's own port would find the serving head answering there and be refused, or, with the head down,
+  // bind the port the head comes back on
+  if (parsed.output.gate.port === head.port)
+    return fail(
+      ExitCode.Failure,
+      `gates.toml is invalid: gate.port ${head.port} is the port ${head.name} serves on; the legs need a port of their own`,
     );
   return ok(parsed.output);
 }

@@ -159,17 +159,19 @@ describe("vast up", () => {
     // a rented box is someone else's machine: the adapter stays here, the box derives the public pack
     expect(p.shell.calls.find((c) => c[0] === "tar")).toEqual([
       "tar",
+      "-czf",
+      "/r/local/rented-box/payload-1000.tar.gz",
+      "-C",
+      "/r",
+      "dist/rig",
       "-C",
       "/r",
       "--exclude=heads/bonsai-2-27b/assets/lora/bonsai-abliterate-lora.gguf",
-      "-czf",
-      "/r/local/rented-box/payload.tar.gz",
-      "dist/rig",
       "heads/bonsai-2-27b",
       "engine/engine.toml",
     ]);
     expect(p.ssh.pushed).toEqual([
-      ["/r/local/rented-box/payload.tar.gz", "/workspace/rig/payload.tar.gz"],
+      ["/r/local/rented-box/payload-1000.tar.gz", "/workspace/rig/payload.tar.gz"],
     ]);
     const rigCalls = p.ssh.calls
       .filter((c) => c.includes("/workspace/rig/dist/rig "))
@@ -263,6 +265,87 @@ describe("vast up", () => {
     const other = await setup("public");
     const refused = await other.uc.up(other.head, { gpu: "H100_SXM", private: true });
     expect(!refused.ok && refused.message).toContain(`not the pinned ${head.servedFiles[0]!.file}`);
+  });
+  describe("in a checkout of rig-dev, the head reaches a box as public-export.toml publishes it", () => {
+    // placeholder private places, as public-rules.test.ts uses: this file ships in the public copy
+    const RULES = `exclude = ["heads/*/evidence/lens-legs-*/**"]
+deny = ["/srv/operator"]
+deny_sha256 = []
+allow_binary_sha256 = []
+[[rewrite]]
+from = "/srv/operator/lens"
+to = "local/lens/bonsai-2-27b"
+`;
+    /** the stage the tar read, and its files as they were when it read them: the stage is removed once tarred */
+    function tarred(p: ReturnType<typeof fakePorts>) {
+      const seen = { dir: "", argv: [] as string[], files: new Map<string, string>() };
+      p.shell.on(/^tar /, async (argv) => {
+        seen.argv = [...argv];
+        seen.dir = argv[argv.lastIndexOf("-C") + 1]!;
+        for (const [path, bytes] of p.fs.files)
+          if (path.startsWith(`${seen.dir}/`))
+            seen.files.set(path.slice(seen.dir.length + 1), new TextDecoder().decode(bytes));
+        return { code: 0, stdout: "", stderr: "" };
+      });
+      return seen;
+    }
+    /** the fixture's head.toml with a line naming a private place, as the real one's lens leg does */
+    const withPrivateLine = (p: { fs: InMemoryFileSystem }) =>
+      p.fs.put("/r/heads/bonsai-2-27b/head.toml", `${headToml}\n# --lens-out /srv/operator/lens\n`);
+    test("an excluded file stays here, a private path is rewritten, the adapter is kept, and the tar reads the stage", async () => {
+      const { p, head, uc } = await setup();
+      p.fs.put("/r/public-export.toml", RULES);
+      withPrivateLine(p);
+      p.fs.put(
+        "/r/heads/bonsai-2-27b/evidence/lens-legs-5070ti/lens-legs.sh",
+        "cd /srv/operator/x\n",
+      );
+      const seen = tarred(p);
+      expect((await uc.up(head, { gpu: "H100_SXM" })).ok).toBe(true);
+      const shipped = seen.files.get("heads/bonsai-2-27b/head.toml")!;
+      expect(shipped).not.toContain("/srv/operator");
+      expect(shipped).toContain("# --lens-out local/lens/bonsai-2-27b");
+      const names = [...seen.files.keys()];
+      expect(names.some((name) => name.includes("lens-legs"))).toBe(false);
+      expect(names.some((name) => name.includes("assets/lora"))).toBe(false);
+      expect(names).toContain("engine/engine.toml");
+      expect(seen.dir).toStartWith("/r/local/rented-box/payload-stage-");
+      expect(seen.argv).toEqual([
+        "tar",
+        "-czf",
+        "/r/local/rented-box/payload-1000.tar.gz",
+        "-C",
+        "/r",
+        "dist/rig",
+        "-C",
+        seen.dir,
+        "heads/bonsai-2-27b",
+        "engine/engine.toml",
+      ]);
+      // the stage and the tarball are this rental's, and gone once the box has the payload
+      expect([...p.fs.files.keys()].some((path) => path.startsWith(seen.dir))).toBe(false);
+      expect(await p.fs.exists("/r/local/rented-box/payload-1000.tar.gz")).toBe(false);
+    });
+    test("a private string no rewrite covers refuses the rent by name, before any box is created", async () => {
+      const { p, head, uc } = await setup();
+      p.fs.put("/r/public-export.toml", RULES);
+      p.fs.put("/r/heads/bonsai-2-27b/notes.md", "see /srv/operator/private\n");
+      const r = await uc.up(head, { gpu: "H100_SXM" });
+      expect(!r.ok && r.message).toContain("REFUSED");
+      expect(!r.ok && r.message).toContain("heads/bonsai-2-27b/notes.md:1: /srv/operator");
+      expect(p.rental.ops.some((op) => op.startsWith("create"))).toBe(false);
+    });
+    test("--private ships the adapter as it is, still through the rules for every other file", async () => {
+      const { p, head, uc } = await setup("served");
+      p.fs.put("/r/public-export.toml", RULES);
+      withPrivateLine(p);
+      const seen = tarred(p);
+      expect((await uc.up(head, { gpu: "H100_SXM", private: true })).ok).toBe(true);
+      expect(seen.files.get("heads/bonsai-2-27b/assets/lora/bonsai-abliterate-lora.gguf")).toBe(
+        "asset",
+      );
+      expect(seen.files.get("heads/bonsai-2-27b/head.toml")).not.toContain("/srv/operator");
+    });
   });
   test("a card the pin publishes a prebuilt for installs it on the box: no compile, no cached build shipped", async () => {
     const { p, head, uc } = await setup();
@@ -752,15 +835,17 @@ describe("vast lab", () => {
     // only the binary and the pin go: a rented box is someone else's machine, and nothing of a head is on it
     expect(p.shell.calls.find((c) => c[0] === "tar")).toEqual([
       "tar",
+      "-czf",
+      "/r/local/rented-box/payload-1000.tar.gz",
       "-C",
       "/r",
-      "-czf",
-      "/r/local/rented-box/payload.tar.gz",
       "dist/rig",
+      "-C",
+      "/r",
       "engine/engine.toml",
     ]);
     expect(p.ssh.pushed).toEqual([
-      ["/r/local/rented-box/payload.tar.gz", "/workspace/rig/payload.tar.gz"],
+      ["/r/local/rented-box/payload-1000.tar.gz", "/workspace/rig/payload.tar.gz"],
     ]);
     const rigCalls = p.ssh.calls.filter((c) => c.includes("/workspace/rig/dist/rig "));
     expect(rigCalls).toEqual([]);
@@ -803,6 +888,105 @@ describe("vast lab", () => {
       value: { action: "destroyed", idleMinutes: 55 },
     });
     expect(p.rental.instances.size).toBe(0);
+  });
+  test("a lab box whose card is idle while its CPU works is in use: a compile and a CPU-reference test suite", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [rtx5090];
+    await uc.lab({ gpu: "RTX_5090", idleMinutes: 45 });
+    const listed = p.rental.instances.get(1000)!;
+    // box 54511621 on 2026-10-06, building the engine and then running test-backend-ops, whose reference
+    // side is the CPU: vast listed cpu_util 95.5 beside gpu_util 0.0 for the whole run
+    p.rental.instances.set(1000, { ...listed, gpuUtil: 0, cpuUtil: 95 });
+    for (let check = 0; check < 20; check++) {
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+      p.clock.t += 10 * 60_000;
+    }
+    expect(p.rental.instances.size).toBe(1);
+    // and a box nobody uses reads 0.0 on both, so it still goes down on its budget
+    p.rental.instances.set(1000, { ...listed, gpuUtil: 0, cpuUtil: 0 });
+    expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "idle", idleMinutes: 10 } });
+    p.clock.t += 45 * 60_000;
+    expect(await uc.idleCheck()).toEqual({
+      ok: true,
+      value: { action: "destroyed", idleMinutes: 55 },
+    });
+    expect(p.rental.instances.size).toBe(0);
+  });
+  test("a lab box whose card and CPU both read quiet is working when its run queue is not", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [rtx5090];
+    await uc.lab({ gpu: "RTX_5090", idleMinutes: 45 });
+    const listed = p.rental.instances.get(1000)!;
+    // box 54505657 on 2026-10-06 running test-backend-ops, which checks every kernel against a CPU reference: vast
+    // read CPU 6 % and the box's own sampler peaked the card at 2 %, both under their lines, with the load at 7.03
+    p.rental.instances.set(1000, { ...listed, gpuUtil: 0, cpuUtil: 6 });
+    p.ssh.on(/nvidia-smi --query-gpu=utilization\.gpu/, {
+      code: 0,
+      stdout: "rc=0\n0\nwindow=2\nload5=7.03\n",
+      stderr: "",
+    });
+    for (let check = 0; check < 20; check++) {
+      expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "active" } });
+      p.clock.t += 10 * 60_000;
+    }
+    expect(p.rental.instances.size).toBe(1);
+    // a box holding nothing but an ssh session reads 0.00, and goes down on its budget as before
+    p.ssh.on(/nvidia-smi --query-gpu=utilization\.gpu/, {
+      code: 0,
+      stdout: "rc=0\n0\nwindow=0\nload5=0.00\n",
+      stderr: "",
+    });
+    expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "idle", idleMinutes: 10 } });
+    p.clock.t += 45 * 60_000;
+    expect(await uc.idleCheck()).toEqual({
+      ok: true,
+      value: { action: "destroyed", idleMinutes: 55 },
+    });
+    expect(p.rental.instances.size).toBe(0);
+  });
+  test("a card the box reads idle is idle though vast's sample of it reads busy: an empty PRO 6000 read 100 %", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [rtx5090];
+    await uc.lab({ gpu: "RTX_5090", idleMinutes: 45 });
+    const listed = p.rental.instances.get(1000)!;
+    p.rental.instances.set(1000, { ...listed, gpuUtil: 100 });
+    p.ssh.on(/nvidia-smi --query-gpu=utilization\.gpu/, {
+      code: 0,
+      stdout: "rc=0\n0\nwindow=0\n",
+      stderr: "",
+    });
+    expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "changed" } });
+    p.clock.t += 45 * 60_000;
+    expect(await uc.idleCheck()).toEqual({
+      ok: true,
+      value: { action: "destroyed", idleMinutes: 45 },
+    });
+  });
+  test("a lab VM recorded before its endpoint takes it from vast's listing, so the idle check counts", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [rtx5090];
+    expect((await uc.lab({ gpu: "RTX_5090", vm: true, idleMinutes: 45 })).ok).toBe(true);
+    const file = "/r/local/rented-box/boxes/1000/instance.json";
+    const { sshHost: _h, sshPort: _p, ...unreached } = JSON.parse(await p.fs.readText(file));
+    p.fs.put(file, JSON.stringify(unreached)); // `lab` killed while it waited for running
+    const { gpuUtil: _, ...unsampled } = p.rental.instances.get(1000)!;
+    p.rental.instances.set(1000, unsampled); // vast lists no card for a VM
+    p.ssh.on(/nvidia-smi --query-gpu=utilization\.gpu/, {
+      code: 0,
+      stdout: "rc=0\n0\n",
+      stderr: "",
+    });
+    expect(await uc.idleCheck()).toEqual({ ok: true, value: { action: "changed" } });
+    expect(JSON.parse(await p.fs.readText(file))).toMatchObject({
+      sshHost: "203.0.113.7",
+      sshPort: 40174,
+      vm: true,
+    });
+    p.clock.t += 45 * 60_000;
+    expect(await uc.idleCheck()).toEqual({
+      ok: true,
+      value: { action: "destroyed", idleMinutes: 45 },
+    });
   });
   test("--vm asks the market for a VM-capable host and brings it up from the KVM image, which --image overrides", async () => {
     const { p, uc } = await setup();
@@ -938,7 +1122,7 @@ describe("vast lab", () => {
         const r = await uc.lab({ gpu: "RTX_5090", vm: true });
         expect(r.ok && r.value.kind).toBe("lab");
         expect(ssh.pushed).toEqual([
-          ["/r/local/rented-box/payload.tar.gz", "/workspace/rig/payload.tar.gz"],
+          ["/r/local/rented-box/payload-1000.tar.gz", "/workspace/rig/payload.tar.gz"],
         ]);
         expect(ssh.calls.filter((c) => c.startsWith("tar -C /workspace/rig "))).toHaveLength(1);
         expect(p.fs.text(knownHosts)).toBe("key-2");
@@ -1235,6 +1419,52 @@ describe("more than one box", () => {
     expect([...p.rental.instances.keys()]).toEqual([1000]);
     expect(await p.systemd.isActive("rig-vast-stop-1000.timer")).toBe(true);
     expect(await p.fs.exists("/r/local/rented-box/boxes/1002")).toBe(false);
+  });
+  test("down --all goes on to every box when the listing that confirms one destroy cannot be read, and says so", async () => {
+    const { p, uc } = await three();
+    const list = p.rental.list.bind(p.rental);
+    let reads = 0;
+    p.rental.list = async () => {
+      if (reads++ === 0) throw new Error("vastai show instances: 429 Too Many Requests");
+      return list();
+    };
+    const all = await uc.down({ all: true });
+    expect(!all.ok && all.message).toContain(
+      "box 1000: vast could not be read to confirm the destroy",
+    );
+    expect(p.rental.ops.filter((op) => op.startsWith("destroy"))).toEqual([
+      "destroy 1000",
+      "destroy 1001",
+      "destroy 1002",
+    ]);
+    // 1000 is gone from vast but unconfirmed, so its record and hard stop stay; the two confirmed are cleared
+    expect(await p.systemd.isActive("rig-vast-stop-1000.timer")).toBe(true);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1001")).toBe(false);
+    expect(await p.fs.exists("/r/local/rented-box/boxes/1002")).toBe(false);
+  });
+  test("down --all reports a forgotten box destroyed only once vast no longer lists it", async () => {
+    const { p, uc } = await setup();
+    p.rental.instances.set(55, { id: 55, status: "running", label: "rig", dph: 1 });
+    p.rental.destroy = async (id) => {
+      p.rental.ops.push(`destroy ${id}`); // vastai exits 0 on a destroy vast refused: the box stays listed
+    };
+    const all = await uc.down({ all: true });
+    expect(!all.ok && all.message).toContain("box 55 is STILL listed after destroy");
+    expect(!all.ok && all.message).toContain("run: vastai destroy instance 55 -y");
+  });
+  test("a create that fails after vast created the box destroys the box it left, and says so", async () => {
+    const { p, uc } = await setup();
+    p.rental.offers = [lab5090];
+    p.rental.instances.set(77, { id: 77, status: "running", label: "rig", dph: 1, machineId: 999 });
+    const create = p.rental.create.bind(p.rental);
+    p.rental.create = async (offerId, options) => {
+      await create(offerId, options); // vast took it; the reply never came back
+      throw new Error("vastai create instance 50263001: timed out after 120000 ms");
+    };
+    const r = await uc.lab({ gpu: "RTX_5090" });
+    expect(!r.ok && r.message).toContain("timed out after 120000 ms");
+    expect(!r.ok && r.message).toContain("destroyed box 1000, which the create left");
+    expect([...p.rental.instances.keys()]).toEqual([77]); // another machine's box is not this create's
   });
   test("a hard stop outside a quarter hour to a week is refused before anything is rented", async () => {
     const { p, uc } = await setup();

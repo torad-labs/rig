@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -47,6 +48,12 @@ describe("rig", () => {
       'rig: --gpu takes a card index, distinct indices (0,1) or auto, not "1x"\nusage: rig describe',
     );
   });
+  test("a subcommand named after an Object.prototype key is an unknown one: usage and exit 64, never a crash", () => {
+    const run = rig("engine", "constructor", "--tree", "x");
+    expect(run.exitCode).toBe(64);
+    expect(run.stderr.toString()).not.toContain("TypeError");
+    expect(run.stderr.toString()).toContain("usage: rig engine test");
+  });
   test("an engine.toml this binary cannot read stops every command but vast, whose idle check still runs", () => {
     const at = mkdtempSync(join(tmpdir(), "rig-main-"));
     try {
@@ -91,14 +98,19 @@ describe("a head's own engine pin", () => {
 });
 
 describe("install.sh", () => {
-  test("a release whose binary does not run here fails and keeps the install it would replace", () => {
+  /** a scratch directory with a release builder and the installer pointed at it, never ~/.local/share/rig */
+  const scratch = () => {
     const at = mkdtempSync(join(tmpdir(), "rig-install-"));
-    /** a release as release.yml publishes it, its dist/rig a script with this body */
-    const release = (name: string, body: string) => {
+    /** a release as release.yml publishes it, its dist/rig a script with this body, and `files` beside it */
+    const release = (name: string, body: string, files: Record<string, string> = {}) => {
       const dir = join(at, name);
       mkdirSync(join(dir, "pack/rig/dist"), { recursive: true });
       writeFileSync(join(dir, "pack/rig/dist/rig"), `#!/bin/sh\n${body}\n`);
       chmodSync(join(dir, "pack/rig/dist/rig"), 0o755);
+      for (const [path, text] of Object.entries(files)) {
+        mkdirSync(join(dir, "pack/rig", path, ".."), { recursive: true });
+        writeFileSync(join(dir, "pack/rig", path), text);
+      }
       Bun.spawnSync(["tar", "-C", join(dir, "pack"), "-czf", `${dir}/rig-linux-x64.tar.gz`, "rig"]);
       const sum = Bun.spawnSync(["sha256sum", "rig-linux-x64.tar.gz"], { cwd: dir }).stdout;
       writeFileSync(join(dir, "rig-linux-x64.tar.gz.sha256"), sum);
@@ -113,6 +125,41 @@ describe("install.sh", () => {
           RIG_RELEASE_URL: url,
         },
       });
+    return { at, release, install };
+  };
+  test("an upgrade replaces the heads the release ships, head by head, and keeps one the user added", () => {
+    const { at, release, install } = scratch();
+    const home = join(at, "home");
+    try {
+      const first = release("first", 'echo "rig 1.0.0"', {
+        "heads/README.md": "v1",
+        "heads/bonsai-2-27b/head.toml": "v1",
+        "heads/bonsai-2-27b/stale.md": "only in v1",
+        "engine/engine.toml": "v1",
+      });
+      expect(install(first).exitCode).toBe(0);
+      mkdirSync(join(home, "heads/mine"));
+      writeFileSync(join(home, "heads/mine/head.toml"), "the user's own head");
+      const second = release("second", 'echo "rig 1.1.0"', {
+        "heads/README.md": "v2",
+        "heads/bonsai-2-27b/head.toml": "v2",
+        "heads/glm-5.3-flash/head.toml": "v2",
+        "engine/engine.toml": "v2",
+      });
+      const upgrade = install(second);
+      expect(upgrade.exitCode).toBe(0);
+      expect(readFileSync(join(home, "heads/mine/head.toml"), "utf8")).toBe("the user's own head");
+      expect(readFileSync(join(home, "heads/README.md"), "utf8")).toBe("v2");
+      expect(readFileSync(join(home, "heads/bonsai-2-27b/head.toml"), "utf8")).toBe("v2");
+      expect(existsSync(join(home, "heads/bonsai-2-27b/stale.md"))).toBe(false); // a shipped head is the release's whole
+      expect(readFileSync(join(home, "heads/glm-5.3-flash/head.toml"), "utf8")).toBe("v2");
+      expect(readFileSync(join(home, "engine/engine.toml"), "utf8")).toBe("v2");
+    } finally {
+      rmSync(at, { recursive: true, force: true });
+    }
+  });
+  test("a release whose binary does not run here fails and keeps the install it would replace", () => {
+    const { at, release, install } = scratch();
     try {
       const good = install(release("good", 'echo "rig 9.9.9"'));
       expect(good.exitCode).toBe(0);

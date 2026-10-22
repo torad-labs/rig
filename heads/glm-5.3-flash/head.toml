@@ -88,8 +88,13 @@ bytes = 43225116416
 # (2x RTX PRO 6000, Oct 3) by rig's rendered np3 serve: three ~30K sessions leave 14,042 MiB free, the np3 stress and
 # np1 tail repros pass, and served decode is 0.9990 of 009073391's (4 ABBA pairs, 95 % CI 0.9904 to 1.0076).
 # Since Oct 4, 2026 this head serves engine.toml's own pin and its published build, and carries no [engine] of its own
-# until a GLM change moves it past that pin again. The pin is 4131f11fc: 42f3b1be0 with a change to the PQ2_0
-# tensor-core kernel only (fork PR #89), which this IQ3_XXS pack never runs.
+# until a GLM change moves it past that pin again. The pin is fdf8d4044 (fork main after PR #90): 4131f11fc with the
+# review's fixes, several in this head's paths (the k-pool's per-sequence stale marks and chunked rebuild, the sparse
+# attention's n_kv_max, the HC front's Gram clamp, the chunked KDA precondition, the MTP drafter's saved state).
+# On 2x RTX PRO 6000 Max-Q (vast, Oct 22) as rig serves it, against 4131f11fc on the real pack: KLD 0 and the same
+# top as 4131f11fc against itself at 2k and 16k (the -ub 512 floor 0.012043 and 0.007083), three ~30K sessions leave
+# 13,995 MiB free, and the np3 stress and np1 tail repros pass. Served decode is 1.0021 of 4131f11fc's (4 ABBA
+# pairs, 95 % CI 0.9988 to 1.0055, 173-174 tok/s, MTP acceptance 0.6131 against 0.6139).
 
 [speculative]
 type = "draft-mtp"             # the pack's own NextN block (glm5next.nextn_predict_layers = 1)

@@ -7,7 +7,7 @@
 // only way in. Nor a private [derive] asset unless `--private` asks: a rented box is someone
 // else's machine, so by default it derives and serves the head's public pack. Remote command lines
 // live in rented-box.ts; the tunnel's http in head-endpoint.ts.
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type {
   Clock,
   FileSystem,
@@ -35,7 +35,7 @@ import {
   profileSpeculates,
   type Serving,
 } from "@rig/head";
-import { publishedImage } from "@rig/image";
+import { excludedBy, loadPublicRules, publicFile, publishedImage } from "@rig/image";
 import { type BoxState, billedCost, billedHours, RentalState } from "./box-state.ts";
 import { headDiskGb, headPackBytes } from "./box-template.ts";
 import { DownloadRates, describeRate, downloadRate } from "./download-rates.ts";
@@ -57,6 +57,17 @@ import {
 /** the card's utilization, as vast lists it, at which a box `vast up` rented is in use whatever its server says: an idle
  *  llama-server with its model loaded reads 0. A template box's guard reads its container's CPU instead (box-guard.ts) */
 const GPU_BUSY_PCT = 10;
+/** the box's CPU utilization at which it is working whatever its card reads: a lab box exists for work that is mostly
+ *  compile, and a test suite that checks a kernel against a CPU reference leaves the card idle for most of its run. Two
+ *  boxes were destroyed mid-run on 2026-10-06 for reading an idle card; vast listed both at 95 % and 98 % CPU, against
+ *  0.0 for a box nobody was using. Only ever a reason to keep a box: the card alone still cannot hold one up. */
+const CPU_BUSY_PCT = 10;
+/** the 5-minute run queue on the box at which it is working, whatever either utilization reads. Both of those are point
+ *  samples of a device, and the job that destroyed box 54505657 is neither: test-backend-ops checks each kernel against
+ *  a CPU reference, so the card idles between short bursts and the CPU sits on a few threads of 192. That box read CPU
+ *  6 % and the card 0 % with a 5-minute load of 7.03, against 0.00 on a box holding nothing but an ssh session. One
+ *  runnable task on average is the line, and the hard stop still bounds what a box that reads busy for ever can cost. */
+const LOAD_BUSY = 1;
 /** a box receiving this much on average over a check's window is working, whatever its card and server read: a pack
  *  being pulled (134 GB at 251 Mb/s is 70 minutes of an idle card), an image pushed to it, a clone. 512 KB/s is 4 Mb/s;
  *  an idle box's ssh session and a log tail are a few KB/s. */
@@ -311,6 +322,9 @@ export class RentGpu {
       return ok({ kind: "dry-run", pick: pick.value.offer, query: pick.value.query });
     }
 
+    // staged before the rent: a payload the rules refuse costs nothing
+    const staged = await this.stagePayload(head, options.private ?? false);
+    if (!staged.ok) return staged;
     const box = await this.createBox(config.value, head, pick.value.offer, options);
     if (!box.ok) return box;
     const remote = this.remote(config.value, box.value);
@@ -321,8 +335,9 @@ export class RentGpu {
       head,
       options.private ?? false,
       false,
-    );
-    if (!shipped.ok) return shipped;
+      staged.value,
+    ).catch((error: unknown) => fail(ExitCode.Failure, (error as Error).message));
+    if (!shipped.ok) return this.downAfter(box.value, shipped.message);
     const engine = await this.engineSource(remote, pick.value.offer);
 
     const broughtUp = await this.bringUp(
@@ -408,6 +423,8 @@ export class RentGpu {
       return ok({ kind: "dry-run", pick: offer, query, ...(ranked ? { ranked } : {}) });
     }
 
+    const staged = await this.stagePayload(null, false);
+    if (!staged.ok) return staged;
     const image = options.vm ? (options.image ?? VM_IMAGE) : options.image;
     const box = await this.createBox(config.value, null, pick.value.offer, {
       ...options,
@@ -423,6 +440,7 @@ export class RentGpu {
       null,
       false,
       options.vm ?? false,
+      staged.value,
     ).catch((error: unknown) => fail(ExitCode.Failure, (error as Error).message));
     if (!shipped.ok) return this.downAfter(box.value, shipped.message);
 
@@ -466,10 +484,15 @@ export class RentGpu {
         ExitCode.Failure,
         `no template for ${head.name}: run rig vast template ${head.name}`,
       );
-    const template = JSON.parse(await this.deps.fs.readText(templateFile)) as {
-      hashId: string;
-      image: string;
-    };
+    let template: { hashId: string; image: string };
+    try {
+      template = JSON.parse(await this.deps.fs.readText(templateFile)) as typeof template;
+    } catch {
+      return fail(
+        ExitCode.Failure,
+        `${templateFile} does not parse: run rig vast template ${head.name}`,
+      );
+    }
     if (template.image !== record.image)
       return fail(
         ExitCode.Failure,
@@ -644,8 +667,20 @@ export class RentGpu {
 
     if (options.all) {
       const known = held.map((box) => box.instanceId);
-      for (const instance of await this.forgottenBoxes(config.value, known)) {
-        await this.deps.rental.destroy(instance.id);
+      let forgotten: Instance[] = [];
+      try {
+        forgotten = await this.forgottenBoxes(config.value, known);
+      } catch (error) {
+        refused.push(
+          `vast could not be read for ${config.value.rental.label} boxes rig does not hold: ${(error as Error).message}`,
+        );
+      }
+      for (const instance of forgotten) {
+        const gone = await this.destroyConfirmed(instance.id);
+        if (!gone.ok) {
+          refused.push(`${gone.message}; run: vastai destroy instance ${instance.id} -y`);
+          continue;
+        }
         destroyed.push(instance.id);
         this.deps.log.info(`destroyed forgotten ${instance.label} box ${instance.id}`);
       }
@@ -787,10 +822,26 @@ export class RentGpu {
           now: number;
           window: number | null;
           downloadKBps: number | null;
+          load5: number | null;
           pull: { kibPerSecond: number; seconds: number } | null;
         }
       | undefined;
     if (listing && listing !== "unread" && listing.status === "running") {
+      // a box recorded before its endpoint was (`up` killed while it waited for running) takes it from the listing as
+      // provision would have; else vast lists no card for a VM, and the check fails every time instead of counting
+      if (!(box.sshHost && box.sshPort)) {
+        const direct = box.vm ? listing.directSsh : undefined;
+        const host = direct?.host ?? listing.sshHost;
+        const port = direct?.port ?? listing.sshPort;
+        if (host && port) {
+          box.sshHost = host;
+          box.sshPort = port;
+          await this.state.saveBox(box);
+          this.deps.log.info(
+            `box ${box.instanceId}: its ssh endpoint read from vast, ${host}:${port}`,
+          );
+        }
+      }
       if (box.sshHost && box.sshPort) {
         const seen = await this.remote(config.value, box).cardUtilization(
           20_000,
@@ -804,7 +855,9 @@ export class RentGpu {
           }
         } else if (seen !== null) {
           seenOnBox = seen;
-          gpuUtil = Math.max(gpuUtil ?? 0, seen.now, seen.window ?? 0);
+          // the box's read alone: it reads an empty card as idle (EMPTY_CARD_MIB), where vast's sample of the same
+          // card is the bare utilization counter, which read 100 % on an empty PRO 6000
+          gpuUtil = Math.max(seen.now, seen.window ?? 0);
           readOnBox = "box";
         }
       }
@@ -830,6 +883,12 @@ export class RentGpu {
       return fail(ExitCode.Failure, message);
     }
     const gpuBusy = gpuUtil !== undefined && gpuUtil >= GPU_BUSY_PCT;
+    // read from the market's listing alone: the box's own read is of the card, and a box that cannot be reached leaves
+    // nothing to say the CPU is busy either
+    const cpuUtil = listing === "unread" ? undefined : listing?.cpuUtil;
+    const cpuBusy = cpuUtil !== undefined && cpuUtil >= CPU_BUSY_PCT;
+    const load5 = seenOnBox?.load5 ?? null;
+    const loadBusy = load5 !== null && load5 >= LOAD_BUSY;
     const downloadKBps = seenOnBox?.downloadKBps ?? null;
     const downloading = downloadKBps !== null && downloadKBps >= DOWNLOAD_BUSY_KBPS;
     if (seenOnBox?.pull) await this.recordPull(box, seenOnBox.pull, now);
@@ -842,16 +901,26 @@ export class RentGpu {
           : seenOnBox && seenOnBox.window !== null && seenOnBox.window > seenOnBox.now
             ? `GPU ${seenOnBox.now} % now, peak ${seenOnBox.window} % in the last ${CARD_WINDOW_SECONDS / 60} min, read on the box`
             : `GPU ${gpuUtil} %${readOnBox === "box" ? " read on the box" : ""}`;
-    const card = downloadKBps === null ? gpu : `${gpu}, download ${rate(downloadKBps)}`;
+    const withCpu = cpuUtil === undefined ? gpu : `${gpu}, CPU ${cpuUtil.toFixed(0)} %`;
+    const withLoad = load5 === null ? withCpu : `${withCpu}, load ${load5.toFixed(2)}`;
+    const card = downloadKBps === null ? withLoad : `${withLoad}, download ${rate(downloadKBps)}`;
     // Every check says what it saw. The reaper's decision is a run of readings, and a destroy that cannot be traced to
     // them cannot be told from a reaper that read wrong (2026-10-02: "idle for 51 min", six checks before it silent).
     const said = (verdict: string) =>
       this.deps.log.info(
         `idle-check box ${box.instanceId}: server ${activity.key}, ${card}: ${verdict}`,
       );
-    if (activity.busy > 0 || gpuBusy || downloading || activity.key !== last?.key) {
+    if (
+      activity.busy > 0 ||
+      gpuBusy ||
+      cpuBusy ||
+      loadBusy ||
+      downloading ||
+      activity.key !== last?.key
+    ) {
       await this.state.saveIdle(box, { key: activity.key, ts: now });
-      const verdict = activity.busy > 0 || gpuBusy || downloading ? "active" : "changed";
+      const verdict =
+        activity.busy > 0 || gpuBusy || cpuBusy || loadBusy || downloading ? "active" : "changed";
       said(verdict);
       return ok({ action: verdict });
     }
@@ -1157,7 +1226,10 @@ export class RentGpu {
       });
     } catch (error) {
       if (localPort !== undefined) await this.deps.fs.remove(this.state.portClaim(localPort));
-      throw error;
+      return fail(
+        ExitCode.Failure,
+        `${(error as Error).message}; ${await this.leftByCreate(config, offer)}`,
+      );
     }
     const createdAt = this.deps.clock.now();
     const box: BoxState = {
@@ -1171,6 +1243,7 @@ export class RentGpu {
       ...(offer.machineId ? { machineId: offer.machineId } : {}),
       createdAt,
       ...(head ? { head: head.name } : {}),
+      ...(options.vm ? { vm: true } : {}),
       ...(options.idleMinutes !== undefined ? { idleMinutes: options.idleMinutes } : {}),
       ...(localPort !== undefined ? { localPort } : {}),
       stopAt: createdAt + maxHours * 3_600_000,
@@ -1254,29 +1327,51 @@ export class RentGpu {
     head: Head | null,
     shipPrivate: boolean,
     relearnHostKey: boolean,
+    /** stagePayload's directory, or null to ship this tree as it is */
+    staged: string | null,
   ): Promise<Result<void>> {
-    const payload = this.state.path("payload.tar.gz");
+    // this box's own: two rentals at once must not tar over each other's
+    const payload = this.state.path(`payload-${box.instanceId}.tar.gz`);
     const held = head === null || shipPrivate ? [] : privateAssets(head);
     if (head !== null && held.length > 0) {
       this.deps.log.info(
         `kept here: ${held.join(", ")} (private); the box serves ${boxServedFile(head, false)} — --private ships them`,
       );
     }
+    const paths = payloadPaths(head);
     const tar = await this.deps.shell.run(
       [
         "tar",
-        "-C",
-        this.layout.root,
-        ...(head ? held.map((path) => `--exclude=heads/${head.name}/${path}`) : []),
         "-czf",
         payload,
+        "-C",
+        this.layout.root,
         "dist/rig",
-        ...(head ? [`heads/${head.name}`] : []),
-        "engine/engine.toml",
+        "-C",
+        staged ?? this.layout.root,
+        ...(head && staged === null
+          ? held.map((path) => `--exclude=heads/${head.name}/${path}`)
+          : []),
+        ...paths,
       ],
       { timeoutMs: 300_000 },
     );
+    if (staged !== null) await this.deps.fs.remove(staged);
     if (tar.code !== 0) return fail(ExitCode.Failure, `tar: ${tar.stderr.trim()}`);
+    try {
+      return await this.landPayload(config, box, payload, relearnHostKey);
+    } finally {
+      await this.deps.fs.remove(payload);
+    }
+  }
+
+  /** the payload pushed and unpacked on the box, its host key learned once more on a VM whose first boot changed it */
+  private async landPayload(
+    config: VastConfig,
+    box: ReachableBox,
+    payload: string,
+    relearnHostKey: boolean,
+  ): Promise<Result<void>> {
     const remote = this.remote(config, box);
     const { knownHosts } = this.state.files(box);
     if ((await remote.receivePayload(payload)) === "landed") return ok(undefined);
@@ -1302,6 +1397,57 @@ export class RentGpu {
       ExitCode.Failure,
       `box ${box.instanceId}'s host key changed again after rig relearned it (${knownHosts}): refused`,
     );
+  }
+
+  /** the head and the engine pin as they may leave this machine, staged under the state dir: a rented box is someone
+   *  else's hardware, so in a checkout of rig-dev they pass public-export.toml's rules as the public copy and a registry
+   *  image do (an excluded file dropped, every rewrite applied, a deny hit refusing the rent by name), the head's private
+   *  [derive] assets shipped as they are only with --private. A tree without the rules is a published copy, whose heads
+   *  passed them on their way out: null, and the tree ships as it is. */
+  private async stagePayload(
+    head: Head | null,
+    shipPrivate: boolean,
+  ): Promise<Result<string | null>> {
+    const { fs } = this.deps;
+    const root = this.layout.root;
+    if (!(await fs.exists(join(root, "public-export.toml")))) return ok(null);
+    const rules = await loadPublicRules(fs, root);
+    if (!rules.ok) return rules;
+    // this rental's own, as the tarball is: another rental at once stages its own head beside it
+    const stage = this.state.path(`payload-stage-${process.pid}-${this.deps.clock.now()}`);
+    await fs.remove(stage);
+    const privates = new Set(
+      head ? privateAssets(head).map((path) => `heads/${head.name}/${path}`) : [],
+    );
+    const hits: string[] = [];
+    for (const top of payloadPaths(head)) {
+      for (const path of await treeFiles(fs, root, top)) {
+        const from = join(root, path);
+        const to = join(stage, path);
+        if (privates.has(path)) {
+          if (shipPrivate) {
+            await fs.mkdirp(dirname(to));
+            await fs.copy(from, to);
+          }
+          continue;
+        }
+        if (excludedBy(rules.value, path) !== undefined) continue;
+        if ((await fs.stat(from))?.isSymlink) {
+          hits.push(`${path}: a symlink ships as its target path, which the deny scan never reads`);
+          continue;
+        }
+        const published = publicFile(rules.value, path, await fs.readBytes(from));
+        hits.push(...published.hits);
+        await fs.mkdirp(dirname(to));
+        await fs.writeBytes(to, published.bytes);
+      }
+    }
+    if (hits.length > 0)
+      return fail(
+        ExitCode.Failure,
+        `REFUSED: ${hits.length} check(s) did not clear, so nothing was shipped to the box:\n  ${hits.join("\n  ")}`,
+      );
+    return ok(stage);
   }
 
   /** how the box gets its engine: the pin's prebuilt for this sm, installed as on any machine
@@ -1534,18 +1680,12 @@ export class RentGpu {
    *  still listed is still billing, and one the market no longer lists (destroyed from vast's
    *  console, or reclaimed by its host) is gone even when the call refuses it */
   private async destroy(box: BoxState): Promise<Result<{ hours: number; cost: number }>> {
-    let refused = "";
-    try {
-      await this.deps.rental.destroy(box.instanceId);
-    } catch (error) {
-      refused = ` (the destroy failed: ${(error as Error).message})`;
-    }
-    await this.deps.clock.sleep(5000);
-    const stillListed = (await this.deps.rental.list()).some((i) => i.id === box.instanceId);
-    if (stillListed) {
-      const message = `box ${box.instanceId} is STILL listed after destroy${refused} — it is billing, and its idle timer stays armed; run: vastai destroy instance ${box.instanceId} -y`;
-      return fail(ExitCode.Failure, message);
-    }
+    const gone = await this.destroyConfirmed(box.instanceId);
+    if (!gone.ok)
+      return fail(
+        gone.code,
+        `${gone.message}, and its idle timer stays armed; run: vastai destroy instance ${box.instanceId} -y`,
+      );
     const hours = billedHours(box, this.deps.clock.now());
     const cost = billedCost(hours, box.dph);
     this.deps.log.info(
@@ -1554,6 +1694,65 @@ export class RentGpu {
     await this.state.clear(box);
     await this.retireUnits(box);
     return ok({ hours, cost });
+  }
+
+  /** instance `id` destroyed and confirmed gone from the listing. `vastai destroy` exits 0 on a destroy vast refused, so
+   *  only the listing says a box stopped billing; a listing that cannot be read confirms nothing, and is said for this
+   *  box rather than thrown, so a caller destroying several goes on to the next */
+  private async destroyConfirmed(id: number): Promise<Result<void>> {
+    let refused = "";
+    try {
+      await this.deps.rental.destroy(id);
+    } catch (error) {
+      refused = ` (the destroy failed: ${(error as Error).message})`;
+    }
+    await this.deps.clock.sleep(5000);
+    let listed: Instance[];
+    try {
+      listed = await this.deps.rental.list();
+    } catch (error) {
+      return fail(
+        ExitCode.Failure,
+        `box ${id}: vast could not be read to confirm the destroy${refused} (${(error as Error).message}) — it may be billing`,
+      );
+    }
+    if (listed.some((i) => i.id === id))
+      return fail(
+        ExitCode.Failure,
+        `box ${id} is STILL listed after destroy${refused} — it is billing`,
+      );
+    return ok(undefined);
+  }
+
+  /** a create that threw may still have created the box: vast took it and the reply was lost to the timeout, or came back
+   *  without new_contract. No record holds such a box, so no reaper or hard stop watches it and the sweep skips it while
+   *  it runs. Any box of rig's label on the offer's machine that rig does not hold is destroyed and confirmed gone. What
+   *  became of it */
+  private async leftByCreate(config: VastConfig, offer: Offer): Promise<string> {
+    const held = new Set((await this.state.boxes()).map((box) => box.instanceId));
+    let listed: Instance[];
+    try {
+      listed = await this.deps.rental.list();
+    } catch (error) {
+      return `vast could not be read for a box the create may have left (${(error as Error).message}): run rig vast down --all`;
+    }
+    const left = listed.filter(
+      (each) =>
+        each.label === config.rental.label &&
+        !held.has(each.id) &&
+        (!offer.machineId || each.machineId === offer.machineId),
+    );
+    if (left.length === 0) return "vast lists no box it left";
+    const said: string[] = [];
+    for (const each of left) {
+      const gone = await this.destroyConfirmed(each.id);
+      said.push(
+        gone.ok
+          ? `destroyed box ${each.id}, which the create left`
+          : `${gone.message}; run: vastai destroy instance ${each.id} -y`,
+      );
+    }
+    return said.join("; ");
   }
 
   /** boxes with our label that the state file no longer knows about */
@@ -1707,4 +1906,21 @@ const gbOf = (bytes: number) => (bytes / 1e9).toFixed(1);
 function boxServedFile(head: Head, shipPrivate: boolean): string {
   if (shipPrivate || privateAssets(head).length === 0) return basename(head.servedPath);
   return basename(head.declaredPublic?.path ?? head.sourcePath);
+}
+
+/** what a box is shipped beside rig's binary: the head it serves, if any, and the engine pin */
+function payloadPaths(head: Head | null): string[] {
+  return [...(head ? [`heads/${head.name}`] : []), "engine/engine.toml"];
+}
+
+/** `top` (a file or a directory, relative to `root`) as the files under it, relative to `root`, sorted; a symlink is a
+ *  file here, never followed */
+async function treeFiles(fs: FileSystem, root: string, top: string): Promise<string[]> {
+  const stat = await fs.stat(join(root, top));
+  if (!stat) return [];
+  if (!stat.isDirectory || stat.isSymlink) return [top];
+  const out: string[] = [];
+  for (const name of await fs.list(join(root, top)))
+    out.push(...(await treeFiles(fs, root, `${top}/${name}`)));
+  return out.sort();
 }

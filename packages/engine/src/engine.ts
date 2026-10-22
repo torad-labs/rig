@@ -115,14 +115,23 @@ export function prebuiltSkip(entry: Prebuilt, glibc: string | null): string | un
 }
 
 /** why `nvcc` (its version as --version prints it, 13.2.78) must not compile the engine for the
- *  card `cap`, from engine.toml's [[miscompilers]]; undefined when nothing is known against it */
+ *  card `cap`, from engine.toml's [[miscompilers]]; undefined when nothing is known against it. A version
+ *  that may be a listed one (unreadable, or only "release 13.2" against 13.2.78) is refused: the gate
+ *  exists because the wrong compiler builds an engine that serves wrong numbers without an error. */
 export function miscompiles(
   engine: Pick<EngineConfig, "miscompilers">,
   nvcc: string | null,
   cap: string,
 ): string | undefined {
-  const entry = engine.miscompilers?.find((m) => m.nvcc === nvcc && m.caps.includes(cap));
-  return entry && `nvcc ${entry.nvcc} compiles this engine wrong for sm_${cap}: ${entry.why}`;
+  const listed = engine.miscompilers?.filter((m) => m.caps.includes(cap)) ?? [];
+  const entry = listed.find((m) => m.nvcc === nvcc);
+  if (entry) return `nvcc ${entry.nvcc} compiles this engine wrong for sm_${cap}: ${entry.why}`;
+  if (nvcc !== null && /^\d+\.\d+\.\d+$/.test(nvcc)) return undefined;
+  const maybe = listed.find((m) => nvcc === null || m.nvcc.startsWith(`${nvcc}.`));
+  return (
+    maybe &&
+    `nvcc's version reads as ${nvcc ?? "nothing"}, which cannot be told from nvcc ${maybe.nvcc} (it compiles this engine wrong for sm_${cap}: ${maybe.why}); nvcc --version must print its full version`
+  );
 }
 
 /** the name a packed build of this commit for this card carries, cached or published */
@@ -212,9 +221,26 @@ function prebuiltProblem(config: EngineConfig, sha7: string): string | null {
   return null;
 }
 
-/** A build directory is complete only with its marker (written last) and its server. */
-export async function isBuilt(fs: FileSystem, dir: string): Promise<boolean> {
-  return (await fs.exists(join(dir, BUILD_MARKER))) && (await fs.exists(join(dir, "llama-server")));
+/** the CUDA runtime a set of NVIDIA archives makes, as a build's marker records it: each archive's pinned sha256, cut
+ *  to 12 hex, in order ("none" for no archives) */
+export const runtimeId = (sha256s: readonly string[]): string =>
+  sha256s.map((sha256) => sha256.slice(0, 12)).join("+") || "none";
+
+/** A build directory is complete only with its marker (written last) and its server, and a build of
+ *  the pin installed from a tarball is complete only with the pin's CUDA runtime beside it, as its marker records it:
+ *  the directory is named for the commit and the card, so a [cuda] moved on would otherwise never reach it. A build
+ *  compiled here links the toolkit's runtime, and a lab build of another commit is not the pin's. */
+export async function isBuilt(
+  fs: FileSystem,
+  dir: string,
+  engine: Pick<EngineConfig, "cuda" | "fork">,
+): Promise<boolean> {
+  const marker = join(dir, BUILD_MARKER);
+  if (!(await fs.exists(marker)) || !(await fs.exists(join(dir, "llama-server")))) return false;
+  const text = await fs.readText(marker);
+  if (!/(^|\s)source=tarball:/.test(text) || !text.includes(`fork=${engine.fork.sha}`)) return true;
+  const runtime = runtimeId((engine.cuda?.runtime ?? []).map((archive) => archive.sha256));
+  return text.split(/\s+/).includes(`runtime=${runtime}`);
 }
 
 /** The source tree at the pinned commit: the submodule when it is checked out there and clean,

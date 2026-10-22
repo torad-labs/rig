@@ -29,7 +29,16 @@ export async function publishedImage(
   for (const name of dirs) {
     const file = join(images, name, "image.json");
     if (!(await fs.exists(file))) continue;
-    const record = JSON.parse(await fs.readText(file)) as ImageReport;
+    let record: ImageReport;
+    try {
+      record = JSON.parse(await fs.readText(file)) as ImageReport;
+    } catch {
+      // a receipt is written by one rename, so a file that does not parse was not written by rig image
+      return fail(
+        ExitCode.Failure,
+        `${file} does not parse: rig image ${head} --push writes it again`,
+      );
+    }
     if (record.pushed) pushed.push({ record, dir: join(images, name) });
   }
   if (pushed.length === 1) return ok(pushed[0]!);

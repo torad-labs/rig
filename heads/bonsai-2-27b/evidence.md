@@ -720,7 +720,7 @@ top-k pass, and computes every lens layer's logits with one stacked lm_head matm
 
 Four legs on the 5070 Ti (GPU 1, the MTP pack, -c 65536 -np 2, greedy, 512 tokens, the six prompts
 of the draft-head table, warm-up discarded, output hashes identical across the first three legs;
-rows and scripts under `evidence/lens-legs-5070ti/`):
+rows and scripts not published: the legs ran from a session's scratch directory):
 
 | leg | aggregate tok/s | per prompt |
 |---|---|---|

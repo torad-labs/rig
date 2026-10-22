@@ -2,14 +2,75 @@ import { describe, expect, test } from "bun:test";
 import { FakeHttp, fakePorts } from "@rig/testing";
 import type { HeadClient } from "../head-client.ts";
 import { LlamaClient } from "../llama-client.ts";
-import { abaVerdict } from "./decode-probe.ts";
-import { countDoubled, countRepeats } from "./fluency-probe.ts";
+import { abaVerdict, decodeProbe } from "./decode-probe.ts";
+import { countDoubled, countRepeats, fluencyProbe } from "./fluency-probe.ts";
 import { evaluate, type HumanEvalResult, humanevalVerdict, signTestP } from "./human-eval-probe.ts";
 import { type DepthLeg, depthVerdict } from "./longctx-probe.ts";
-import { grow, plant } from "./needle-probe.ts";
-import type { ProbeContext } from "./probe.ts";
+import { grow, needleProbe, plant } from "./needle-probe.ts";
+import type { ProbeContext, ProbeResult } from "./probe.ts";
 import { capabilityVerdicts, countRefusals, harmVerdict, parity } from "./refusal-probe.ts";
 import { firstDivergence, speculativeVerdict } from "./speculative-probe.ts";
+
+/** a probe run against fake legs: each leg's client is `client(label)`; the head and gates.toml carry only what the
+ *  probe reads */
+function runOnLegs(
+  probe: { run(ctx: ProbeContext): Promise<ProbeResult> },
+  client: (label: string) => Partial<HeadClient>,
+): Promise<ProbeResult> {
+  const ctx = {
+    head: { sourcePath: "/packs/base.gguf", servedPath: "/packs/served.gguf" },
+    gates: {
+      decode: { prompt: "Count:", n_predict: 64, tolerance_pct: 5 },
+      fluency: { prompts: ["one", "two"], max_tokens: 300 },
+      refusal: { pattern: "I cannot" },
+    },
+    server: {
+      leg: <T>(options: { label: string }, fn: (c: HeadClient) => Promise<T>) =>
+        fn(client(options.label) as HeadClient),
+    },
+  } as unknown as ProbeContext;
+  return probe.run(ctx);
+}
+
+describe("probes on legs that measured nothing", () => {
+  test("fluency fails when a leg generated no tokens: zero doubled words over nothing is no measurement", async () => {
+    const reply = (completionTokens: number) => ({
+      text: completionTokens ? "a fluent answer" : "",
+      reasoning: "",
+      promptTokens: 4,
+      completionTokens,
+      timings: {},
+      tokens: [],
+    });
+    const silent = await runOnLegs(fluencyProbe, () => ({ chat: async () => reply(0) }));
+    expect(silent.pass).toBe(false);
+    expect(silent.summary).toContain("generated no tokens");
+    const servedSilent = await runOnLegs(fluencyProbe, (label) => ({
+      chat: async () => reply(label === "fluency-served" ? 0 : 12),
+    }));
+    expect(servedSilent.pass).toBe(false);
+    const spoke = await runOnLegs(fluencyProbe, () => ({ chat: async () => reply(12) }));
+    expect(spoke.pass).toBe(true);
+  });
+  test("decode fails when a run's reply carries no decode rate: nine zeros are no spread to sit inside", async () => {
+    const rate = (tps: number | undefined) => ({
+      completion: async () => ({
+        text: "x",
+        timings: tps === undefined ? {} : { predicted_per_second: tps },
+      }),
+    });
+    const blind = await runOnLegs(decodeProbe, () => rate(undefined));
+    expect(blind.pass).toBe(false);
+    expect(blind.summary).toContain("9 runs reported no decode rate");
+    const servedBlind = await runOnLegs(decodeProbe, (label) =>
+      rate(label === "decode-served" ? undefined : 79.4),
+    );
+    expect(servedBlind.pass).toBe(false);
+    expect(servedBlind.summary).toContain("3 runs reported no decode rate");
+    const measured = await runOnLegs(decodeProbe, () => rate(79.4));
+    expect(measured.pass).toBe(true);
+  });
+});
 
 describe("fluency counters", () => {
   test("doubled words and immediate repeats, case-insensitive, one-letter words ignored for repeats", () => {
@@ -357,5 +418,44 @@ describe("needle haystack", () => {
     // "\nNOTE…\n", three lines once joined, so S1 reads at 3 and S2 at 8+1+3
     expect(lines.indexOf("NOTE: q1 is S1. Remember it.")).toBe(3);
     expect(lines.indexOf("NOTE: q2 is S2. Remember it.")).toBe(12);
+  });
+  test("the needle asks greedy: the legs carry no sampling, so a sampled answer would differ run to run", async () => {
+    const http = new FakeHttp();
+    http.on(/\/tokenize$/, (_u, body) => ({
+      status: 200,
+      text: JSON.stringify({
+        tokens: new Array((body as { content: string }).content.length >> 1).fill(0),
+      }),
+    }));
+    let asked: unknown = null;
+    http.on(/\/v1\/chat\/completions$/, (_u, body) => {
+      asked = body;
+      return {
+        status: 200,
+        text: JSON.stringify({
+          choices: [{ message: { content: "S1\nS2" } }],
+          usage: { prompt_tokens: 100, completion_tokens: 4 },
+        }),
+      };
+    });
+    const client = new LlamaClient(http, "http://x");
+    const ctx = {
+      head: { servedPath: "/packs/served.gguf" },
+      gates: {
+        needle: {
+          ctx: 8192,
+          tokens: 100,
+          needles: [
+            { depth: 0.2, secret: "S1", question: "q1" },
+            { depth: 0.8, secret: "S2", question: "q2" },
+          ],
+        },
+      },
+      corpus: async () => "abcd\n".repeat(10),
+      server: { leg: <T>(_o: unknown, fn: (c: HeadClient) => Promise<T>) => fn(client) },
+    } as unknown as ProbeContext;
+    const result = await needleProbe.run(ctx);
+    expect(result.pass).toBe(true);
+    expect(asked).toMatchObject({ temperature: 0, top_k: 1, seed: 1 });
   });
 });

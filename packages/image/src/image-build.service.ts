@@ -27,7 +27,15 @@ import type {
   ObjectStores,
   Shell,
 } from "@rig/core";
-import { ExitCode, fail, fetchPinned, ok, type Result } from "@rig/core";
+import {
+  artifactProblem,
+  checkArtifact,
+  ExitCode,
+  fail,
+  fetchPinned,
+  ok,
+  type Result,
+} from "@rig/core";
 import { type Engine, engineTarballName } from "@rig/engine";
 import { type Head, privateAssets } from "@rig/head";
 import { IMAGE_ROOT, renderDockerfile } from "./dockerfile.ts";
@@ -215,7 +223,7 @@ export class BuildImage {
       report.digest = `${name}@${pushed.value}`;
       deps.log.info(`pushed ${report.digest}, served back by ${registry.value.host}`);
     }
-    await deps.fs.writeText(join(dir, "image.json"), `${JSON.stringify(report, null, 2)}\n`);
+    await deps.fs.replaceText(join(dir, "image.json"), `${JSON.stringify(report, null, 2)}\n`);
     return ok(report);
   }
 
@@ -247,7 +255,7 @@ export class BuildImage {
       pushed: false,
       id: kept.value,
     };
-    await deps.fs.writeText(join(dir, "image.json"), `${JSON.stringify(report, null, 2)}\n`);
+    await deps.fs.replaceText(join(dir, "image.json"), `${JSON.stringify(report, null, 2)}\n`);
     deps.log.info(
       `${options.out} holds ${image}, image ID ${kept.value}: carry it and ${join(dir, "image.json")} to a machine with an sm_${cap} card and run --prove there`,
     );
@@ -299,7 +307,7 @@ export class BuildImage {
     const proven = await this.proveOnCard(image, head, cap, options.gpu);
     if (!proven.ok) return proven;
     const report: ImageReport = { ...read.value, proven: this.proof(card) };
-    await deps.fs.writeText(path, `${JSON.stringify(report, null, 2)}\n`);
+    await deps.fs.replaceText(path, `${JSON.stringify(report, null, 2)}\n`);
     deps.log.info(`${path} records ${image} proven on ${card.name} (sm_${cap})`);
     return ok(report);
   }
@@ -495,7 +503,7 @@ export class BuildImage {
       id,
       proven,
     };
-    await deps.fs.writeText(options.receipt, `${JSON.stringify(report, null, 2)}\n`);
+    await deps.fs.replaceText(options.receipt, `${JSON.stringify(report, null, 2)}\n`);
     deps.log.info(`pushed ${report.digest}, served back by ${registry.value.host}`);
     return ok(report);
   }
@@ -516,13 +524,16 @@ export class BuildImage {
     }
   }
 
-  /** the tarball to bake: the one named, else a build of this pin for this sm under local/ (the
-   *  release floor's first), else none when the pin publishes a prebuilt the image fetches itself */
+  /** the tarball to bake: the one named, else a build of this pin for this sm made here (the release floor's first),
+   *  else none when the pin publishes a prebuilt the image fetches itself. A tarball a rented box sent back
+   *  (local/rented-box/cached-builds) is never one: its bytes came from a machine rig does not own. Where the pin
+   *  publishes a build for the sm, the tarball baked in its place must be its bytes, by sha256. */
   private async engineTarball(
     cap: string,
     named: string | undefined,
   ): Promise<Result<string | undefined>> {
     const name = engineTarballName(this.engine.sha7, cap);
+    let tarball: string | undefined;
     if (named) {
       if (basename(named) !== name)
         return fail(
@@ -531,13 +542,26 @@ export class BuildImage {
         );
       if (!(await this.deps.fs.exists(named)))
         return fail(ExitCode.Failure, `${named} does not exist`);
-      return ok(named);
+      tarball = named;
+    } else {
+      for (const dir of [this.layout.releaseBuildsDir, this.layout.engineBuildsDir]) {
+        if (await this.deps.fs.exists(join(dir, name))) {
+          tarball = join(dir, name);
+          break;
+        }
+      }
     }
-    const { releaseBuildsDir, engineBuildsDir, cachedBuildsDir } = this.layout;
-    for (const dir of [releaseBuildsDir, engineBuildsDir, cachedBuildsDir]) {
-      if (await this.deps.fs.exists(join(dir, name))) return ok(join(dir, name));
+    const published = this.engine.prebuiltFor(cap);
+    if (tarball && published) {
+      const sha256 = await this.deps.hasher.sha256File(tarball);
+      if (sha256 !== published.sha256)
+        return fail(
+          ExitCode.Failure,
+          `${tarball} is not the published build of torad-labs/llama.cpp @ ${this.engine.sha7} for sm_${cap} (sha256 ${published.sha256.slice(0, 12)}, this one ${sha256.slice(0, 12)}): with no tarball named or found here, the image installs the published build`,
+        );
     }
-    if (this.engine.prebuiltFor(cap)) return ok(undefined);
+    if (tarball) return ok(tarball);
+    if (published) return ok(undefined);
     return fail(
       ExitCode.Failure,
       `no build of torad-labs/llama.cpp @ ${this.engine.sha7} for sm_${cap} to bake, and the pin publishes none: rig build --prebuilt --sha ${this.engine.fork.sha} makes ${name} on the release floor, or --from-tarball names one`,
@@ -674,7 +698,12 @@ export class BuildImage {
       path: join(this.layout.downloadsDir, SMOKE_MODEL.file),
       sha256: SMOKE_MODEL.sha256,
     };
-    if (!(await this.deps.fs.exists(smoke.path))) {
+    // the file on disk is the smoke model only when it is the pinned bytes: one cut short, or another model under its
+    // name, decodes something else
+    const state = await checkArtifact(this.deps.fs, this.deps.hasher, smoke);
+    if (typeof state === "object")
+      return fail(ExitCode.Failure, `the smoke model ${smoke.path} is ${artifactProblem(state)}`);
+    if (state !== "ok") {
       const fetched = await fetchPinned(this.deps, SMOKE_MODEL.url, smoke, "the smoke model");
       if (!fetched.ok) return fetched;
     }

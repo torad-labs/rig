@@ -127,7 +127,9 @@ export class BuildEngine {
     // installed, or made before a target existed is compiled again (its build tree is kept, so only what it lacks
     // compiles) and published over this one
     const portable = options.portable === true && options.fromTarball === undefined;
-    if (await isBuilt(this.deps.fs, dir)) {
+    // --compile and --from-tarball name where the build comes from: the one already here answers neither
+    const answered = !options.compile && options.fromTarball === undefined;
+    if (answered && (await isBuilt(this.deps.fs, dir, this.engine))) {
       const marker = (await this.deps.fs.readText(join(dir, BUILD_MARKER))).trim();
       if (!portable) return ok({ dir, cap, alreadyBuilt: true, marker });
       if (await this.compiledPortable(dir, marker)) {
@@ -231,7 +233,7 @@ export class BuildEngine {
     const dir = join(this.layout.engineLabDir, name);
     const sha256 = await hasher.sha256File(tarball);
     if (await fs.exists(dir)) {
-      const built = await isBuilt(fs, dir);
+      const built = await isBuilt(fs, dir, this.engine);
       const marker = built ? (await fs.readText(join(dir, BUILD_MARKER))).trim() : "";
       if (marker.includes(`sha256=${sha256}`)) return ok({ dir, cap, alreadyBuilt: true, marker });
       return fail(
@@ -259,7 +261,7 @@ export class BuildEngine {
       };
       const got = await this.obtain(entry.url, archive, `CUDA runtime ${basename(archive.path)}`);
       if (!got.ok) return got;
-      runtime.push({ path: archive.path, libs: entry.libs });
+      runtime.push({ path: archive.path, sha256: entry.sha256, libs: entry.libs });
     }
     return ok(runtime);
   }

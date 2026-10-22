@@ -20,9 +20,12 @@ export interface GateServerDeps {
 }
 
 const STARTUP_TIMEOUT_MS = 300_000;
+const STOP_GRACE_MS = 30_000;
+const STOP_FORCE_MS = 10_000;
 
 export class GateServer implements GateLegs {
   private proc: Process | null = null;
+  private label = "";
 
   constructor(
     private readonly deps: GateServerDeps,
@@ -72,6 +75,13 @@ export class GateServer implements GateLegs {
   async start(options: LegOptions): Promise<void> {
     if (this.proc) throw new Error(`a gate server is already running (${this.proc.pid})`);
     if (options.draft) await this.requireDraft(options.label);
+    // the leg trusts whatever answers /health on its port, so that port must be silent before its server exists: a
+    // server no leg started there would be measured in its place while the leg's own one died on the bind
+    if (await this.client.healthy()) {
+      throw new Error(
+        `gate port ${this.port} already answers /health before the ${options.label} leg's server started: a server no leg owns holds it`,
+      );
+    }
 
     const log = `${this.runDir}/server-${options.label}.log`;
     const proc = this.deps.shell.spawn(this.argv(options), {
@@ -85,6 +95,7 @@ export class GateServer implements GateLegs {
       stderrPath: log,
     });
     this.proc = proc;
+    this.label = options.label;
     // a server that dies at load (the engine refusing an argument or an asset) is named at once,
     // not after the whole startup budget as one that never came up
     let exitCode: number | undefined;
@@ -94,13 +105,16 @@ export class GateServer implements GateLegs {
     await this.volunteerForOom(proc, options.label);
 
     const deadline = this.deps.clock.now() + STARTUP_TIMEOUT_MS;
-    while (!(await this.client.healthy())) {
+    for (;;) {
+      const healthy = await this.client.healthy();
+      // the exit is read after the answer: a port that answers while the leg's own server is gone is another's
       if (exitCode !== undefined) {
         this.proc = null;
         throw new Error(
           `gate server ${options.label} exited with code ${exitCode} before it answered — ${log}`,
         );
       }
+      if (healthy) break;
       if (this.deps.clock.now() >= deadline) {
         await this.stop();
         throw new Error(`gate server ${options.label} did not come up in 300 s — ${log}`);
@@ -113,12 +127,37 @@ export class GateServer implements GateLegs {
     );
   }
 
+  /** SIGINT, a llama-server's clean shutdown; a second one after STOP_GRACE_MS, which it answers by exiting at once;
+   *  SIGKILL after STOP_FORCE_MS more. A server wedged in its shutdown would otherwise hold the run, the card and the
+   *  port for good. */
   async stop(): Promise<void> {
-    if (!this.proc) return;
-    this.proc.kill("SIGINT");
-    await this.proc.exited;
+    const proc = this.proc;
+    if (!proc) return;
+    const label = this.label;
+    proc.kill("SIGINT");
+    if (!(await this.exitsWithin(proc, STOP_GRACE_MS))) {
+      this.deps.log.warn(
+        `gate server ${label} did not exit in ${STOP_GRACE_MS / 1000} s of SIGINT: sending it again`,
+      );
+      proc.kill("SIGINT");
+      if (!(await this.exitsWithin(proc, STOP_FORCE_MS))) {
+        this.deps.log.warn(`gate server ${label} ignored a second SIGINT: SIGKILL`);
+        proc.kill("SIGKILL");
+        await proc.exited;
+      }
+    }
     this.proc = null;
     await this.deps.clock.sleep(1000);
+  }
+
+  /** whether `proc` exits within `ms` of the clock */
+  private async exitsWithin(proc: Process, ms: number): Promise<boolean> {
+    const exited = proc.exited.then(() => true);
+    const deadline = this.deps.clock.now() + ms;
+    while (this.deps.clock.now() < deadline) {
+      if (await Promise.race([exited, this.deps.clock.sleep(250).then(() => false)])) return true;
+    }
+    return false;
   }
 
   /** run `fn` against a fresh server on `pack`, stopping it whatever happens */

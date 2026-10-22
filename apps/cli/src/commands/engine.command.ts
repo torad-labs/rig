@@ -78,7 +78,8 @@ export function engineLabCommand(wiring: EngineLabWiring): Command {
     usage: USAGE,
     async run(args: Args) {
       const [sub, ...extra] = args.positionals;
-      const spec = SUBCOMMANDS[sub ?? ""];
+      // own keys only: `rig engine constructor` would otherwise find Object.prototype's and crash on it
+      const spec = Object.hasOwn(SUBCOMMANDS, sub ?? "") ? SUBCOMMANDS[sub ?? ""] : undefined;
       if (!spec) {
         log.error(`usage: rig ${FORM}`);
         return ExitCode.Usage;

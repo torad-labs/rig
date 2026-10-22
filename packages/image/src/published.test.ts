@@ -36,4 +36,13 @@ describe("publishedImage", () => {
     const two = await publishedImage(p.fs, layout, "glm");
     expect(!two.ok && two.message).toContain("glm has pushed images for sm_120, sm_90");
   });
+  test("a receipt that does not parse is refused by its path, never thrown and never skipped", async () => {
+    const p = fakePorts();
+    p.fs.put(`${imageDir(layout, "glm", "120")}/image.json`, record("120", true));
+    p.fs.put(`${imageDir(layout, "glm", "90")}/image.json`, record("90", true).slice(0, 40)); // cut short
+    const r = await publishedImage(p.fs, layout, "glm");
+    expect(r.ok ? "published" : r.message).toContain(
+      "/r/local/images/glm-sm90/image.json does not parse",
+    );
+  });
 });

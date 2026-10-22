@@ -5,7 +5,14 @@
 import { basename, dirname } from "node:path";
 import type { RunResult, Ssh, SshTarget } from "@rig/core";
 import { type Layout, layoutAt } from "@rig/core";
-import { SAMPLER_PATHS, SAMPLER_TICK_SECONDS, samplerScript, windowRead } from "./box-sampler.ts";
+import {
+  CARD_QUERY,
+  cardPercents,
+  SAMPLER_PATHS,
+  SAMPLER_TICK_SECONDS,
+  samplerScript,
+  windowRead,
+} from "./box-sampler.ts";
 
 /** where a template box's on-start logs (box-template.ts) */
 const TEMPLATE_LOGS = "/var/log/rig";
@@ -56,6 +63,7 @@ export class RentedBox {
         now: number;
         window: number | null;
         downloadKBps: number | null;
+        load5: number | null;
         pull: { kibPerSecond: number; seconds: number } | null;
       }
     | "unreachable"
@@ -64,7 +72,11 @@ export class RentedBox {
     const probe = await this.ssh.run(
       this.target,
       [
-        'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null; echo "rc=$?"',
+        `o=$(${CARD_QUERY} 2>/dev/null); echo "rc=$?"; [ -n "$o" ] && printf '%s\\n' "$o" | ${cardPercents()}`,
+        // the run queue over the last 5 minutes, which covers the gap between two checks: a utilization is a point
+        // sample and both readings miss a job that is neither, a test suite checking kernels against a CPU reference
+        // being the case that destroyed box 54505657 (vast read CPU 6 %, the card 0 %, with the load at 7)
+        `echo "load5=$(cut -d' ' -f2 /proc/loadavg 2>/dev/null)"`,
         `S=${SAMPLER_PATHS.script}; P=${SAMPLER_PATHS.pid}; F=${SAMPLER_PATHS.firstPid}`,
         `[ -f $F ] && { kill "$(cat $F)" 2>/dev/null; rm -f $F; }`,
         `cat > $S.new <<'RIG_SAMPLER'`,
@@ -87,10 +99,12 @@ export class RentedBox {
     const window = /^window=(\d+)$/m.exec(probe.stdout)?.[1];
     const download = /^download=(\d+)$/m.exec(probe.stdout)?.[1];
     const pull = /^pull=(\d+) (\d+)$/m.exec(probe.stdout);
+    const load5 = /^load5=(\d+(?:\.\d+)?)$/m.exec(probe.stdout)?.[1];
     return {
       now: Math.max(...percents),
       window: window === undefined ? null : Number(window),
       downloadKBps: download === undefined ? null : Number(download),
+      load5: load5 === undefined ? null : Number(load5),
       pull: pull
         ? { kibPerSecond: Number(pull[1]), seconds: Number(pull[2]) * SAMPLER_TICK_SECONDS }
         : null,

@@ -233,6 +233,47 @@ describe("EngineLab.ab", () => {
     expect(more.ok && more.value.libs.b.path).toBe("/libs/new/libggml-cuda.so.0");
   });
 
+  test("a run's pairs fold only with pairs of the same settings: another library, switch or argument is refused before it measures", async () => {
+    const { p, lab } = setup();
+    let benches = 0;
+    p.shell.on(/^\S*llama-bench /, () => {
+      benches++;
+      return { code: 0, stdout: `{"samples_ts": [1, 100, 100]}\n`, stderr: "" };
+    });
+    const req = {
+      target: target(),
+      model: "/m.gguf",
+      a: { env: {} },
+      b: { lib: "/libs/new", env: {} },
+      pairs: 2,
+      first: 1,
+      reps: 3,
+      extra: ["-p", "4096"],
+      run: "2026-10-06T15-31", // the default --run, the minute: a second A/B started within it lands here
+    };
+    expect((await lab.ab(req)).ok).toBe(true);
+    // each pair's settings beside it: the libraries by sha, the switches and arguments each side ran with
+    const record = JSON.parse(p.fs.text(`${RUNS}/${req.run}/ab-1-settings.json`)!);
+    expect(record.b).toMatchObject({ args: [], env: { GGML_CUDA_GRAPH_MAX: "0" } });
+    expect(record.a.lib).toMatch(/^[0-9a-f]{12}$/);
+    const others = [
+      { b: { env: { GGML_CUDA_FORCE_MMQ: "1" } } }, // the library a gets instead of the relinked one
+      { b: { lib: "/libs/new", env: { GGML_CUDA_FORCE_MMQ: "1" } } },
+      { extra: ["-p", "512"] },
+      { b: { lib: "/libs/new", env: {}, args: ["-ctk", "q8_0"] } },
+    ];
+    for (const other of others) {
+      const before = benches;
+      const r = await lab.ab({ ...req, ...other, pairs: 1, first: 3 });
+      expect(r.ok ? "folded" : r.message).toContain("pair 1 was measured with other settings");
+      expect(benches).toBe(before);
+    }
+    // a pair with no record of its settings (an earlier rig's) is never folded either
+    await p.fs.remove(`${RUNS}/${req.run}/ab-2-settings.json`);
+    const bare = await lab.ab({ ...req, pairs: 0, first: 3 });
+    expect(bare.ok ? "folded" : bare.message).toContain("pair 2 has no record of its settings");
+  });
+
   test("median: each arm is the median of its repetitions, so one slow repetition moves the mean's change and not its", async () => {
     const { p, lab } = setup();
     // b is 10 % faster on every repetition but its last, which reads at a box's low level

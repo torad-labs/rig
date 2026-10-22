@@ -9,10 +9,10 @@ import { DescribeHead } from "./head-description.service.ts";
 const headToml = await Bun.file(`${repoRoot}/heads/bonsai-2-27b/head.toml`).text();
 const engineToml = await Bun.file(`${repoRoot}/engine/engine.toml`).text();
 
-async function setup() {
+async function setup(toml = headToml) {
   const p = fakePorts();
   const layout = layoutAt("/r");
-  p.fs.put("/r/heads/bonsai-2-27b/head.toml", headToml);
+  p.fs.put("/r/heads/bonsai-2-27b/head.toml", toml);
   p.fs.put("/r/engine/engine.toml", engineToml);
   const head = await loadHead(p.fs, layout, "bonsai-2-27b");
   const engine = await loadEngine(p.fs, layout);
@@ -83,6 +83,18 @@ describe("describe", () => {
     });
     unit.devices = [0];
     expect(await uc.run(head)).toMatchObject({ this_gpu: 0, this_gpus: [0], profile: null });
+  });
+  test("a profile that turns speculation off describes no draft: a client is told what this card serves", async () => {
+    const off = headToml.replace("ctx = 294912\n", "ctx = 294912\nspeculative = false\n"); // the 5080 profile
+    const { p, head, uc } = await setup(off);
+    expect(await uc.run(head, [0])).toMatchObject({
+      profile: "16000 MiB, 4 slots × 294912",
+      speculative: null,
+    });
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 }); // the 5090 profile keeps the head's draft
+    expect(await uc.run(head, [1])).toMatchObject({
+      speculative: { type: "draft-mtp", file: null, n_max: 3 },
+    });
   });
   test("an unmeasured card or no card is reported, not refused", async () => {
     const { p, head, uc } = await setup();

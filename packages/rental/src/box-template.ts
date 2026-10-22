@@ -17,10 +17,13 @@ import type { Engine } from "@rig/engine";
 import type { Head } from "@rig/head";
 import { draftSidecar } from "@rig/head";
 import { loadRegistryConfig, publishedImage, servedDigest } from "@rig/image";
+import { VAST_API } from "./box-guard.ts";
 
 /** where the image keeps rig (image-build's IMAGE_ROOT) and where the on-start logs go */
 const RIG = "/opt/rig/dist/rig";
 const LOGS = "/var/log/rig";
+/** how long past the guard's own lifetime stop the backstop waits, so the guard's stop and its log line come first */
+const BACKSTOP_MARGIN_S = 900;
 
 export interface TemplateDeps {
   fs: FileSystem;
@@ -110,11 +113,21 @@ export class PublishTemplate {
       );
 
     const recordFile = join(dir, "template.json");
-    const previous = (await fs.exists(recordFile))
-      ? (JSON.parse(await fs.readText(recordFile)) as { hashId?: string })
-      : {};
+    let previous: { hashId?: string } = {};
+    if (await fs.exists(recordFile)) {
+      try {
+        previous = JSON.parse(await fs.readText(recordFile)) as { hashId?: string };
+      } catch {
+        // written by one rename, so a record that does not parse was not written by rig; its hash would say which
+        // template to edit in place
+        return fail(
+          ExitCode.Failure,
+          `${recordFile} does not parse: remove it and rig vast template ${head.name} creates a new template`,
+        );
+      }
+    }
     const saved = await this.deps.rental.saveTemplate(spec, previous.hashId);
-    await fs.writeText(
+    await fs.replaceText(
       recordFile,
       `${JSON.stringify({ ...saved, name, image: record.image }, null, 2)}\n`,
     );
@@ -126,9 +139,16 @@ export class PublishTemplate {
 }
 
 /** what the box runs at every start, a resume included: the guard, then the head in the foreground, each started again
- *  when it exits; the head's supervisor gives up after five tries that each ended within 15 minutes */
+ *  when it exits; the head's supervisor gives up after five tries that each ended within 15 minutes. Last, a backstop that
+ *  runs no rig code: a quarter hour past the guard's lifetime it stops the box through vast's API with the box's own key,
+ *  asking again each minute until vast takes it, so a guard that exits at every start (its head fails to load) or
+ *  restarts its own clock each time it is started again still never bills past its lifetime */
 export function renderOnstart(head: string, idleMinutes: number, maxHours: number): string {
   const failed = `${LOGS}/FAILED`;
+  const backstop = [
+    `sleep ${Math.ceil(maxHours * 3600) + BACKSTOP_MARGIN_S}`,
+    `until curl -fsS -m 30 -X PUT -H "Authorization: Bearer $CONTAINER_API_KEY" -H "Content-Type: application/json" -d "{\\"state\\":\\"stopped\\"}" ${VAST_API}/instances/$CONTAINER_ID/; do sleep 60; done`,
+  ].join("; ");
   const guard = `until ${RIG} vast guard ${head} --idle-minutes ${idleMinutes} --max-hours ${maxHours} --stop-when ${failed}; do sleep 30; done`;
   const up = [
     "n=0; while :; do t=$(date +%s)",
@@ -141,6 +161,7 @@ export function renderOnstart(head: string, idleMinutes: number, maxHours: numbe
     `mkdir -p ${LOGS} && rm -f ${failed}`,
     `nohup sh -c '${guard}' >> ${LOGS}/guard.log 2>&1 &`,
     `nohup sh -c '${up}' >> ${LOGS}/up.log 2>&1 &`,
+    `nohup sh -c '${backstop}' >> ${LOGS}/backstop.log 2>&1 &`,
   ].join("\n");
 }
 

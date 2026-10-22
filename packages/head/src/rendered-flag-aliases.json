@@ -1,5 +1,5 @@
 {
-  "engine": "4131f11fc006be12dcce3b6f5d90506b95226479",
+  "engine": "fdf8d4044a6002a2c7ad300b088a0fd9bbcd6175",
   "aliases": {
     "-m": ["--model", "-m"],
     "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],
@@ -30,7 +30,7 @@
     "-ctki": ["--cache-type-idx", "-ctki"]
   },
   "engines": {
-    "4131f11fc006be12dcce3b6f5d90506b95226479": {
+    "fdf8d4044a6002a2c7ad300b088a0fd9bbcd6175": {
       "-m": ["--model", "-m"],
       "-ngl": ["--gpu-layers", "--n-gpu-layers", "-ngl"],
       "--jinja": ["--jinja", "--no-jinja"],

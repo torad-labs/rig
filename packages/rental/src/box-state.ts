@@ -23,6 +23,8 @@ export interface BoxState {
   createdAt: number;
   sshHost?: string;
   sshPort?: number;
+  /** a VM, reached at the host's own address rather than vast's proxy; absent on a container */
+  vm?: boolean;
   head?: string;
   /** `up --idle-minutes`: this box's idle budget, read by every idle check */
   idleMinutes?: number;

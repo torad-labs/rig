@@ -81,10 +81,15 @@ export const fluencyProbe: Probe = {
           `  p${index}: ${String(counts.tokens).padStart(3)} tok  doubled=${counts.doubled.length} ${JSON.stringify(counts.doubled.slice(0, 4))}  repeats=${counts.repeats}  refusal=${counts.refusal}`,
       ),
     ];
+    // no doubled word over no tokens is no measurement: a leg that generated nothing fails the probe
+    const silent = [...(base.tokens > 0 ? [] : ["base"]), ...(served.tokens > 0 ? [] : ["served"])];
+    const counted = `doubled ${base.doubled} → ${served.doubled}, repeats ${base.repeats} → ${served.repeats} over ${served.tokens} tokens`;
     return {
       name: "fluency",
-      pass: served.doubled <= base.doubled && served.repeats <= base.repeats,
-      summary: `doubled ${base.doubled} → ${served.doubled}, repeats ${base.repeats} → ${served.repeats} over ${served.tokens} tokens`,
+      pass: silent.length === 0 && served.doubled <= base.doubled && served.repeats <= base.repeats,
+      summary: silent.length
+        ? `the ${silent.join(" and ")} leg generated no tokens; ${counted}`
+        : counted,
       lines,
       data: { base, served },
     };

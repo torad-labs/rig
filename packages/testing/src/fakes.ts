@@ -499,6 +499,7 @@ export class FakeRental implements Rental {
       sshPort: 12345,
       directSsh: { host: "203.0.113.7", port: 40174 },
       gpuUtil: 0, // vast samples a running box's card; a test drops it to model a box with none
+      ...(offer?.machineId ? { machineId: offer.machineId } : {}),
     });
     this.ops.push(
       "templateHash" in o

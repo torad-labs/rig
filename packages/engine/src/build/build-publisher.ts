@@ -12,6 +12,7 @@ import {
   BUILD_MARKER,
   type Engine,
   engineTarballName,
+  runtimeId,
   SERVING_TARGETS,
   TARGETS,
 } from "../engine.ts";
@@ -23,9 +24,10 @@ export interface PublisherDeps {
   clock: Clock;
 }
 
-/** a downloaded runtime archive and the sonames to take from it */
+/** a downloaded runtime archive, its pinned sha256, and the sonames to take from it */
 export interface RuntimeArchive {
   path: string;
+  sha256: string;
   libs: string[];
 }
 
@@ -35,6 +37,8 @@ export interface Provenance {
   native: "on" | "off";
   /** "compiled", or "tarball:<name>" */
   source: string;
+  /** a tarball's install: the CUDA runtime unpacked beside it (runtimeId) */
+  runtime?: string;
   /** a build of another commit (`--off-pin`): its marker names no fork commit, and the tarball by sha256 */
   offPin?: { sha256: string };
 }
@@ -81,8 +85,8 @@ export class BuildPublisher {
     return this.publish(staging, dir, provenance, driverStub);
   }
 
-  /** a cached tarball, checked by name unless it is `offPin` (a build of another commit), unpacked with the
-   *  libraries of each `runtime` archive beside it, and published as `dir` */
+  /** a cached tarball, checked by name and by the commit its build carries unless it is `offPin` (a build of another
+   *  commit), unpacked with the libraries of each `runtime` archive beside it, and published as `dir` */
   async publishTarball(
     tarball: string,
     cap: string,
@@ -104,6 +108,11 @@ export class BuildPublisher {
       await this.deps.fs.remove(staging);
       return fail(ExitCode.Failure, `tar failed: ${untar.stderr.trim()}`);
     }
+    const other = offPin ? null : await this.otherCommit(staging, basename(tarball));
+    if (other) {
+      await this.deps.fs.remove(staging);
+      return fail(ExitCode.Failure, other);
+    }
     for (const archive of runtime) {
       const unpacked = await this.unpackRuntime(archive, staging);
       if (!unpacked.ok) {
@@ -111,8 +120,30 @@ export class BuildPublisher {
         return unpacked;
       }
     }
-    const source = `tarball:${basename(tarball)}`;
-    return this.publish(staging, dir, { cap, native: "off", source, ...(offPin && { offPin }) });
+    return this.publish(staging, dir, {
+      cap,
+      native: "off",
+      source: `tarball:${basename(tarball)}`,
+      runtime: runtimeId(runtime.map((archive) => archive.sha256)),
+      ...(offPin && { offPin }),
+    });
+  }
+
+  /** why the build unpacked in `staging` is not of the pin's commit, else null. A name is only a name: a build of
+   *  another commit renamed to the pin's would serve as the pin. llama.cpp links the short commit it was built from
+   *  into libggml-base.so as a NUL-ended string (7 to 9 hex so far: 009073391 for 0090733); the bytes are read, never
+   *  run, since running would load the CUDA libraries. */
+  private async otherCommit(staging: string, name: string): Promise<string | null> {
+    const lib = join(staging, "libggml-base.so");
+    if (!(await this.deps.fs.exists(lib)))
+      return `${name} holds no libggml-base.so to read its commit from`;
+    const text = Buffer.from(await this.deps.fs.readBytes(lib)).toString("latin1");
+    const commits = new Set(Array.from(text.matchAll(/\0([0-9a-f]{7,12})(?=\0)/g), (m) => m[1]!));
+    if ([...commits].some((commit) => this.engine.fork.sha.startsWith(commit))) return null;
+    const carried = commits.size
+      ? `carries commit ${[...commits].join(" or ")}`
+      : "carries no commit";
+    return `${name}'s libggml-base.so ${carried}, not the pin's ${this.engine.sha7}: a build of another commit installs for the lab with --off-pin NAME`;
   }
 
   /** an NVIDIA redistributable archive (<name>-archive/lib/<soname>*) reduced to the libraries it
@@ -148,18 +179,24 @@ export class BuildPublisher {
 
   /** the published directory as a tarball the next box of this arch can use, or the release a
    *  prebuilt is published from: without the marker (it names the host that built it; whoever
-   *  unpacks the tarball writes their own) and without this machine's user and group */
+   *  unpacks the tarball writes their own) and without this machine's user and group. tar writes as it goes, so it
+   *  writes beside the name and the whole file is renamed onto it: a pack cut short never carries the build's name. */
   async pack(dir: string, into: string, cap: string): Promise<Result<string>> {
     const tarball = join(into, this.tarballName(cap));
+    const part = `${tarball}.part`;
     const exclude = `--exclude=./${BUILD_MARKER}`;
     const owner = ["--owner=0", "--group=0", "--numeric-owner"];
     const tar = await this.deps.shell.run(
-      ["tar", "-C", dir, "-czf", tarball, exclude, ...owner, "."],
+      ["tar", "-C", dir, "-czf", part, exclude, ...owner, "."],
       {
         timeoutMs: 600_000,
       },
     );
-    if (tar.code !== 0) return fail(ExitCode.Failure, `tar failed: ${tar.stderr.trim()}`);
+    if (tar.code !== 0) {
+      await this.deps.fs.remove(part);
+      return fail(ExitCode.Failure, `tar failed: ${tar.stderr.trim()}`);
+    }
+    await this.deps.fs.rename(part, tarball);
     return ok(tarball);
   }
 
@@ -187,11 +224,8 @@ export class BuildPublisher {
       await this.deps.fs.remove(staging);
       return fail(ExitCode.Failure, unresolved);
     }
-    const markerPath = join(staging, BUILD_MARKER);
-    // an off-pin build's marker is always rig's own: a tarball packed by hand can carry one naming the pin
-    if (provenance.offPin || !(await this.deps.fs.exists(markerPath))) {
-      await this.deps.fs.writeText(markerPath, `${this.marker(provenance)}\n`);
-    }
+    // the marker is always rig's own: a tarball packed by hand can carry one naming another source or runtime
+    await this.deps.fs.writeText(join(staging, BUILD_MARKER), `${this.marker(provenance)}\n`);
     const old = `${dir}.old-${process.pid}`;
     const replacing = await this.deps.fs.exists(dir);
     if (replacing) {
@@ -259,7 +293,8 @@ export class BuildPublisher {
   private marker(provenance: Provenance): string {
     const built = new Date(this.deps.clock.now()).toISOString();
     const fork = provenance.offPin ? "off-pin" : this.engine.fork.sha;
+    const runtime = provenance.runtime ? ` runtime=${provenance.runtime}` : "";
     const sha256 = provenance.offPin ? ` sha256=${provenance.offPin.sha256}` : "";
-    return `fork=${fork} cap=sm_${provenance.cap} native=${provenance.native} built=${built} host=${this.deps.host.hostname()} source=${provenance.source}${sha256}`;
+    return `fork=${fork} cap=sm_${provenance.cap} native=${provenance.native} built=${built} host=${this.deps.host.hostname()} source=${provenance.source}${runtime}${sha256}`;
   }
 }

@@ -13,7 +13,7 @@
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { benchCache } from "@rig/head";
-import type { Probe, ProbeResult } from "./probe.ts";
+import { benchEnv, type Probe, type ProbeResult } from "./probe.ts";
 
 /** kernel short name -> launches */
 export type KernelCounts = Record<string, number>;
@@ -136,12 +136,10 @@ export const censusProbe: Probe = {
     ];
     const profile = ["nsys", "profile", "-t", "cuda", "--cuda-graph-trace=node", "-f", "true"];
     const cmd = [...profile, "-o", capture, ...bench];
+    // the profile's switches, under the ones the table was taken with (gates.toml's census.env)
+    const env = ctx.gates.census.env;
     const profiled = await ctx.shell.run(cmd, {
-      env: {
-        CUDA_DEVICE_ORDER: "PCI_BUS_ID",
-        CUDA_VISIBLE_DEVICES: String(ctx.gpu),
-        LD_LIBRARY_PATH: ctx.binDir,
-      },
+      env: { ...benchEnv(ctx), ...env },
       timeoutMs: 1_800_000,
     });
     if (profiled.code !== 0) {
@@ -174,6 +172,7 @@ export const censusProbe: Probe = {
     const data = {
       cmd,
       cache: cache.ran,
+      env,
       step: census.step,
       steps: census.steps,
       launches: census.launches,

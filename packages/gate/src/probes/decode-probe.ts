@@ -9,6 +9,8 @@ export interface Leg {
   warmup: number;
   runs: number[];
   mean: number;
+  /** runs whose reply carried no decode rate: each counts as 0 tok/s and fails the probe */
+  unrated: number;
 }
 
 export function abaVerdict(
@@ -24,12 +26,15 @@ export function abaVerdict(
 
 async function measureLeg(client: HeadClient, prompt: string, nPredict: number): Promise<Leg> {
   const speeds: number[] = [];
+  let unrated = 0;
   for (let run = 0; run < 3; run++) {
     const reply = await client.completion(prompt, { nPredict });
-    speeds.push(reply.timings.predicted_per_second ?? 0);
+    const rate = reply.timings.predicted_per_second;
+    if (!(rate !== undefined && rate > 0)) unrated++;
+    speeds.push(rate ?? 0);
   }
   const [warmup = 0, ...runs] = speeds;
-  return { warmup, runs, mean: sum(runs) / runs.length };
+  return { warmup, runs, mean: sum(runs) / runs.length, unrated };
 }
 
 export const decodeProbe: Probe = {
@@ -58,10 +63,13 @@ export const decodeProbe: Probe = {
       ([label, measured]) =>
         `${label.padEnd(8)} warmup ${fixed1(measured.warmup)}   runs ${measured.runs.map(fixed1).join(" ")}   mean(runs) ${fixed1(measured.mean)} tok/s`,
     );
+    // a reply with no rate is no measurement: three legs of zeros have no spread and would sit inside it
+    const unrated = base1.unrated + served.unrated + base2.unrated;
+    const speeds = `base ${fixed1(base1.mean)} / served ${fixed1(served.mean)} / base ${fixed1(base2.mean)} tok/s`;
     return {
       name: "decode",
-      pass: abaVerdict(base1.mean, served.mean, base2.mean, tolerance_pct),
-      summary: `base ${fixed1(base1.mean)} / served ${fixed1(served.mean)} / base ${fixed1(base2.mean)} tok/s`,
+      pass: unrated === 0 && abaVerdict(base1.mean, served.mean, base2.mean, tolerance_pct),
+      summary: unrated ? `${unrated} runs reported no decode rate; ${speeds}` : speeds,
       lines,
       data: legs,
     };

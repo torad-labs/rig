@@ -11,7 +11,6 @@ gates/<run>/         a `rig gate` run's per-probe results and summary.json (loca
 spec-bench-local/    the draft-head decode measurements on the 5070 Ti (results.jsonl)
 spec-bench-4x5090/   the same on a rented 4×5090 box (results*.jsonl)
 spec-bench-mtp-5070ti/ the in-pack MTP head against plain on the 5070 Ti (rows from tools/bench-head.ts)
-lens-legs-5070ti/    the lens's decode cost: off / graph / full / full + MTP on the 5070 Ti (lens-legs.sh, tools/bench-head.ts)
 ```
 
 **Belongs here:** the machine-readable result behind a number in `evidence.md`: a

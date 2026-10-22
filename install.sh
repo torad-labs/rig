@@ -1,7 +1,8 @@
 #!/bin/sh
 # Installs rig from a GitHub release: the binary, the engine pin and the heads into
 # ~/.local/share/rig, linked as ~/.local/bin/rig. What rig builds and fetches afterwards (the
-# engine, the packs, logs) lives in ~/.local/share/rig/local/, which an upgrade never touches.
+# engine, the packs, logs) lives in ~/.local/share/rig/local/, which an upgrade never touches, and
+# neither does it touch a head of your own under heads/.
 #
 #   curl -fsSL https://github.com/torad-labs/rig/releases/latest/download/install.sh | sh
 #
@@ -50,9 +51,20 @@ tar -C "$staging/rig" -xzf "$staging/$asset" --strip-components=1
 # run before anything installed is replaced: a binary this machine cannot run keeps the old install
 version=$("$staging/rig/dist/rig" --version) || fail "the release's dist/rig does not run here"
 
-# each entry the release holds replaces the installed one; anything else under $home stays
+# each entry the release holds replaces the installed one; anything else under $home stays. heads/ is replaced head by
+# head: a head the user added beside the release's is theirs, and an upgrade keeps it
 for path in "$staging/rig"/*; do
   entry=$(basename "$path")
+  if [ "$entry" = heads ] && [ -d "$path" ] && [ -d "$home/heads" ] && [ ! -L "$home/heads" ]; then
+    mkdir "$staging/replaced-heads"
+    for head in "$path"/*; do
+      [ -e "$head" ] || continue
+      name=$(basename "$head")
+      if [ -e "$home/heads/$name" ]; then mv "$home/heads/$name" "$staging/replaced-heads/$name"; fi
+      mv "$head" "$home/heads/$name"
+    done
+    continue
+  fi
   if [ -e "$home/$entry" ]; then mv "$home/$entry" "$staging/replaced-$entry"; fi
   mv "$path" "$home/$entry"
 done

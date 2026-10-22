@@ -30,6 +30,7 @@ rig gate bonsai-2-27b                 # the head's probes on the gate card; evid
 rig describe bonsai-2-27b             # what the head is, as JSON, for whatever sits in front of it
 rig vast up bonsai-2-27b --gpu H100_SXM   # the same head on a rented card, through an ssh tunnel
 rig image glm-5.3-flash --push        # the head as a container image a rented box runs as is
+                                      # needs public-export.toml and registry.toml; the public copy has neither
 rig help
 ```
 

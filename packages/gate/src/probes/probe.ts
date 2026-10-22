@@ -28,6 +28,8 @@ export interface ProbeContext {
   cap: string;
   /** the cache formats the gate card's profile serves (the head's own without a card) */
   cache: CacheFormats;
+  /** the engine switches of the gate card's profile, as serve and the legs set them (gate-card.ts); none without a card */
+  engineEnv: Record<string, string>;
   fs: FileSystem;
   shell: Shell;
   log: Log;
@@ -45,6 +47,19 @@ export interface Probe {
   needs: "server" | "card" | "live";
   applies?(head: Head): string | null;
   run(ctx: ProbeContext): Promise<ProbeResult>;
+}
+
+/** where an engine binary a probe runs on the gate card (llama-bench) finds the card, its switches and its libraries:
+ *  the card by bus order, the profile's switches as serve sets them, the build's own runtime */
+export function benchEnv(
+  ctx: Pick<ProbeContext, "gpu" | "binDir" | "engineEnv">,
+): Record<string, string> {
+  return {
+    CUDA_DEVICE_ORDER: "PCI_BUS_ID",
+    CUDA_VISIBLE_DEVICES: String(ctx.gpu),
+    ...ctx.engineEnv,
+    LD_LIBRARY_PATH: ctx.binDir,
+  };
 }
 
 /** the live head a live probe was selected for; the service never runs one without it */

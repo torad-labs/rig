@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { layoutAt } from "@rig/core";
 import { loadHead } from "@rig/head";
-import { connectionRefused, fakePorts, repoRoot, withSidecarDraft } from "@rig/testing";
+import {
+  connectionRefused,
+  type FakePorts,
+  fakePorts,
+  repoRoot,
+  withSidecarDraft,
+} from "@rig/testing";
 import { GateServer } from "./gate-server.ts";
 
 const headToml = await Bun.file(`${repoRoot}/heads/bonsai-2-27b/head.toml`).text();
@@ -27,6 +33,28 @@ async function setup(toml = headToml) {
       "/r/local/gate-runs/run",
     ),
   };
+}
+
+/** llama-server on the gate port: /health answers only while a spawned server runs and once it has refused `loading`
+ *  polls (the pack still loading), so a port nothing holds refuses, as a real one does */
+function servers(p: FakePorts, loading = 0) {
+  p.shell.spawnExit = "on-kill";
+  let alive = 0;
+  let polls = 0;
+  const spawn = p.shell.spawn.bind(p.shell);
+  p.shell.spawn = (cmd, opts) => {
+    const proc = spawn(cmd, opts);
+    alive++;
+    polls = 0;
+    void proc.exited.then(() => {
+      alive--;
+    });
+    return proc;
+  };
+  p.http.on(/\/health$/, () => {
+    if (alive === 0 || polls++ < loading) throw connectionRefused();
+    return { status: 200, text: "" };
+  });
 }
 
 describe("gate server", () => {
@@ -139,7 +167,7 @@ describe("gate server", () => {
       "-c",
       "8192",
     ]);
-    p.http.json(/\/health$/, { status: "ok" });
+    servers(p);
     await expect(
       server.leg({ label: "d", pack: "/p.gguf", ctx: 8192, slots: 1, draft: true }, async () => 0),
     ).rejects.toThrow(
@@ -155,12 +183,7 @@ describe("gate server", () => {
   });
   test("start waits for health, logs to the run directory, and the leg stops the server whatever happens", async () => {
     const { p, server } = await setup();
-    p.shell.spawnExit = "on-kill"; // a live server, still loading its pack
-    let polls = 0;
-    p.http.on(/\/health$/, () => {
-      if (polls++ < 3) throw connectionRefused();
-      return { status: 200, text: "" };
-    });
+    servers(p, 3); // a live server, still loading its pack
     const value = await server.leg(
       { label: "one", pack: "/p.gguf", ctx: 8192, slots: 1 },
       async (c) => {
@@ -190,7 +213,7 @@ describe("gate server", () => {
   });
   test("a gate leg volunteers to be the memory killer's first victim", async () => {
     const { p, server } = await setup();
-    p.http.json(/\/health$/, { status: "ok" });
+    servers(p);
     await server.leg({ label: "one", pack: "/p.gguf", ctx: 8192, slots: 1 }, async () => 0);
     // raising is unprivileged and this process is the most disposable thing on the box: a gate
     // leg must be picked before someone's serving head or a paid run (scar 2026-09-20 03:28:38)
@@ -220,8 +243,83 @@ describe("gate server", () => {
     );
     expect(p.clock.slept.length).toBeLessThanOrEqual(1);
     // nothing left to stop: the next leg starts a fresh server
-    p.shell.spawnExit = "on-kill";
-    p.http.json(/\/health$/, { status: "ok" });
+    servers(p);
     await server.leg({ label: "next", pack: "/p.gguf", ctx: 8192, slots: 1 }, async () => 0);
+  });
+  test("a leg refuses a gate port something already answers on, and spawns nothing", async () => {
+    const { p, server } = await setup();
+    p.http.json(/\/health$/, { status: "ok" }); // a server no leg started: a head left on the gate port
+    await expect(
+      server.start({ label: "one", pack: "/p.gguf", ctx: 8192, slots: 1 }),
+    ).rejects.toThrow(
+      "gate port 8098 already answers /health before the one leg's server started: a server no leg owns holds it",
+    );
+    expect(p.shell.spawned).toHaveLength(0);
+  });
+  test("a leg whose own server exited is never handed the health of a port it does not hold", async () => {
+    const { p, server } = await setup();
+    p.shell.spawnExit = 1; // its bind failed: another process took the port after the leg looked
+    p.http.on(/\/health$/, () => {
+      if (p.shell.spawned.length === 0) throw connectionRefused();
+      return { status: 200, text: "" }; // answered by whoever holds the port
+    });
+    await expect(
+      server.start({ label: "one", pack: "/p.gguf", ctx: 8192, slots: 1 }),
+    ).rejects.toThrow(
+      "gate server one exited with code 1 before it answered — /r/local/gate-runs/run/server-one.log",
+    );
+  });
+  test("a server that ignores SIGINT is sent it again and then SIGKILL, and stop returns", async () => {
+    const { p, server } = await setup();
+    const signals: string[] = [];
+    p.shell.spawn = (cmd, opts) => {
+      p.shell.spawned.push({ cmd: [...cmd], ...(opts ? { opts } : {}) });
+      let exit: (code: number) => void = () => {};
+      const exited = new Promise<number>((resolve) => {
+        exit = resolve;
+      });
+      // a server wedged in its shutdown: SIGKILL is the one signal it cannot refuse
+      const kill = (signal = "SIGTERM") => {
+        signals.push(signal);
+        if (signal === "SIGKILL") exit(137);
+      };
+      return { pid: 4300, kill, exited };
+    };
+    p.http.on(/\/health$/, () => {
+      if (p.shell.spawned.length === 0) throw connectionRefused();
+      return { status: 200, text: "" };
+    });
+    await server.start({ label: "wedged", pack: "/p.gguf", ctx: 8192, slots: 1 });
+    await server.stop();
+    expect(signals).toEqual(["SIGINT", "SIGINT", "SIGKILL"]);
+    expect(p.log.lines.join("\n")).toContain(
+      "gate server wedged did not exit in 30 s of SIGINT: sending it again",
+    );
+  });
+  test("a server that exits on the second SIGINT is not killed", async () => {
+    const { p, server } = await setup();
+    const signals: string[] = [];
+    let exit: (code: number) => void = () => {};
+    p.shell.spawn = (cmd, opts) => {
+      p.shell.spawned.push({ cmd: [...cmd], ...(opts ? { opts } : {}) });
+      const exited = new Promise<number>((resolve) => {
+        exit = resolve;
+      });
+      return {
+        pid: 4300,
+        kill: (signal = "SIGTERM") => {
+          signals.push(signal);
+          if (signals.length === 2) exit(1); // llama-server's second signal: exit(1) at once
+        },
+        exited,
+      };
+    };
+    p.http.on(/\/health$/, () => {
+      if (p.shell.spawned.length === 0) throw connectionRefused();
+      return { status: 200, text: "" };
+    });
+    await server.start({ label: "slow", pack: "/p.gguf", ctx: 8192, slots: 1 });
+    await server.stop();
+    expect(signals).toEqual(["SIGINT", "SIGINT"]);
   });
 });

@@ -37,8 +37,13 @@ export interface Instance {
   directSsh?: { host: string; port: number };
   /** the card's utilization in percent as the market last sampled it; absent while it has none */
   gpuUtil?: number;
+  /** the box's CPU utilization in percent, the same sample. A lab box compiling or running a test suite against its
+   *  CPU reference reads a busy CPU beside an idle card, and is working (box 54511621, 2026-10-06: 95.5 beside 0.0) */
+  cpuUtil?: number;
   /** the image it runs, as created: name:tag, or a digest */
   image?: string;
+  /** the host's machine, as on the offer it was created from */
+  machineId?: number;
 }
 /** what a box rented from a template runs: the image, the login its registry needs, the on-start,
  *  the disk, and the offers it fits (the market's filters, e.g. { num_gpus: { eq: 2 } }) */

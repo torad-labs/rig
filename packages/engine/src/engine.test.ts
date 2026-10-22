@@ -106,7 +106,15 @@ const bool type_V_okay = V->type == (type_V) || (V->type == GGML_TYPE_F32 && (ty
     expect(miscompiles(e, "13.2.78", "120")).toContain("torad-labs/llama.cpp#56");
     expect(miscompiles(e, "13.2.86", "120")).toBeUndefined();
     expect(miscompiles(e, "13.2.78", "90")).toBeUndefined();
-    expect(miscompiles(e, null, "120")).toBeUndefined();
+  });
+  test("a toolkit whose version cannot be told from a miscompiler's is refused for that card, never let through", async () => {
+    const e = await engine();
+    // unreadable, or "release 13.2" with no ", V13.2.x": either may be 13.2.78
+    for (const nvcc of [null, "13.2"])
+      expect(miscompiles(e, nvcc, "120")).toContain("cannot be told from nvcc 13.2.78");
+    // a version that cannot be the listed one, or a card nothing is listed against
+    expect(miscompiles(e, "13.0", "120")).toBeUndefined();
+    expect(miscompiles(e, null, "90")).toBeUndefined();
   });
   test("a miscompiler entry needs the full nvcc version and a card", async () => {
     for (const [entry, path] of [

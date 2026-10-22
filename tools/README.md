@@ -4,7 +4,7 @@ What a developer of rig runs from the checkout and a user of rig never sees: the
 workspace. Nothing here ships in `dist/rig`.
 
 **Belongs here:** scripts run under `bun` from the checkout: the architecture lint behind `bun run
-lint` (`lint-architecture.ts`, with its test), the public export (`public-export.ts`), the
+lint` (`lint-architecture.ts`, with its test), the
 calibration-corpus recipe (`engine-corpus.ts`, which writes to the layout's `local/calibration/`),
 the flag-alias generator a pin move re-runs (`rendered-flag-aliases.ts`), and the bench and probe a
 head's evidence cites (`bench-head.ts`, `glm53-verify.ts`). A tool imports rig's packages by name

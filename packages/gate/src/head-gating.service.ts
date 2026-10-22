@@ -28,7 +28,7 @@ import { loadGates } from "./gates-config.ts";
 import type { HeadClient } from "./head-client.ts";
 import { LlamaClient } from "./llama-client.ts";
 import { selectProbes } from "./probe-selection.ts";
-import type { Probe, ProbeContext } from "./probes/probe.ts";
+import type { Probe, ProbeContext, ProbeResult } from "./probes/probe.ts";
 
 export type { RunGatesReport } from "./gate-run.ts";
 
@@ -105,6 +105,7 @@ export class RunGates {
       gpu,
       cap: card.value?.cap ?? "",
       cache: card.value?.cache ?? profileCache(head, {}),
+      engineEnv: card.value?.engineEnv ?? {},
       fs: this.deps.fs,
       shell: this.deps.shell,
       log: this.deps.log,
@@ -115,7 +116,9 @@ export class RunGates {
 
     for (const probe of probes) {
       this.deps.log.info(`== ${probe.name}`);
-      const result = await probe.run({ ...context, corpus });
+      const result = await probe
+        .run({ ...context, corpus })
+        .catch((error: unknown) => thrownResult(probe.name, error));
       for (const line of await run.record(result)) this.deps.log.info(line);
     }
 
@@ -147,6 +150,13 @@ export class RunGates {
     if (!source.ok) throw new Error(source.message);
     return engineCorpus(this.deps.fs, source.value, chars);
   }
+}
+
+/** a probe that threw (a leg's server that died, a reply that did not parse) is a failed probe: the run records it and
+ *  goes on, so its summary.json and gate.log still say what ran and why this one failed */
+function thrownResult(name: string, error: unknown): ProbeResult {
+  const message = error instanceof Error ? error.message : String(error);
+  return { name, pass: false, summary: `threw: ${message}`, lines: [], data: { error: message } };
 }
 
 /** --live alone means the head's own port; a URL names a head elsewhere; absent, no live probe */

@@ -105,7 +105,9 @@ export class VastAiRental implements Rental {
       ...(raw.ssh_host ? { sshHost: String(raw.ssh_host), sshPort: Number(raw.ssh_port) } : {}),
       ...directSsh(raw),
       ...(typeof raw.gpu_util === "number" ? { gpuUtil: raw.gpu_util } : {}),
+      ...(typeof raw.cpu_util === "number" ? { cpuUtil: raw.cpu_util } : {}),
       ...(raw.image_uuid ? { image: String(raw.image_uuid) } : {}),
+      ...(raw.machine_id ? { machineId: Number(raw.machine_id) } : {}),
     };
   }
   /** a `show` that fails (a 429) falls back to the listing: its row, card reading included, when

@@ -272,4 +272,12 @@ describe("vast up --template", () => {
     const r = await uc.upFromTemplate(head, { hours: 1 });
     expect(!r.ok && r.message).toContain("run rig vast template glm-5.3-flash");
   });
+
+  test("a template record that does not parse is refused by its path before anything is rented", async () => {
+    const { p, head, uc } = await setup();
+    p.fs.put(`${RECORD}/template.json`, '{"hashId": "a79f'); // cut short
+    const r = await uc.upFromTemplate(head, { hours: 1 });
+    expect(r.ok ? "rented" : r.message).toContain(`${RECORD}/template.json does not parse`);
+    expect(p.rental.instances.size).toBe(0);
+  });
 });

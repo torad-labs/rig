@@ -58,6 +58,7 @@ function machine(): FakePorts {
     p.git.committed.set(path, text);
   p.fs.files.set(TARBALL, Bun.gzipSync(new TextEncoder().encode("engine bytes")));
   p.fs.put(`/r/local/downloads/${SMOKE_MODEL.file}`, "smoke");
+  p.hasher.pinned.set(`/r/local/downloads/${SMOKE_MODEL.file}`, SMOKE_MODEL.sha256); // the pinned bytes
   p.shell.tools.add("gitleaks");
   p.shell.on(/^gitleaks/, { code: 0, stdout: "", stderr: "" });
   // bun bundles what the exported workspaces hold into the one binary
@@ -203,6 +204,20 @@ describe("rig image", () => {
     });
   });
 
+  test("the smoke model on disk is used only when it is the pinned bytes: anything else is fetched again", async () => {
+    const pinned = machine();
+    pinned.shell.on(/^curl/, { code: 22, stdout: "", stderr: "curl: (22) 404" });
+    expect((await build(pinned)).ok).toBe(true);
+    expect(pinned.shell.calls.some((c) => c[0] === "curl")).toBe(false);
+    // a file cut short, or another model under its name: the decode would prove nothing about this engine
+    const p = machine();
+    p.hasher.pinned.delete(`/r/local/downloads/${SMOKE_MODEL.file}`);
+    p.shell.on(/^curl/, { code: 22, stdout: "", stderr: "curl: (22) 404" });
+    const r = await build(p);
+    expect(r.ok ? "decoded" : r.message).toContain("download failed");
+    expect(p.shell.calls.some((c) => c[0] === "curl" && c.at(-1) === SMOKE_MODEL.url)).toBe(true);
+    expect(p.containers.runs.some((run) => run.cmd.includes("/smoke.gguf"))).toBe(false);
+  });
   test("an image that does not prove itself is not pushed: the engine missing, or a decode on the CPU", async () => {
     const p = machine();
     p.containers.on(/^rig prepare/, { code: 0, stdout: '{"built": false}', stderr: "" });
@@ -551,6 +566,54 @@ describe("rig image", () => {
     expect(dockerfile).toContain("rig build glm --cap 120 \\");
   });
 
+  test("a tarball a rented box sent back is never baked: only builds made here, and the pin's published bytes where it publishes one", async () => {
+    // the bytes of local/rented-box/cached-builds came back from a box someone else's code ran on
+    const cached = machine();
+    cached.fs.files.delete(TARBALL);
+    cached.fs.put("/r/local/rented-box/cached-builds/engine-sm120-a786bcd.tar.gz", "a box's bytes");
+    const fromBox = await build(cached);
+    expect(fromBox.ok ? "baked" : fromBox.message).toContain("no build of torad-labs/llama.cpp");
+    // where the pin publishes a build, a tarball baked in its place must be those bytes, named or found
+    const bytes = Bun.gzipSync(new TextEncoder().encode("engine bytes"));
+    const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    const published = {
+      ...engine,
+      prebuiltFor: () => ({ cap: "120", sha256 }),
+    } as unknown as Engine;
+    const bake = (p: FakePorts, fromTarball?: string) =>
+      new BuildImage(p, layout, published, PACKAGES, CREDENTIALS).run(head, {
+        gpu: 0,
+        push: false,
+        ...(fromTarball && { fromTarball }),
+      });
+    expect((await bake(machine())).ok).toBe(true);
+    const other = Bun.gzipSync(new TextEncoder().encode("another commit's build"));
+    for (const named of [undefined, TARBALL]) {
+      const p = machine();
+      p.fs.files.set(TARBALL, other);
+      const r = await bake(p, named);
+      expect(r.ok ? "baked" : r.message).toContain(
+        `is not the published build of torad-labs/llama.cpp @ a786bcd for sm_120 (sha256 ${sha256.slice(0, 12)}`,
+      );
+      expect(p.git.exported).toEqual([]);
+    }
+  });
+  test("every receipt is written by one rename: a reader (a template, a rental) never sees half of one", async () => {
+    const oneShot = machine();
+    expect((await build(oneShot)).ok).toBe(true);
+    expect(oneShot.fs.replaced).toContain(RECEIPT);
+    const here = machine();
+    expect((await buildOnly(here)).ok).toBe(true);
+    expect(here.fs.replaced).toEqual([RECEIPT]);
+    const built = JSON.parse(text(here, RECEIPT));
+    const card = cardMachine(built);
+    expect((await prove(card)).ok).toBe(true);
+    expect(card.fs.replaced).toEqual([RECEIPT]);
+    const back = machine();
+    back.fs.put(RECEIPT, text(card, RECEIPT));
+    const pushed = await pushProven(back, RECEIPT);
+    expect(pushed.ok ? back.fs.replaced : pushed.message).toEqual([RECEIPT]);
+  });
   test("a card the engine is not measured on is refused before anything is staged", async () => {
     const p = machine();
     p.gpu.card(0, { computeCap: "89", name: "NVIDIA L4" });

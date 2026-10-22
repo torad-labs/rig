@@ -128,10 +128,13 @@ describe("census probe", () => {
     ({
       head: { servedPath: "/packs/served.gguf" },
       cache: { k: "q4_0", v: "q4_0", s: "q8_0" }, // the gate card's profile's formats
-      gates: { census: { gen: 8, kernels: { sm120: FIX } } },
+      gates: {
+        census: { gen: 8, kernels: { sm120: FIX }, env: { GGML_CUDA_L2_ISSUE_LEGACY: "1" } },
+      },
       binDir: "/r/local/engine-builds/abc1234-sm120",
       gpu: 1,
       cap,
+      engineEnv: { GGML_CUDA_GRAPH_MAX: "0" }, // the card's profile's switches: the L2 issuer on, the engine's default
       shell,
       runDir: dir,
     }) as unknown as ProbeContext;
@@ -176,7 +179,14 @@ describe("census probe", () => {
       "-r",
       "1",
     ]);
-    expect(env[0]).toMatchObject({ CUDA_VISIBLE_DEVICES: "1" });
+    // the profile's switches, under the ones the table was taken with: the paced L2 issuer's launches are per card
+    // (its DRAM rate and L2), so the table is the issuer-off step and every card is counted with it off
+    expect(env[0]).toMatchObject({
+      CUDA_VISIBLE_DEVICES: "1",
+      GGML_CUDA_GRAPH_MAX: "0",
+      GGML_CUDA_L2_ISSUE_LEGACY: "1",
+    });
+    expect(result.data).toMatchObject({ env: { GGML_CUDA_L2_ISSUE_LEGACY: "1" } });
   });
   test("a moved count fails by name, and the lines end with the step as the table to paste", async () => {
     const result = await censusProbe.run(ctx(nsys([LEGACY, LEGACY, OTHER]).shell));

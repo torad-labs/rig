@@ -3,7 +3,7 @@
 // the evidence cites, not a verdict: the numbers are what a card does, and there is no threshold
 // that means anything across cards.
 import { benchCache } from "@rig/head";
-import type { Probe } from "./probe.ts";
+import { benchEnv, type Probe } from "./probe.ts";
 
 export const depthProbe: Probe = {
   name: "depth",
@@ -32,11 +32,7 @@ export const depthProbe: Probe = {
       "md",
     ];
     const bench = await ctx.shell.run(argv, {
-      env: {
-        CUDA_DEVICE_ORDER: "PCI_BUS_ID",
-        CUDA_VISIBLE_DEVICES: String(ctx.gpu),
-        LD_LIBRARY_PATH: ctx.binDir,
-      },
+      env: benchEnv(ctx),
       timeoutMs: 3_600_000,
     });
     if (bench.code !== 0) {

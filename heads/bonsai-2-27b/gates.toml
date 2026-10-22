@@ -137,8 +137,14 @@ min_gain = 1.0    # drafted tok/s over plain at this depth
 #    place (31164d6c9, 55d977423). The other 17 counts are the same on the two cards. The legs run the profile's
 #    state since fork 4104c47d5 (before it llama-bench's own f32): the served f16 state runs this same step, 6 of 7
 #    replays, 1,160 launches (RTX 5080, fork 16ad036c4's kernels, 2026-09-27).
+#    The table is the step with the engine's paced L2 issuer off, and every card is counted that way: with it on, each
+#    issue its plan keeps is one more launch in the step (l2_issue_paced, ggml/src/ggml-cuda/l2-issue.cu:71, started per
+#    issue at ggml-cuda.cu:2656), and the plan drops an issue under a MB of the card's own DRAM rate and L2 (ggml-cuda.cu
+#    :2611), so the count would differ between two sm120 cards. The table predates the issuer (fork 345065068,
+#    2026-09-29), which GGML_CUDA_L2_ISSUE_LEGACY=1 turns off (ggml-cuda.cu:2426).
 [census]
 gen = 8
+env = { GGML_CUDA_L2_ISSUE_LEGACY = "1" }
 [census.kernels.sm120]
 quantize_q8_1 = 257
 mmvq_pq2_mma = 193

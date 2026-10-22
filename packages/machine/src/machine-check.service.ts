@@ -150,7 +150,7 @@ export class CheckMachine {
     const libs = (this.engine.cuda?.runtime ?? []).flatMap((archive) => archive.libs);
     if (libs.length === 0) return false;
     const dir = this.engine.binDir(cap);
-    if (!(await isBuilt(this.deps.fs, dir))) return false;
+    if (!(await isBuilt(this.deps.fs, dir, this.engine))) return false;
     for (const lib of libs) if (!(await this.deps.fs.exists(join(dir, lib)))) return false;
     return true;
   }
@@ -236,7 +236,7 @@ export class CheckMachine {
       const held = staged ? Math.min(staged.size, staged.allocated) : 0;
       needs.push({ what: file.what, bytes: Math.max(0, file.bytes - held) });
     }
-    if (!(await isBuilt(this.deps.fs, this.engine.binDir(cap)))) {
+    if (!(await isBuilt(this.deps.fs, this.engine.binDir(cap), this.engine))) {
       needs.push({ what: "the engine", bytes: ENGINE_PEAK_BYTES });
     }
     return needs;

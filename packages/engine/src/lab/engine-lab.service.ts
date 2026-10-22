@@ -99,7 +99,8 @@ export interface AbReport {
   libs: { a: LoadedLib; b: LoadedLib };
   /** the arguments each side added to the run's own */
   args: { a: string[]; b: string[] };
-  /** every pair in the run's directory, an earlier invocation's included (--first continues a run) */
+  /** every pair in the run's directory, an earlier invocation's included (--first continues a run): each measured with
+   *  this one's settings, which `ab-<n>-settings.json` records beside it */
   pairs: AbPair[];
   /** how each arm's repetitions made its rate */
   stat: ArmRate;
@@ -117,6 +118,30 @@ export interface ProfileReport {
 }
 
 const LIB = "libggml-cuda.so.0";
+
+/** what one side of an A/B pair ran: its libggml-cuda by sha, the CUDA runtime beside it, the environment (cards,
+ *  loader path, switches) and its own llama-bench arguments */
+interface SideSettings {
+  lib: string;
+  runtime: Record<string, string>;
+  env: Record<string, string>;
+  args: string[];
+}
+
+/** what a pair of an A/B was measured with. A run's pairs fold into one change, so a pair joins only the pairs of the
+ *  same settings: the default --run is the minute, and a second A/B started within it, or a --first that continues a
+ *  run with another library, would otherwise read as more observations of the first. */
+interface PairSettings {
+  model: string;
+  reps: number;
+  extra: string[];
+  a: SideSettings;
+  b: SideSettings;
+}
+
+/** `record` with its keys in order, so two equal settings serialize to the same text */
+const sorted = (record: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(Object.entries(record).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)));
 
 /** The CUDA runtime libraries a pair must share. cuBLAS picks its GEMM algorithm by version, so two
  *  sides on different cuBLAS builds differ in summation order and the pair measures the runtime
@@ -331,6 +356,27 @@ export class EngineLab {
           `installed by rig carries the archives its publisher unpacked.`,
       );
     const args = { a: req.a.args ?? [], b: req.b.args ?? [] };
+    const sideSettings = (lib: LoadedLib, which: "a" | "b"): SideSettings => ({
+      lib: lib.sha,
+      runtime: sorted(lib.runtime),
+      env: sorted(this.env(target, sides[which])),
+      args: args[which],
+    });
+    const settings: PairSettings = {
+      model: req.model,
+      reps: req.reps,
+      extra: req.extra,
+      a: sideSettings(libA.value, "a"),
+      b: sideSettings(libB.value, "b"),
+    };
+    for (let pair = 1; await this.pairStarted(dir, pair); pair++) {
+      const other = await this.otherSettings(dir, pair, settings);
+      if (other)
+        return fail(
+          ExitCode.Failure,
+          `${dir}: ${other}, and a run's pairs fold into one change: give this A/B its own --run`,
+        );
+    }
     log.info(
       `a: libggml-cuda ${libA.value.sha} ${envText(req.a.env)} ${argsText(args.a)}`.trimEnd(),
     );
@@ -340,6 +386,7 @@ export class EngineLab {
     for (let pair = req.first; pair < req.first + req.pairs; pair++) {
       const order = pair % 2 === 1 ? (["a", "b"] as const) : (["b", "a"] as const);
       const rates: string[] = [];
+      await fs.writeText(this.settingsFile(dir, pair), `${JSON.stringify(settings)}\n`);
       for (const side of order) {
         const argv = [
           this.bin(target, "llama-bench"),
@@ -366,7 +413,7 @@ export class EngineLab {
       log.info(`pair ${pair}: ${rates.join("; ")}`);
     }
     const stat = req.stat ?? "mean";
-    const pairs = await this.pairsIn(dir, stat);
+    const pairs = await this.pairsIn(dir, stat, settings);
     if (!pairs.ok) return pairs;
     return ok({
       dir,
@@ -556,13 +603,55 @@ export class EngineLab {
     return differ;
   }
 
-  /** the pairs ab-<n>-a/b.jsonl in `dir`, from 1 up to the first one missing either side */
-  private async pairsIn(dir: string, stat: ArmRate): Promise<Result<AbPair[]>> {
+  private settingsFile(dir: string, pair: number): string {
+    return join(dir, `ab-${pair}-settings.json`);
+  }
+
+  /** whether pair `pair` left anything in `dir`: its settings or either side's bench */
+  private async pairStarted(dir: string, pair: number): Promise<boolean> {
+    const { fs } = this.ports;
+    for (const file of [`ab-${pair}-a.jsonl`, `ab-${pair}-b.jsonl`, `ab-${pair}-settings.json`])
+      if (await fs.exists(join(dir, file))) return true;
+    return false;
+  }
+
+  /** why pair `pair` in `dir` was not measured with `settings`, else null */
+  private async otherSettings(
+    dir: string,
+    pair: number,
+    settings: PairSettings,
+  ): Promise<string | null> {
+    const { fs } = this.ports;
+    const file = this.settingsFile(dir, pair);
+    if (!(await fs.exists(file))) return `pair ${pair} has no record of its settings`;
+    let recorded: Record<string, unknown>;
+    try {
+      recorded = JSON.parse(await fs.readText(file));
+    } catch {
+      return `pair ${pair}'s settings (${file}) do not parse`;
+    }
+    const differ = (Object.keys(settings) as (keyof PairSettings)[]).filter(
+      (key) => JSON.stringify(recorded[key]) !== JSON.stringify(settings[key]),
+    );
+    return differ.length === 0
+      ? null
+      : `pair ${pair} was measured with other settings (${differ.join(", ")} differ)`;
+  }
+
+  /** the pairs ab-<n>-a/b.jsonl in `dir`, from 1 up to the first one missing either side, each refused unless it was
+   *  measured with `settings` */
+  private async pairsIn(
+    dir: string,
+    stat: ArmRate,
+    settings: PairSettings,
+  ): Promise<Result<AbPair[]>> {
     const { fs } = this.ports;
     const pairs: AbPair[] = [];
     for (let pair = 1; ; pair++) {
       const [pa, pb] = [join(dir, `ab-${pair}-a.jsonl`), join(dir, `ab-${pair}-b.jsonl`)];
       if (!(await fs.exists(pa)) || !(await fs.exists(pb))) break;
+      const other = await this.otherSettings(dir, pair, settings);
+      if (other) return fail(ExitCode.Failure, `${dir}: ${other}`);
       const a = readBenchRate(await fs.readText(pa), stat);
       if (!a.ok) return a;
       const b = readBenchRate(await fs.readText(pb), stat);

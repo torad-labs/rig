@@ -228,8 +228,11 @@ describe("vast command", () => {
           ...args("up", { gpu: "RTX_5090", "max-hours": hours }),
           positionals: ["up", "bonsai-2-27b"],
         });
-      for (const rent of [lab, up]) {
-        for (const out of ["0", "0.1", "169"]) expect(await rent(out)).toBe(64);
+      // a template's boxes and the guard on them stop at the same bounded lifetime, never an 11-year one
+      const onHead = (sub: string) => (hours: string) =>
+        vast.run({ ...args(sub, { "max-hours": hours }), positionals: [sub, "bonsai-2-27b"] });
+      for (const rent of [lab, up, onHead("template"), onHead("guard")]) {
+        for (const out of ["0", "0.1", "169", "100000"]) expect(await rent(out)).toBe(64);
         for (const bad of ["-2", "soon"])
           await expect(rent(bad)).rejects.toBeInstanceOf(UsageError);
       }
@@ -237,6 +240,15 @@ describe("vast command", () => {
       expect(p.rental.ops).toEqual([]);
       expect(p.rental.instances.size).toBe(2);
     });
+  });
+  test("a subcommand named after an Object.prototype key is an unknown one: the usage line, not a TypeError", async () => {
+    const { p, uc } = await setup();
+    const guard = new GuardBox({ ...p, box: {} });
+    const sweep = new SweepStopped({ ...p, self: ["/r/dist/rig"] }, layoutAt("/r"));
+    const vast = gpuRentalCommand(uc, null, guard, sweep, async () => ok({} as never), p.log);
+    for (const sub of ["constructor", "toString", "__proto__", "hasOwnProperty"])
+      expect(await vast.run({ positionals: [sub], flags: { box: "1" }, dashed: [] })).toBe(64);
+    expect(p.log.lines.join("\n")).toContain("usage: rig vast");
   });
   test("the subcommands' flags are exactly the ones the usage line names", async () => {
     const source = await Bun.file(`${import.meta.dir}/vast.command.ts`).text();

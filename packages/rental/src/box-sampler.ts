@@ -24,6 +24,17 @@ export const SAMPLER_PATHS: SamplerPaths = {
 export const rxBytes = (source = "/proc/net/dev"): string =>
   `awk '/:/ { name = $0; sub(/:.*/, "", name); gsub(/ /, "", name); rest = $0; sub(/^[^:]*:/, "", rest); split(rest, f, " "); if (name != "lo") s += f[1] } END { printf "%.0f", s }' ${source} 2>/dev/null`;
 
+/** each card's utilization and memory, one card a line: "100, 0" */
+export const CARD_QUERY =
+  "nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits";
+/** below this a card holds no CUDA context, so nothing computes on it: an empty RTX PRO 6000 at 0 MiB with no process
+ *  read 100 % (the template's first box, 2026-09-28, box-guard.ts), which would have kept a lab box billing for good */
+export const EMPTY_CARD_MIB = 64;
+/** CARD_QUERY's lines as one percent a line, 0 for a card under EMPTY_CARD_MIB; a memory that is no number ([N/A] on
+ *  some virtual cards) keeps the percent as read, so a card nobody can size is never read idle */
+export const cardPercents = (): string =>
+  `awk -F', *' '{ print (($2 ~ /^[0-9]+$/ && $2 + 0 < ${EMPTY_CARD_MIB}) ? 0 : $1 + 0) }'`;
+
 /** the sampler's tick: a pull's seconds are its ticks times this */
 export const SAMPLER_TICK_SECONDS = 5;
 
@@ -38,7 +49,7 @@ export function samplerScript(
     `echo $$ > ${paths.pid}`,
     "n=0; p=; pt=",
     "while :; do",
-    "  u=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)",
+    `  u=$(${CARD_QUERY} 2>/dev/null | ${cardPercents()} | sort -n | tail -1)`,
     "  t=$(date +%s)",
     `  r=$(${rxBytes()})`,
     "  k=0",

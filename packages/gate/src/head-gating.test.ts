@@ -39,7 +39,23 @@ function fakeServers(
   const pack = () =>
     (p.shell.spawned.at(-1)?.cmd[2] ?? "").includes("ablated") ? "served" : "base";
   const drafted = () => (p.shell.spawned.at(-1)?.cmd ?? []).includes("--spec-type");
-  p.http.json(/\/health$/, { status: "ok" });
+  p.http.json(/\/health$/, { status: "ok" }); // the live head
+  // the gate port answers only while a leg's server runs, as a real port does
+  p.shell.spawnExit = "on-kill";
+  let legs = 0;
+  const spawn = p.shell.spawn.bind(p.shell);
+  p.shell.spawn = (cmd, opts) => {
+    const proc = spawn(cmd, opts);
+    legs++;
+    void proc.exited.then(() => {
+      legs--;
+    });
+    return proc;
+  };
+  p.http.on(/:8098\/health$/, () => {
+    if (legs === 0) throw connectionRefused();
+    return { status: 200, text: "" };
+  });
   p.http.on(/\/v1\/chat\/completions$/, (_u, body) => {
     const b = body as {
       messages: Array<{ content: string }>;
@@ -161,6 +177,16 @@ describe("gates.toml", () => {
     const { p, head } = await setup();
     const g = await loadGates(p.fs, head);
     expect(g.ok && g.value.gate.gpu).toBe(1);
+    // the census tables' regime: the paced L2 issuer off, its launches being per card
+    expect(g.ok && g.value.census.env).toEqual({ GGML_CUDA_L2_ISSUE_LEGACY: "1" });
+  });
+  test("a gate port that is the head's own is refused: the legs would measure the serving head, or never bind", async () => {
+    const { p, head } = await setup();
+    p.fs.put("/r/heads/bonsai-2-27b/gates.toml", gatesToml.replace("port = 8098", "port = 8099"));
+    const same = await loadGates(p.fs, head);
+    expect(!same.ok && same.message).toBe(
+      "gates.toml is invalid: gate.port 8099 is the port bonsai-2-27b serves on; the legs need a port of their own",
+    );
   });
   test("the legs run on one card: a head whose every profile spans several is refused before anything starts", async () => {
     const { p, head, engine } = await setup();
@@ -294,6 +320,13 @@ describe("gate", () => {
     await p.fs.remove(`${engine.binDir("120")}/BUILD`);
     r = await uc.run(head, { only: ["refusal"] });
     expect(!r.ok && r.message).toContain("no complete build");
+    // the pin installed from a tarball with another CUDA runtime beside it is not the pin's build
+    p.fs.put(
+      `${engine.binDir("120")}/BUILD`,
+      `fork=${engine.fork.sha} cap=sm_120 source=tarball:engine-sm120-${engine.sha7}.tar.gz runtime=000000000000`,
+    );
+    r = await uc.run(head, { only: ["refusal"] });
+    expect(!r.ok && r.message).toContain("no complete build");
     p.fs.put(`${engine.binDir("120")}/BUILD`, "x");
     p.hasher.pinned.set(head.servedPath, "0".repeat(64));
     r = await uc.run(head, { only: ["refusal"] });
@@ -361,6 +394,23 @@ describe("gate", () => {
     ).toBe(true);
     const summary = JSON.parse(p.fs.text(`${r.value.dir}/summary.json`)!);
     expect(summary).toMatchObject({ cache: { k: "q4_0", v: "q4_0", s: "f16" }, profile: null });
+  });
+  test("depth's llama-bench runs the card's profile's engine switches, as serve sets them", async () => {
+    const { p, head, uc } = await setup();
+    p.gpu.card(1, { name: "NVIDIA GeForce RTX 5090", memoryMiB: 32607 }); // the 5090 profile: l2_issue = false
+    fakeServers(p);
+    let env: Record<string, string> = {};
+    p.shell.on(/llama-bench/, (_cmd, opts) => {
+      env = opts?.env ?? {};
+      return { code: 0, stdout: "| model | test | t/s |\n| x | pp512 | 1382 |\n", stderr: "" };
+    });
+    const r = await uc.run(head, { only: ["depth"] });
+    expect(r.ok).toBe(true);
+    expect(env).toMatchObject({
+      CUDA_VISIBLE_DEVICES: "1",
+      GGML_CUDA_GRAPH_MAX: expect.any(String),
+      GGML_CUDA_L2_ISSUE_LEGACY: "1",
+    });
   });
   test("depth runs llama-bench on the card with the head's cache types and is measured, never judged", async () => {
     const { p, head, uc } = await setup();
@@ -515,6 +565,32 @@ describe("gate", () => {
     expect(!r.ok && r.message).toBe(
       "speculative does not apply to bonsai-2-27b: the head declares no draft head ([speculative])",
     );
+  });
+  test("a probe that throws fails the run by name, the probes after it run, and summary.json and gate.log are written", async () => {
+    const { p, head, layout, engine } = await setup();
+    const throws: Probe = {
+      name: "throws",
+      needs: "card",
+      run: async () => {
+        throw new Error("gate server throws-base exited with code 1 before it answered");
+      },
+    };
+    const after: Probe = {
+      name: "after",
+      needs: "card",
+      run: async () => ({ name: "after", pass: true, summary: "ok", lines: [], data: null }),
+    };
+    const r = await new RunGates(p, layout, engine, [throws, after]).run(head, {});
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.message).toContain("throws FAILED — ");
+    const dir = r.message.split(" — ")[1]!.replace(/\/gate\.log$/, "");
+    const threw = "threw: gate server throws-base exited with code 1 before it answered";
+    expect(JSON.parse(p.fs.text(`${dir}/summary.json`)!).probes).toEqual([
+      { name: "throws", pass: false, summary: threw },
+      { name: "after", pass: true, summary: "ok" },
+    ]);
+    expect(p.fs.text(`${dir}/gate.log`)).toContain(`FAIL throws: ${threw}`);
   });
   test("a probe that does not apply is skipped, not failed, and named (probe and reason) in summary.json and gate.log", async () => {
     const { p, head, layout, engine } = await setup();
